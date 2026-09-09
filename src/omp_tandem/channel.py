@@ -22,6 +22,7 @@ from mcp.server.stdio import stdio_server
 from pydantic import BaseModel
 
 from .events import EventConflict, EventStore, QueueFull
+from .prompts import POLLING_INSTRUCTIONS, PUSH_INSTRUCTIONS
 from .webhook import WebhookRejected, WebhookServer
 
 logger = logging.getLogger(__name__)
@@ -189,18 +190,40 @@ class ChannelDelivery:
         elif status == "waiting_input" and question_id:
             self.store.acknowledge_key(self.owner, f"question:{question_id}")
 
+    @property
+    def delivery(self):
+        return "push" if self.confirmed and not self.closed else "poll"
+
+    @property
+    def delivery_instructions(self):
+        return PUSH_INSTRUCTIONS if self.delivery == "push" else POLLING_INSTRUCTIONS
+
     def decorate(self, result):
-        result["delivery"] = "push" if self.confirmed and not self.closed else "poll"
+        result["delivery"] = self.delivery
+        result["delivery_instructions"] = self.delivery_instructions
+        if "ready" in result and "pending" in result:
+            result["next_action"] = (
+                "handle_ready"
+                if result["ready"]
+                else "await_event"
+                if result["delivery"] == "push"
+                else "wait"
+            )
         if result["delivery"] == "push" and (
             result.get("status") in ("starting", "running", "cancelling")
             or (result.get("accepted") and "question_id" in result)
         ):
             result["next_action"] = "await_event"
+        elif (
+            result["delivery"] == "poll" and result.get("next_action") == "await_event"
+        ):
+            result["next_action"] = "wait"
         return result
 
     def status(self):
         return {
-            "delivery": "push" if self.confirmed and not self.closed else "poll",
+            "delivery": self.delivery,
+            "delivery_instructions": self.delivery_instructions,
             "confirmed": self.confirmed and not self.closed,
             "probe_pending": bool(
                 self.probe_token

@@ -124,7 +124,7 @@ uv build --wheel
 
 `pytest` is a declared development dependency; `uv` installs the project package and its `omp_rpc` dependency into the same environment. Tests use temporary stores and local fault peers, not provider credentials. CI runs pytest, Ruff, wheel building, and distribution checks on Linux and macOS.
 
-This repository begins with a reviewed snapshot of earlier private development. **3.0.1** preserves that version lineage without importing its Git history. “Legacy history” refers to local OMP conversation data, not hidden Git commits.
+This repository begins with a reviewed snapshot of earlier private development. The **3.x** version series preserves that lineage without importing its Git history. “Legacy history” refers to local OMP conversation data, not hidden Git commits.
 
 ## License
 

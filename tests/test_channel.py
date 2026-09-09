@@ -170,6 +170,47 @@ class ChannelDeliveryTests(unittest.IsolatedAsyncioTestCase):
         await self.confirm()
         await self.wait_for_event(event["event_id"])
 
+    async def test_delivery_procedure_tracks_receipt_and_transport_fallback(self):
+        polling = self.delivery.decorate({"status": "running", "next_action": "wait"})
+        with self.assertRaises(ValueError):
+            await self.delivery.confirm("not-a-received-token")
+        self.assertEqual(
+            self.delivery.status()["delivery_instructions"],
+            polling["delivery_instructions"],
+        )
+        await self.confirm()
+        pushed = self.delivery.decorate({"status": "running", "next_action": "wait"})
+        pending = self.delivery.decorate({"ready": [], "pending": [str(uuid4())]})
+        ready = self.delivery.decorate(
+            {"ready": [{"status": "completed"}], "pending": []}
+        )
+        self.assertEqual(pending["next_action"], "await_event")
+        self.assertEqual(ready["next_action"], "handle_ready")
+        self.assertEqual(
+            (pushed["delivery"], pushed["next_action"]), ("push", "await_event")
+        )
+        self.assertNotEqual(
+            pushed["delivery_instructions"], polling["delivery_instructions"]
+        )
+        self.assertEqual(
+            self.delivery.status()["delivery_instructions"],
+            pushed["delivery_instructions"],
+        )
+        self.parent.fail = True
+        self.delivery.emit("task_failed", {}, task_id=str(uuid4()))
+        async with asyncio.timeout(4):
+            while self.delivery.confirmed:
+                await asyncio.sleep(0.02)
+        restored = self.delivery.decorate(pushed)
+        self.assertEqual(self.delivery.decorate(pending)["next_action"], "wait")
+        self.assertEqual(self.delivery.decorate(ready)["next_action"], "handle_ready")
+        self.assertEqual(
+            (restored["delivery"], restored["next_action"]), ("poll", "wait")
+        )
+        self.assertEqual(
+            restored["delivery_instructions"], polling["delivery_instructions"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

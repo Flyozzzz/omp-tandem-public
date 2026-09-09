@@ -2,7 +2,7 @@
 
 [Back to README](../README.md) · [Русский README](../README.ru.md) · [中文 README](../README.zh-CN.md)
 
-This reference describes optional delivery for OMP Tandem 3.0.1. The normal MCP polling workflow works without Channels. Channels are a Claude Code feature, not a portable MCP guarantee and not a permission-approval relay.
+This reference describes optional delivery for OMP Tandem 3.0.2. The normal MCP polling workflow works without Channels. Channels are a Claude Code feature, not a portable MCP guarantee and not a permission-approval relay.
 
 ## Choose the delivery mode
 

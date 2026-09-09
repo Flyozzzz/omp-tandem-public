@@ -164,14 +164,4 @@ class TaskResults:
                 ready.append(state)
             else:
                 pending.append(identifier)
-        delivery = self.tasks.channel.status()["delivery"]
-        return {
-            "ready": ready,
-            "pending": pending,
-            "delivery": delivery,
-            "next_action": "handle_ready"
-            if ready
-            else "await_event"
-            if delivery == "push"
-            else "wait",
-        }
+        return self.tasks.channel.decorate({"ready": ready, "pending": pending})

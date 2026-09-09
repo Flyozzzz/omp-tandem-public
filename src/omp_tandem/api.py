@@ -15,7 +15,7 @@ from .bridge import Bridge
 from .channel import ChannelFastMCP
 from .models import ArtifactInfo, TaskContract, TurnContract
 from .project_context import ProjectContext
-from .prompts import INSTRUCTIONS
+from .prompts import coordinator_instructions
 from .runtime_models import ACTIVE, Mode, TaskSummary
 from .workspace import client_root_paths
 
@@ -31,6 +31,11 @@ async def granted_roots(ctx: Context):
 
 def build_server(configuration: Bridge | RuntimeOptions):
     runtime = BridgeBinding(configuration)
+    channels_enabled = (
+        configuration.channel.enabled
+        if isinstance(configuration, Bridge)
+        else configuration.channel_enabled
+    )
 
     @asynccontextmanager
     async def lifespan(_server):
@@ -43,7 +48,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
     mcp = ChannelFastMCP(
         "omp-tandem",
         version=version("omp-tandem"),
-        instructions=INSTRUCTIONS,
+        instructions=coordinator_instructions(channels_enabled),
         lifespan=lifespan,
         binding=runtime,
     )
@@ -57,7 +62,9 @@ def build_server(configuration: Bridge | RuntimeOptions):
         This is data isolation, not an OS filesystem sandbox.
         """
         bridge = await runtime.get(ctx)
-        return {**bridge.scope.info(), "migration": bridge.migration}
+        return bridge.channel.decorate(
+            {**bridge.scope.info(), "migration": bridge.migration}
+        )
 
     @mcp.tool()
     async def tandem_start(
@@ -246,7 +253,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 or result["delivery"] == "push"
                 or time.monotonic() >= deadline
             ):
-                return result
+                return bridge.channel.decorate(result)
             await asyncio.sleep(0.15)
 
     @mcp.tool()
@@ -359,18 +366,20 @@ def build_server(configuration: Bridge | RuntimeOptions):
             changed = await asyncio.to_thread(
                 bridge.channel.store.acknowledge, bridge.channel.owner, event_id
             )
-            return {
-                "acknowledged": True,
-                "new_acknowledgment": changed,
-                "event_id": event_id,
-            }
+            return bridge.channel.decorate(
+                {
+                    "acknowledged": True,
+                    "new_acknowledgment": changed,
+                    "event_id": event_id,
+                }
+            )
         if action == "pending":
             events = await asyncio.to_thread(
                 bridge.channel.store.pending,
                 None if include_previous else bridge.channel.owner,
                 limit,
             )
-            return {"events": events, "delivery": bridge.channel.status()["delivery"]}
+            return bridge.channel.decorate({"events": events})
         if (event_id is None) == (task_id is None):
             raise ValueError("recover requires exactly one of event_id or task_id")
         if event_id is not None:
@@ -393,6 +402,6 @@ def build_server(configuration: Bridge | RuntimeOptions):
             )
             result = {"recovered": count, "task_id": task_id}
         bridge.channel.signal()
-        return {**result, "delivery": bridge.channel.status()["delivery"]}
+        return bridge.channel.decorate(result)
 
     return mcp

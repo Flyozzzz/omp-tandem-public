@@ -217,6 +217,8 @@ class ChannelStdioTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_poll_mode_keeps_original_workflow(self):
         await self.start(disabled=True)
+        scope = await self.call("tandem_scope", {})
+        self.assertEqual(scope["delivery"], "poll")
         job = await self.call(
             "tandem_start",
             {
@@ -227,6 +229,7 @@ class ChannelStdioTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual((job["delivery"], job["next_action"]), ("poll", "wait"))
+        self.assertEqual(job["delivery_instructions"], scope["delivery_instructions"])
         result = await self.call(
             "tandem_result", {"task_id": job["task_id"], "wait_seconds": 5}
         )
@@ -236,6 +239,12 @@ class ChannelStdioTests(unittest.IsolatedAsyncioTestCase):
         status = await self.call("tandem_channel", {"action": "status"})
         self.assertFalse(status["confirmed"])
         self.assertFalse(status["webhook"]["enabled"])
+        self.assertEqual(
+            result["delivery_instructions"], scope["delivery_instructions"]
+        )
+        self.assertEqual(
+            status["delivery_instructions"], scope["delivery_instructions"]
+        )
         self.assertEqual(self.notifications, [])
 
 
