@@ -152,6 +152,10 @@ A typical JSON client configuration is:
 
 Use the client's documented stdio schema and workspace-binding mechanism. Do not copy `${PLUGIN_ROOT}` or `${CLAUDE_PLUGIN_ROOT}` into a client that does not expand them. Leave the caller's intended working directory intact; never set it to the package directory to make imports work. The canonical launcher handles dependencies and package imports itself. Manual MCP does not install skills or hooks; the tools remain fully usable without either.
 
+### Optional one-command Claude launch
+
+For a user who wants the webhook without retyping environment variables and channel flags, follow the `claude-tandem` shell-function instructions in `docs/guide.md#one-command-launch` (localized guides are available). Explain and get consent before editing their shell configuration. This is currently manual setup, not an automatically installed launcher. Use the development-plugin channel identity for a custom channel; do not confuse it with the standalone server or an allowlisted plugin. Do not add `--dangerously-skip-permissions` by default, replace the ordinary `claude` command, or claim a hook can enable parent-process Channels.
+
 ## 6. Confirm the right boundary before using a model
 
 After reconnecting, discover the actual namespaced `tandem_scope` tool and check its project identity from the intended workspace. It must not refer to a plugin cache or an unrelated project. Data isolation is not an OS sandbox; additional work directories do not grant access to another project's MCP history. Keep legacy migration copy-only and use explicit export/import for authorized context sharing.

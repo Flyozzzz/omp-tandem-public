@@ -101,6 +101,7 @@ flowchart LR
 | 主题 | 参考 |
 |---|---|
 | 安装、提供商和客户端 | [完整指南](docs/guide.zh-CN.md) |
+| 用一条简短命令启动 Claude 和 Webhook | [设置 `claude-tandem`](docs/guide.zh-CN.md#one-command-launch) |
 | 任务、模式、结果、问题和产物 | [任务流程](docs/guide.zh-CN.md#tasks-and-execution-modes) |
 | 产品规则和决策 | [产品知识](docs/guide.zh-CN.md#product-knowledge-and-decisions) |
 | 工作区隔离和显式共享 | [项目隔离](docs/guide.zh-CN.md#project-isolation) |

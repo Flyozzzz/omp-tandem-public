@@ -6,6 +6,8 @@ This reference describes optional delivery for OMP Tandem 3.0.1. The normal MCP 
 
 ## Choose the delivery mode
 
+For the installed OMP Tandem custom channel, the recommended convenience path is the one-time [`claude-tandem` shell function](guide.md#one-command-launch) ([Russian](guide.ru.md#one-command-launch), [中文](guide.zh-CN.md#one-command-launch)). It wraps the explicit development-plugin flag and environment, preserves cwd/arguments, and does not add a permission bypass. It is not automatically installed by the plugin.
+
 Run the launcher from the project directory. Set `TANDEM_ROOT` to the actual installed package or checkout, not a guessed cache version.
 
 ```sh
@@ -13,7 +15,7 @@ Run the launcher from the project directory. Set `TANDEM_ROOT` to the actual ins
 uv run --no-project --python '>=3.12' python -I \
   "$TANDEM_ROOT/scripts/launch.py" --delivery poll
 
-# Installed Claude plugin, subject to client consent and organization policy.
+# Only for a plugin on the host's approved channel allowlist, not installation alone.
 uv run --no-project --python '>=3.12' python -I \
   "$TANDEM_ROOT/scripts/launch.py" --approved-plugin omp-tandem@omp-tandem
 

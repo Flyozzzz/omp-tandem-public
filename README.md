@@ -101,6 +101,7 @@ Read the [security policy](SECURITY.md) before reporting a vulnerability. Never 
 | Topic | Reference |
 |---|---|
 | Installation, providers, and clients | [Complete guide](docs/guide.md) |
+| Start Claude and the webhook with one short command | [Set up `claude-tandem`](docs/guide.md#one-command-launch) |
 | Tasks, modes, results, questions, and artifacts | [Task workflow](docs/guide.md#tasks-and-execution-modes) |
 | Product rules and decisions | [Product knowledge](docs/guide.md#product-knowledge-and-decisions) |
 | Workspace isolation and explicit sharing | [Project isolation](docs/guide.md#project-isolation) |

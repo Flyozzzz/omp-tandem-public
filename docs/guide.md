@@ -485,7 +485,46 @@ Polling is the normal, fully functional path for every supported MCP client. Use
 
 Claude Code can optionally deliver task/question/webhook events through Channels. A launch flag or connected MCP server does not prove delivery: the coordinator must acknowledge a probe token received from a real channel event before `delivery=push` is confirmed.
 
-For an installed Claude plugin:
+<a id="one-command-launch"></a>
+### One-command launch: `claude-tandem`
+
+For the OMP Tandem custom channel, keep the explicit development-plugin opt-in but put the working environment and flags in a shell function. Add this **once** to `~/.zshrc` (for zsh), after reviewing it:
+
+```sh
+claude-tandem() {
+  OMP_TANDEM_CHANNEL=1 \
+  MCP_PROTOCOL_NEGOTIATION=legacy \
+  OMP_TANDEM_WEBHOOK=1 \
+  OMP_TANDEM_WEBHOOK_PORT=0 \
+    command claude \
+      --dangerously-load-development-channels plugin:omp-tandem@omp-tandem \
+      "$@"
+}
+```
+
+Reload the shell configuration, then launch from the intended project:
+
+```sh
+source ~/.zshrc
+claude-tandem
+claude-tandem --resume
+```
+
+This preserves the current directory and forwards arguments without replacing the ordinary `claude` command. The function does not depend on a versioned plugin cache path.
+
+This is a **manual, one-time shell setup**, not a launcher automatically installed by the plugin. Hooks cannot retroactively enable Channels in their parent Claude process. Development-channel consent and organization policy still apply; the webhook becomes available only after the normal channel receipt confirmation.
+
+`--dangerously-skip-permissions` does not enable the webhook. It separately bypasses many tool-permission prompts, so it is deliberately absent from the default function. If you explicitly want that mode in a trusted environment:
+
+```sh
+claude-tandem --dangerously-skip-permissions
+```
+
+Without that flag, approve normal tool requests when needed, including channel confirmation. Do not treat silence or an unconfirmed probe as working push delivery.
+
+### Other launch routes
+
+For a plugin already approved by the host's channel allowlist—not merely installed:
 
 ```sh
 uv run --no-project --python '>=3.12' python -I \

@@ -508,7 +508,46 @@ OMP 自身会获得绑定到其任务的宿主工具：`tandem_ask`、`tandem_fi
 
 Claude Code 可以选择通过 Channels 投递任务／问题／Webhook 事件。启动标志或已连接的 MCP 服务器并不能证明投递正常：协调者必须确认从真实通道事件收到的探测令牌，之后才会确认 `delivery=push`。
 
-对于已安装的 Claude 插件：
+<a id="one-command-launch"></a>
+### 一条命令启动：`claude-tandem`
+
+对于 OMP Tandem 自定义通道，仍需显式允许 development 插件，但可以把工作所需的环境变量和参数放入 shell 函数。审阅后，**一次性**添加到 `~/.zshrc`（适用于 zsh）：
+
+```sh
+claude-tandem() {
+  OMP_TANDEM_CHANNEL=1 \
+  MCP_PROTOCOL_NEGOTIATION=legacy \
+  OMP_TANDEM_WEBHOOK=1 \
+  OMP_TANDEM_WEBHOOK_PORT=0 \
+    command claude \
+      --dangerously-load-development-channels plugin:omp-tandem@omp-tandem \
+      "$@"
+}
+```
+
+重新加载 shell 配置，然后从目标项目目录启动：
+
+```sh
+source ~/.zshrc
+claude-tandem
+claude-tandem --resume
+```
+
+该函数保留当前工作目录并转发参数，不会替换普通的 `claude` 命令，也不依赖某个插件缓存版本的路径。
+
+这是**一次性的手动 shell 设置**，并不是插件已经自动安装的启动器。Hook 无法事后为父 Claude 进程启用 Channels。Development 通道的信任确认和组织策略仍然适用；Webhook 只有在正常确认收到通道事件后才可用。
+
+`--dangerously-skip-permissions` 不负责启用 Webhook。它会单独绕过许多工具权限提示，因此默认函数刻意不包含该参数。如果你明确决定在可信环境中使用此模式：
+
+```sh
+claude-tandem --dangerously-skip-permissions
+```
+
+不使用该参数时，请按需批准正常的工具请求，包括通道确认。没有回应或尚未确认的探测并不代表推送正常工作。
+
+### 其他启动方式
+
+对于已经获得宿主通道允许列表批准的插件，而不只是已安装的插件：
 
 ```sh
 uv run --no-project --python '>=3.12' python -I \

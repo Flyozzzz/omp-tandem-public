@@ -101,6 +101,7 @@ flowchart LR
 | Тема | Материал |
 |---|---|
 | Установка, провайдеры и клиенты | [Полное руководство](docs/guide.ru.md) |
+| Запуск Claude и webhook одной короткой командой | [Настроить `claude-tandem`](docs/guide.ru.md#one-command-launch) |
 | Задачи, режимы, ответы, вопросы и артефакты | [Рабочий процесс](docs/guide.ru.md#tasks-and-execution-modes) |
 | Правила продукта и решения | [База знаний продукта](docs/guide.ru.md#product-knowledge-and-decisions) |
 | Изоляция и явная передача контекста | [Пространства проектов](docs/guide.ru.md#project-isolation) |
