@@ -96,7 +96,7 @@ class ChannelDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.delivery.seen(task_id, "completed")
         self.assertEqual(self.delivery.store.pending(self.delivery.owner), [])
         self.assertEqual(
-            self.delivery.decorate({"status": "running"})["next_action"], "await_event"
+            self.delivery.decorate({"status": "running"})["next_action"], "wait"
         )
 
     def post(self, body):
@@ -184,11 +184,9 @@ class ChannelDeliveryTests(unittest.IsolatedAsyncioTestCase):
         ready = self.delivery.decorate(
             {"ready": [{"status": "completed"}], "pending": []}
         )
-        self.assertEqual(pending["next_action"], "await_event")
+        self.assertEqual(pending["next_action"], "wait")
         self.assertEqual(ready["next_action"], "handle_ready")
-        self.assertEqual(
-            (pushed["delivery"], pushed["next_action"]), ("push", "await_event")
-        )
+        self.assertEqual((pushed["delivery"], pushed["next_action"]), ("push", "wait"))
         self.assertNotEqual(
             pushed["delivery_instructions"], polling["delivery_instructions"]
         )

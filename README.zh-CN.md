@@ -22,6 +22,9 @@
 - **隔离的知识。** 分离项目历史，可选用版本化产品规则，并显式共享上下文。
 - **诚实的结果。** 结构化结果、带期限的问题，以及可恢复的中间产物。
 - **可移植集成。** Claude Code 插件、面向 Codex 的 Agent Plugins 包，以及适用于其他宿主的本地 stdio MCP。
+- **3.1.0 快照审查。** [固定代码与证据，先独立判断再比较作者方案](docs/guide.zh-CN.md#snapshot-reviews)，并[追踪问题的确认与修复验证](docs/guide.zh-CN.md#finding-lifecycle)。
+- **可解释的执行。** [逐轮选择计算配置，分别查看实际模型、令牌与已知费用](docs/guide.zh-CN.md#execution-and-accounting)。
+- **可靠接收。** [可选看门狗与有界轮询](docs/guide.zh-CN.md#polling-channels-and-webhooks)、[结果处理凭据](docs/guide.zh-CN.md#result-receipts)和[当前客户端诊断](docs/guide.zh-CN.md#live-diagnostics)明确区分投递、处理与验证。
 
 软件包不包含特定公司的规则或硬编码项目路径。
 
@@ -57,7 +60,7 @@ codex plugin marketplace add Flyozzzz/omp-tandem-public
 codex plugin add omp-tandem@omp-tandem --json
 ```
 
-从目标项目目录启动新会话。不要同时启用旧的独立 MCP 注册和插件。仓库仍为私有时需要访问权限；这些命令不会绕过 GitHub 权限。
+从目标项目目录启动新会话。不要同时启用旧的独立 MCP 注册和插件。[仓库公开可访问](https://github.com/Flyozzzz/omp-tandem-public)，无需访问邀请。
 
 Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍由用户明确完成。其他客户端可使用[标准 MCP 配置](docs/guide.zh-CN.md#other-mcp-clients)。
 
@@ -90,8 +93,8 @@ flowchart LR
 - 项目数据绑定到**客户端提供的可信工作区信息**，而不是模型在任务中传入的 `cwd`。其他项目的 ID 不会开放其历史。
 - 软件包**不会对具有你操作系统权限的进程实施文件系统沙箱**。宿主的 shell 沙箱设置不会自动限制外部 OMP 进程。
 - 报告是智能体的声明，而非独立验收。`completed` 不代表已证明 `success`。
-- Hooks 只诊断缺失的可执行工具；不会安装工具、读取凭据、批准权限或阻塞轮次。
-- Polling 不依赖 Channels。Claude 推送和 Webhook 是可选功能，仍受客户端及组织策略约束。
+- Claude 钩子提供前置工具诊断和可选的有界看门狗；不会安装工具、读取凭据、批准权限、启动任务或返回任务答案。
+- 轮询不依赖 Channels 或钩子。推送确认本身不足以无限等待事件；只有当前有效的独立看门狗已就绪时才使用 `await_event`，否则使用有界等待。
 - 本地存储不等于离线推理：已配置的提供商会收到任务上下文。
 
 报告漏洞前请阅读[安全政策](SECURITY.md)。不要在 issues 或 pull requests 中包含凭据、私有对话或运行时数据库。

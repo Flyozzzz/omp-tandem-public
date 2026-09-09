@@ -4,6 +4,7 @@ import json
 from contextlib import closing
 
 from .artifacts import ArtifactStore
+from .execution import conversation_usage, task_usage
 from .project_context import ProjectContextStore
 from .runtime_models import ACTIVE, TaskSummary
 from .task_contracts import current_task, work_policy
@@ -40,6 +41,38 @@ class TaskResults:
             if report and status == "completed"
             else "",
             "next_action": action,
+        }
+        if task.get("review_id"):
+            result["review"] = {
+                "review_id": task["review_id"],
+                "stage": task["review_stage"],
+            }
+        result["execution"] = {
+            **(
+                json.loads(task["execution_json"])
+                if task.get("execution_json")
+                else {
+                    "requested": None,
+                    "effective": None,
+                }
+            ),
+            "actual": {
+                "model": task.get("actual_model"),
+                "thinking": task.get("actual_thinking"),
+            },
+        }
+        with closing(self.tasks.connect()) as db:
+            turns = [
+                dict(row)
+                for row in db.execute(
+                    "SELECT accounting_json, started_at, ended_at, duration_seconds, status "
+                    "FROM tasks WHERE conversation_id=? ORDER BY created, task_id",
+                    (task["conversation_id"],),
+                )
+            ]
+        result["usage"] = {
+            "task": task_usage(task),
+            "conversation": conversation_usage(turns),
         }
         if task["activity"] and status in ACTIVE:
             result["activity"] = task["activity"]

@@ -15,6 +15,8 @@ from pydantic import (
     model_validator,
 )
 
+from .findings import FindingDraft, FindingUpdate
+
 __all__ = [
     "ArtifactInfo",
     "RuleReference",
@@ -129,6 +131,8 @@ class TaskOutcome(_ContractModel):
     decision_references: list[
         Annotated[_NonBlank, StringConstraints(max_length=100)]
     ] = Field(default_factory=list, max_length=100)
+    findings: list[FindingDraft] = Field(default_factory=list, max_length=100)
+    finding_updates: list[FindingUpdate] = Field(default_factory=list, max_length=100)
 
     @model_validator(mode="after")
     def validate_outcome(self) -> Self:

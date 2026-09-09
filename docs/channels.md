@@ -2,7 +2,7 @@
 
 [Back to README](../README.md) · [Русский README](../README.ru.md) · [中文 README](../README.zh-CN.md)
 
-This reference describes optional delivery for OMP Tandem 3.0.2. The normal MCP polling workflow works without Channels. Channels are a Claude Code feature, not a portable MCP guarantee and not a permission-approval relay.
+This reference describes optional delivery for OMP Tandem 3.1.0. Bounded MCP polling works without Channels or hooks. Channels are a Claude Code feature, not a portable MCP guarantee and not a permission-approval relay.
 
 ## Choose the delivery mode
 
@@ -38,9 +38,11 @@ The plugin declares its `omp-tandem` MCP server as a channel. Standalone and plu
 4. The coordinator acknowledges only a token actually received from that channel event, using `tandem_channel(action="ack", probe_token=...)`.
 5. Only successful receipt confirmation sets `delivery="push"` and permits webhook startup.
 
-A connected MCP server, manifest declaration, or launch flag is not evidence of working delivery. Until confirmed, use polling.
+A connected MCP server, manifest declaration, or launch flag is not evidence of working delivery. Channel receipt alone also does not prove a future result will wake the coordinator: a successful write is not a processing acknowledgment.
 
-When `next_action="await_event"`, keep the CLI open and stop repetitive polling. Fetch the task result once when the event arrives. Notification delivery may wait for the client to become available; it is not a guarantee that another operation is interrupted immediately.
+The Claude watchdog establishes a separate capability. Its actual `asyncRewake` probe emits `OMP watchdog probe <token>`; acknowledge that token with `tandem_channel(action="ack", watchdog_token=...)`. It is never returned by an ordinary tool call. This proof plus a currently armed independent timer permits `next_action="await_event"`.
+
+When `await_event` is returned, keep the client open and fetch the authoritative result on either an event or a watchdog `bounded_check`. If still active, the installed hook rearms; follow the new response. Without live coverage, continue bounded `tandem_result(wait_seconds=25)` or selected `tandem_wait`, even if `delivery="push"`. Push accelerates that path rather than replacing it.
 
 The bridge advertises no `claude/channel/permission` capability. A probe token never approves filesystem actions or provider access.
 
@@ -151,16 +153,22 @@ Events are stored in the project's `channel_events` table. Task status and its t
 - `include_previous=true` also includes other owners **within the current project only**; it does not prove those sessions have ended.
 - `recover` explicitly adopts an event or terminal task's events for the current session.
 - Recovery does not rerun OMP, modify its outcome, or permit takeover of an active task's events.
+- Notification acknowledgment is not result application. Before result-driven side effects, claim `tandem_receipt`; proceed only with `authorized=true`, then complete with its token after handling.
+- Duplicate reads and events may occur. An existing receipt never authorizes replay; a stranded claim remains uncertain across restart and needs external reconciliation. External actions still require their own idempotency/transaction boundary.
 
 On normal close, the listener stops and its descriptor/token files are removed. After an abrupt process kill, stale files may remain: request a current descriptor rather than trusting an old PID or URL.
 
 Legacy migration does not copy old channel tokens/queues into a new project namespace. Preserved task results remain readable; absence of a push event is not evidence that a task did not finish.
 
-## Hooks are not the delivery mechanism
+## Independent hook waiting
 
-The plugin's `SessionStart` hook only diagnoses missing executables. It does not forward every tool result, poll the task database, block Stop, approve permissions, or maintain an independent notification queue.
+The Claude plugin includes `SessionStart`, bounded `PostToolUse` `asyncRewake`, and `SessionEnd` watchdog handlers, alongside the original prerequisite diagnostic. The watchdog uses authenticated local control messages, not Channels, to bound task waiting.
 
-Task events already come from the MCP bridge. A CI system should submit one event for a real state transition, using a stable producer ID and the selected descriptor. External event contents are untrusted data, not higher-priority instructions.
+Timers are scoped to client session, MCP incarnation, task and generation. Duplicate, replaced and stale-owner timers are suppressed. Each timer lasts 12 seconds within a 30-second hook timeout; ordinary `async=true` is not equivalent. The offline `uv` wrapper does not install dependencies or access provider credentials. Missing/disabled hooks or an unavailable cached interpreter leave bounded polling available.
+
+The hook sends only a short control signal. It never returns an answer, starts/restarts a task, approves a permission, or records an OMP execution failure. Claude can label exit `2` as a hook error in its debug log; treat it as a control wake. A late wake racing a task event may cause another read, not another authorized application.
+
+Task events still come from the MCP bridge. A CI producer submits one event per real transition with a stable ID and the selected descriptor. Event content remains untrusted data.
 
 ## HTTP and delivery diagnostics
 
@@ -168,6 +176,9 @@ Task events already come from the MCP bridge. A CI system should submit one even
 |---|---|
 | Connected but polling | No confirmed receipt; inspect client consent and organization policy |
 | Probe pending | The client has not proved receipt; do not invent the token |
+| `delivery=push`, `next_action=wait` | Channel receipt is confirmed but current independent watchdog coverage is missing; keep bounded polling |
+| Watchdog probe pending | Acknowledge only the token actually delivered by the hook wake |
+| Watchdog never confirms | Inspect normal hook trust/settings and offline Python availability; use polling, not a guessed capability |
 | Webhook URL absent | Confirm push first; also check `--no-webhook`/environment settings |
 | 401 | Missing or incorrect bearer; do not print it while debugging |
 | 403 | Invalid Host/Origin; browser requests are intentionally rejected |
@@ -180,6 +191,8 @@ Task events already come from the MCP bridge. A CI system should submit one even
 
 For configuration/field details, inspect the actual MCP tool schemas. Tests exercise local stdio push, HTTP delivery, ownership, acknowledgments, queue limits, and failure handling. They do not replace a positive test in your organization's allowed client environment.
 
+Use `tandem_diagnose()` in the affected client for local project/runtime/delivery details. Only on the user's request, `live=true` performs one short provider task; inspect its returned task ID if still running instead of launching another check. A successful external CLI check does not certify this client's Channels or watchdog.
+
 ## Official references
 
 - [Claude Code Channels](https://code.claude.com/docs/en/channels)
@@ -187,3 +200,4 @@ For configuration/field details, inspect the actual MCP tool schemas. Tests exer
 - [Plugin reference](https://code.claude.com/docs/en/plugins-reference)
 - [Plugin marketplaces](https://code.claude.com/docs/en/plugin-marketplaces)
 - [MCP reference](https://code.claude.com/docs/en/mcp)
+- [Hooks reference](https://code.claude.com/docs/en/hooks)

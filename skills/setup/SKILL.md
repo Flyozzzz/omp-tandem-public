@@ -5,9 +5,9 @@ description: Set up or diagnose OMP Tandem, uv, Oh My Pi, provider authenticatio
 
 # Set up OMP Tandem
 
-Separate three concerns: install the external executables once, let the MCP launcher prepare its Python runtime, and have the user authenticate their chosen provider in OMP. Do not read credential files, copy tokens, infer an account, change global settings without permission, or run a model request as a diagnostic. Explain changes and get user consent before installing tools, preparing dependencies explicitly, or adding/removing client registrations.
+Separate three concerns: install the external executables once, let the MCP launcher prepare its Python runtime, and have the user authenticate their chosen provider in OMP. Do not read credential files, copy tokens, infer an account, change global settings without permission, or run a paid diagnostic without the user's request. Explain changes and get user consent before installing tools, preparing dependencies explicitly, or adding/removing client registrations.
 
-OMP Tandem is MIT-licensed at `Flyozzzz/omp-tandem-public`; repository visibility is controlled separately by its owner. Git-based installation requires access while the repository is private. Local plugins require a host that can run local stdio MCP subprocesses. Installing this package in a web-only client does not deploy a server there. The optional diagnostic hook requires a POSIX `sh`; on Windows it needs a compatible shell environment and can otherwise remain disabled.
+OMP Tandem is MIT-licensed in the public `Flyozzzz/omp-tandem-public` repository. Local plugins require a host that can run local stdio MCP subprocesses on macOS/Linux or WSL. Installing this package in a web-only client does not deploy a server there. Optional hooks use a POSIX shell; Claude watchdog hooks also use the existing `uv` prerequisite with an offline cached Python interpreter.
 
 ## 1. Inspect without changing state
 
@@ -31,7 +31,7 @@ If using uv instead, note that uv may first download a compatible Python interpr
 uv run --no-project --python '>=3.12' python -I "$TANDEM_ROOT/server.py" --doctor
 ```
 
-`--doctor` reports executable/dependency prerequisites without installing application dependencies or probing provider authentication. Do not mistake an executable's presence for working provider credentials. The SessionStart hook only checks whether `uv` and `omp` are on `PATH`; it is silent when both are present, ignores its input, and never installs or starts anything.
+`--doctor` reports executable/dependency prerequisites without installing application dependencies or probing provider authentication. Do not mistake an executable's presence for working provider credentials. The prerequisite diagnostic handler only checks whether `uv` and `omp` are on `PATH`; separate Claude session handlers establish and invalidate watchdog ownership without calling a model.
 
 ## 2. Install missing external tools once
 
@@ -88,7 +88,7 @@ Before adding anything, inspect the client's existing plugin/MCP registrations a
 
 ### Claude Code plugin
 
-For authorized access to the private GitHub repository:
+For the public GitHub repository:
 
 ```sh
 claude plugin marketplace add Flyozzzz/omp-tandem-public
@@ -159,6 +159,10 @@ For a user who wants the webhook without retyping environment variables and chan
 ## 6. Confirm the right boundary before using a model
 
 After reconnecting, discover the actual namespaced `tandem_scope` tool and check its project identity from the intended workspace. It must not refer to a plugin cache or an unrelated project. Data isolation is not an OS sandbox; additional work directories do not grant access to another project's MCP history. Keep legacy migration copy-only and use explicit export/import for authorized context sharing.
+
+Use `tandem_diagnose()` for current-client local diagnostics. If the user requests a live check, call `tandem_diagnose(live=true, expected_project=...)`; explain that it starts one short provider request and may incur a charge. Continue inspecting its returned task ID if still running. Do not rerun paid diagnostics just to confirm a channel probe. Actual model/authentication, channel receipt and independently armed watchdog are separate observations.
+
+The Claude plugin includes a bounded `PostToolUse` `asyncRewake` watchdog plus session lifecycle handlers. Review/enable these through ordinary client controls. Confirm only a watchdog token delivered by a real hook wake, separately from the real channel probe. `delivery=push` without live watchdog coverage still requires bounded polling. The hook uses offline `uv` and cached Python; unavailable hooks/interpreter leave polling available. Do not interpret its control exit `2` as a failed OMP task or substitute ordinary `async=true`.
 
 If startup fails, distinguish a missing executable, interpreter/dependency preparation failure, a client registration error, and an unavailable workspace binding. Report the actual error without exposing credentials. Do not repair by changing provider accounts, disabling isolation, or sharing project state. Consult the package README for the launch options supported by this installed version.
 

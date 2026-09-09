@@ -49,6 +49,14 @@ def initialize_database(scope: ProjectScope) -> Path:
                 "project_contexts",
                 "channel_events",
                 "context_imports",
+                "reviews",
+                "review_contents",
+                "review_authors",
+                "findings",
+                "finding_history",
+                "finding_reports",
+                "result_receipts",
+                "diagnostic_probes",
             }
             if any(
                 db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
@@ -83,6 +91,15 @@ def initialize_database(scope: ProjectScope) -> Path:
             "question_timeout_seconds": "INTEGER",
             "event_history_limit": "INTEGER",
             "workspace_roots": "TEXT",
+            "review_id": "TEXT",
+            "review_stage": "TEXT",
+            "execution_json": "TEXT",
+            "actual_model": "TEXT",
+            "actual_thinking": "TEXT",
+            "started_at": "REAL",
+            "ended_at": "REAL",
+            "duration_seconds": "REAL",
+            "accounting_json": "TEXT",
         }.items():
             if name not in columns:
                 db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")

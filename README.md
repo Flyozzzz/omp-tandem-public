@@ -21,6 +21,8 @@ A second agent should do more than approve the first agent's work. OMP Tandem le
 - **Persistent conversations.** Continue a discussion while replacing the current goal and preserving its base constraints.
 - **Scoped knowledge.** Separate project histories, optional versioned product rules, and explicit cross-project sharing.
 - **Honest results.** Structured outcomes, questions with deadlines, and recoverable intermediate artifacts.
+- **Version-bound reviews.** Saved code and diffs, independent-first comparison, stale-result detection and finding history. [Review workflow](docs/guide.md#immutable-review-bundles).
+- **Bounded waiting and visible usage.** Claude watchdog with polling fallback, explicit live diagnostics, and depth/budget settings separate from permissions. [Profiles and usage](docs/guide.md#computation-profiles-and-usage).
 - **Portable integration.** Claude Code plugin, Agent Plugins package for Codex, and ordinary local stdio MCP for other hosts.
 
 No company-specific policies or hardcoded project paths are bundled.
@@ -90,7 +92,7 @@ New tasks create independent conversations. Follow-ups retain native OMP history
 - Project data is bound to **trusted client workspace information**, never a task's model-supplied `cwd`. Foreign IDs do not open another project's history.
 - The package does **not** sandbox processes with your OS permissions. Host shell sandbox settings do not automatically constrain an external OMP process.
 - Reports are claims, not independent acceptance. `completed` does not prove `success`.
-- Hooks only diagnose missing executables; they do not install tools, read credentials, approve permissions, or block your turns.
+- Optional hooks diagnose prerequisites and provide a bounded Claude watchdog; they never install tools, read provider credentials, approve permissions, or replace polling when unavailable.
 - Polling works without Channels. Claude push/webhooks are optional and remain subject to client and organization policy.
 - Local storage is not offline inference: configured providers receive task context.
 

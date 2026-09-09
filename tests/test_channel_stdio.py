@@ -172,7 +172,7 @@ class ChannelStdioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scope["project_root"], str(self.root.resolve()))
         self.assertEqual(scope["root_source"], "launch_cwd")
 
-    async def test_push_task_and_webhook_need_no_status_polling(self):
+    async def test_push_accelerates_bounded_polling_without_live_watchdog(self):
         await self.start()
         probe = await self.notification("channel_probe")
         confirmed = await self.call(
@@ -189,7 +189,8 @@ class ChannelStdioTests(unittest.IsolatedAsyncioTestCase):
                 "timeout_seconds": 10,
             },
         )
-        self.assertEqual(job["next_action"], "await_event")
+        self.assertEqual(job["next_action"], "wait")
+        self.assertFalse(job["watchdog"]["armed"])
         ready = await self.notification("task_completed")
         self.assertEqual(ready["params"]["meta"]["task_id"], job["task_id"])
         result = await self.call("tandem_result", {"task_id": job["task_id"]})

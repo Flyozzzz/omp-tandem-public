@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .models import WorkPolicy
 from .project_context import ProjectContextStore
+from .reviews import ReviewStore
 from .workspace import ProjectScope
 
 
@@ -44,9 +45,12 @@ def current_task(task):
 
 
 class TaskMessages:
-    def __init__(self, scope: ProjectScope, projects: ProjectContextStore):
+    def __init__(
+        self, scope: ProjectScope, projects: ProjectContextStore, reviews: ReviewStore
+    ):
         self.scope = scope
         self.projects = projects
+        self.reviews = reviews
 
     def build(self, task, snapshot=None):
         policy = work_policy(task)
@@ -62,6 +66,19 @@ class TaskMessages:
             project = {
                 key: snapshot[key]
                 for key in ("context_id", "project_id", "revision", "sha256", "context")
+            }
+        review = None
+        if task.get("review_id"):
+            review = {
+                **self.reviews.info(task["review_id"]),
+                "stage": task["review_stage"],
+                "material_access": "Read saved material only through tandem_review_read. The live working directory is not this snapshot.",
+                "author_access": (
+                    "Compare the revealed author proposal against the recorded independent assessment. Explain revisions."
+                    if task["review_stage"] == "comparison"
+                    else "Author proposal and rationale are withheld. Read requirements, criteria and saved code; formulate the problem independently first."
+                ),
+                "exposure_limit": "Code, earlier conversation or supplied context may already expose a solution; do not claim a blind review after prior exposure.",
             }
         return json.dumps(
             {
@@ -79,6 +96,7 @@ class TaskMessages:
                 },
                 "task": current,
                 "project_context": project,
+                "review": review,
                 "replaces_project_context_id": task["previous_project_context_id"],
             },
             ensure_ascii=False,

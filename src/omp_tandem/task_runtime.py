@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from .artifacts import ArtifactStore
+from .execution import resolve_execution
 from .models import TaskContract, TurnContract, WorkPolicy
 from .native_worker import NativeWorker
 from .project_context import ProjectContextStore
@@ -46,19 +47,23 @@ class TaskRuntime:
         cwd=None,
         mode="analyze",
         conversation_id=None,
-        timeout_seconds=1800,
+        timeout_seconds=None,
         contract=None,
         project_context_id=None,
         question_timeout_seconds=None,
         granted_roots=(),
+        *,
+        execution=None,
+        review_id=None,
+        review_stage=None,
     ):
         resuming = conversation_id is not None
         if (prompt is None) == (contract is None):
             raise ValueError("Supply exactly one of prompt or contract")
         if prompt is not None and (not isinstance(prompt, str) or not prompt.strip()):
             raise ValueError("prompt cannot be empty")
-        if mode not in ("think", "analyze", "work") or not 1 <= timeout_seconds <= 7200:
-            raise ValueError("Invalid mode or timeout_seconds (1..7200)")
+        if mode not in ("think", "analyze", "work"):
+            raise ValueError("Invalid mode")
         if question_timeout_seconds is not None and (
             type(question_timeout_seconds) is not int
             or not 1 <= question_timeout_seconds <= 1800
@@ -76,6 +81,7 @@ class TaskRuntime:
         try:
             session_file, model = None, self.model
             previous_context_id = None
+            previous_execution = None
             policy = WorkPolicy()
             if resuming:
                 previous = self.tasks.latest(conversation_id)
@@ -85,6 +91,19 @@ class TaskRuntime:
                     previous[key] for key in ("cwd", "mode", "model", "session_file")
                 )
                 policy = work_policy(previous)
+                if previous.get("execution_json"):
+                    previous_execution = json.loads(previous["execution_json"])[
+                        "effective"
+                    ]
+                    # Continue the native selection, not an earlier fuzzy model alias.
+                    if previous.get("actual_model"):
+                        previous_execution["model"] = previous["actual_model"]
+                    if previous.get("actual_thinking"):
+                        previous_execution["thinking"] = previous["actual_thinking"]
+                if review_id is None:
+                    review_id = previous.get("review_id")
+                if review_stage is None:
+                    review_stage = previous.get("review_stage")
                 previous_context_id = previous["project_context_id"]
                 if project_context_id is None:
                     project_context_id = previous_context_id
@@ -102,6 +121,12 @@ class TaskRuntime:
                 policy = WorkPolicy(
                     scope=contract.scope, constraints=contract.constraints
                 )
+            settings = resolve_execution(
+                execution,
+                previous=previous_execution,
+                model=model,
+                timeout_seconds=timeout_seconds,
+            )
             if question_timeout_seconds is None:
                 question_timeout_seconds = 300
             cwd = self.scope.validate_cwd(cwd, allowed_roots=granted_roots)
@@ -133,13 +158,16 @@ class TaskRuntime:
                 "updated": now,
                 "cwd": str(Path(cwd).resolve()),
                 "mode": mode,
-                "model": model,
+                "model": settings["effective"]["model"] or "",
                 "prompt": prompt or "",
                 "session_file": session_file,
                 "status": "starting",
                 "contract_json": contract.model_dump_json() if contract else None,
                 "policy_json": policy.model_dump_json(),
-                "deadline": now + timeout_seconds,
+                "deadline": now + settings["effective"]["timeout_seconds"],
+                "execution_json": json.dumps(settings),
+                "review_id": review_id,
+                "review_stage": review_stage,
                 "project_context_id": project_context_id,
                 "previous_project_context_id": changed_from,
                 "question_timeout_seconds": question_timeout_seconds,
@@ -185,6 +213,7 @@ class TaskRuntime:
             "conversation_id": conversation_id,
             "status": "starting",
             "next_action": "wait",
+            "execution": {**settings, "actual": {"model": None, "thinking": None}},
         }
         if snapshot is not None:
             result["project_context"] = {

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import shlex
 import sys
 import tempfile
@@ -11,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from fastmcp import Client
+from pydantic_core import to_jsonable_python
 
 from omp_tandem.api import build_server
 from omp_tandem.bridge import Bridge
@@ -124,7 +124,7 @@ class RpcHarness(unittest.IsolatedAsyncioTestCase):
 
     async def call(self, name, **args):
         result = await self.client.call_tool(name, args)
-        return json.loads(result.content[0].text)
+        return to_jsonable_python(result.data)
 
     async def start(self, scenario="question", **args):
         return await self.call(

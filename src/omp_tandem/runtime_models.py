@@ -37,6 +37,24 @@ class ArtifactReadRequest(BaseModel):
     limit: int = Field(default=16000, ge=1, le=50000)
 
 
+class ReviewReadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    section: Literal[
+        "manifest",
+        "requirements",
+        "criteria",
+        "diff",
+        "selected",
+        "base",
+        "staged",
+        "checks",
+        "author",
+    ] = "manifest"
+    path: str | None = None
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=16000, ge=1, le=50000)
+
+
 class TaskSummary(TypedDict):
     task_id: str
     conversation_id: str

@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**版本：3.0.2** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**版本：3.1.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -31,11 +31,16 @@ OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Co
 - [钩子与技能](#hooks-and-skills)
 - [与协作者共同工作](#working-with-a-peer)
 - [任务与执行模式](#tasks-and-execution-modes)
+- [执行配置与用量](#execution-and-accounting)
+- [不可变快照审查](#snapshot-reviews)
+- [问题生命周期](#finding-lifecycle)
 - [产品知识与决策](#product-knowledge-and-decisions)
 - [项目隔离](#project-isolation)
 - [显式共享上下文](#explicit-context-sharing)
 - [MCP 工具](#mcp-tools)
 - [结果、问题与产物](#results-questions-and-artifacts)
+- [结果处理凭据](#result-receipts)
+- [当前客户端与在线诊断](#live-diagnostics)
 - [轮询、Channels 与 Webhook](#polling-channels-and-webhooks)
 - [配置与限制](#configuration-and-limits)
 - [升级与旧版历史记录](#upgrades-and-legacy-history)
@@ -57,6 +62,9 @@ OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Co
 | 原生对话历史 | 继续已有的 OMP 对话，而不是悄悄开启另一个会话 |
 | 每轮目标 | 替换当前目标，而不是重复之前的整轮审计 |
 | 结构化契约 | 指定约束、文件归属、上下文和验收标准 |
+| 不可变审查包 | 固定需求、代码字节和证据，先独立判断，再比较作者方案 |
+| 问题生命周期 | 稳定编号与只追加历史，分开记录问题有效性和修复状态 |
+| 执行配置与用量 | 按轮选择计算强度，显示请求／生效／实际设置和未知费用 |
 | 带版本的产品快照 | 保存有来源的规则、示例，以及已接受或已否决的决策 |
 | 带截止时间的问题 | 向协调者提问，而不是自行编造尚未确定的决策 |
 | 不可变产物 | 通过带版本的 ID 和 SHA-256 摘要共享报告与证据 |
@@ -65,6 +73,8 @@ OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Co
 | 项目隔离 | 分离任务、历史记录、产物、产品和事件的存储 |
 | 显式上下文传递 | 仅共享选定的快照及其引用的证据 |
 | 可选推送投递 | Claude Code Channels 与受保护的 localhost Webhook |
+| 有界看门狗与接收凭据 | 独立唤醒失败时回退轮询；领取终态结果后才处理副作用 |
+| 当前客户端诊断 | 默认本地检查；仅经用户明确要求才执行可能付费的在线检查 |
 | 仅复制式迁移 | 保留旧结果和原生会话，不删除原始数据 |
 
 <a id="architecture"></a>
@@ -170,7 +180,7 @@ OMP 支持多个托管提供商，以及本地／兼容 OpenAI 的后端。请�
 <a id="install-the-plugin"></a>
 ## 安装插件
 
-在私有开发阶段，你需要仓库访问权限。如果权限通过邀请授予，请先接受邀请，并完成 Git 客户端身份验证。安装程序绝不会替你切换 GitHub 账号。
+这是[公开仓库](https://github.com/Flyozzzz/omp-tandem-public)，安装不需要访问邀请。客户端和组织的插件信任、网络及权限策略仍然适用。
 
 <a id="claude-code"></a>
 ### Claude Code
@@ -276,22 +286,21 @@ uv run --no-project --python '>=3.12' python -I "$TANDEM_ROOT/server.py" --docto
 uv run --no-project --python '>=3.12' python -I "$TANDEM_ROOT/server.py" --prepare
 ```
 
-`--doctor` 不会安装应用依赖、读取凭据或验证提供商登录。外层 `uv` 调用仍可能下载 Python。`--prepare` 执行实际安装，并以 JSON 返回解释器路径。
+`--doctor` 是本地检查，不会安装应用依赖、读取凭据或验证提供商登录；它会指向当前 MCP 客户端的[在线诊断](#live-diagnostics)。独立 CLI 进程不能证明当前客户端已收到推送。外层 `uv` 调用仍可能下载 Python。`--prepare` 执行实际安装，并以 JSON 返回解释器路径。
 
 首次下载可能超过客户端的启动超时。可以预热环境，或在解决配置错误后重新连接；不要把“MCP 已配置”误认为工作进程已经就绪。在客户端外手动准备环境可能使用不同缓存：为某个客户端的插件运行环境预热时，应使用该客户端提供的同一数据目录。
 
 <a id="hooks-and-skills"></a>
 ## 钩子与技能
 
-插件有意只提供**一种钩子：轻量的 `SessionStart` 诊断钩子**。
+Claude 插件提供轻量前置工具诊断，以及可选的独立看门狗：
 
-- 仅检查 `PATH` 中是否存在 `uv` 和 `omp`。
-- 两者均存在时保持静默。
-- 缺少前置工具时，输出长度受限的配置指引。
-- 忽略钩子载荷，不将提示词或路径复制到输出中。
-- 不安装软件包、不调用模型、不读取身份验证信息、不轮询任务、不取消工作，也不批准权限。
+- `SessionStart` 检查 `PATH` 中的 `uv`／`omp`，缺失时给出简短指引，并初始化看门狗会话身份。
+- `PostToolUse` 通过 `asyncRewake` 启动有界看门狗，单次寿命最多 12 秒，钩子超时为 30 秒。它绑定会话、任务、代次和 MCP 进程实例，重复或旧实例的唤醒会失效。
+- `SessionEnd` 使会话看门狗失效。没有权限审批钩子，也没有自动批准操作。
+- 看门狗只发出控制信号，不启动任务、不返回答案、不读取凭据、不调用提供商，也不替用户安装工具。Claude 调试日志可能将用于唤醒的退出码 2 标作 hook error；这不等于 OMP 任务报错，应读取 `tandem_result` 的实际状态。
 
-没有 `Stop`、`SessionEnd` 或权限审批钩子。任务等待、取消和持久事件本就由桥接服务负责；在钩子中重复实现这些机制可能干扰其他会话。钩子缺失或不受信任，不会禁用核心 MCP 工作流。
+只有真实独立唤醒中收到的 `watchdog_token` 经确认，且当前看门狗仍存活并已就绪时，才允许 `await_event`。工具输出中声称设置了计时器，不是独立唤醒证明；通道的 `probe_token` 也不能代替看门狗证明。钩子缺失、禁用或不受支持时，核心 MCP 功能仍可通过有界轮询使用，但不能声称存在无人值守的事件唤醒。详见[投递与回退](#polling-channels-and-webhooks)。
 
 共享技能提供：
 
@@ -347,6 +356,262 @@ uv run --no-project --python '>=3.12' python -I "$TANDEM_ROOT/server.py" --prepa
 所负责文件必须使用 `cwd` 内明确的相对路径，不能包含 glob 模式或路径穿越。不要声明未经实际协商同意的文件归属。
 
 新的 `tandem_start` 会创建新对话。`tandem_continue` 则在现有对话中创建新的任务／轮次。模式、cwd 和基础 `WorkPolicy` 保持不变；新的 `TurnContract` 会替换目标／上下文／验收标准，并提供仅本轮生效的约束。它不能更改文件归属或扩大基础策略的范围。
+
+<a id="execution-and-accounting"></a>
+## 执行配置与用量
+
+`execution` 控制计算，不控制权限。`quick` 默认 `thinking=low`、600 秒；`balanced` 默认 `high`、1800 秒；`deep` 默认 `high`、3600 秒。默认配置为 `balanced`，不是所有任务都固定使用 `high`。`mode` 与这些配置独立，选择更强模型或更深思考不会将 `think`／`analyze` 升级为 `work`。
+
+以下为 `tandem_start` 参数；路径应替换为实际项目：
+
+```json
+{
+  "cwd": "/absolute/project",
+  "mode": "analyze",
+  "prompt": "只读取上传实现，比较重试策略，不编辑文件。",
+  "execution": {
+    "profile": "quick",
+    "thinking": "low",
+    "timeout_seconds": 900
+  },
+  "timeout_seconds": 1200
+}
+```
+
+本例最终时限为 1200 秒：显式顶层 `timeout_seconds` 优先于 `execution.timeout_seconds`，后者优先于所选配置的时限。可用 `execution.model` 显式选择已在 OMP 中配置且实际支持的模型标识；不填写时沿用配置，不需要假设任何提供商或凭据。
+
+后续轮次继承实际生效的设置，除非覆盖。显式切换 `profile` 会应用该配置的思考强度和时限；同一对象中的显式字段再覆盖它们。例如 `tandem_continue`：
+
+```json
+{
+  "conversation_id": "<上一轮返回的 conversation_id>",
+  "prompt": "深入分析刚才保留的两种方案，说明证据与未决边界。",
+  "execution": {"profile": "deep"}
+}
+```
+
+OMP 会核对实际模型及其支持的思考等级。模型不支持所请求设置、将设置限制为另一等级或未能应用时，会如实失败，而不是悄悄声称已按请求运行。
+
+普通结果包含 `execution={requested,effective,actual}` 和 `usage={task,conversation}`。分别检查请求、生效配置和实际观测值；`actual` 缺失时不要把请求模型当作实际模型。`usage.task` 只计本轮，`usage.conversation` 累加互不重叠的轮次，包含独立审查与比较阶段，不重复累加原生累计会话统计。
+
+每个范围都有 `tokens.input`、`output`、`cache_read`、`cache_write`、`total` 和 `cost`。每项指标的对象包含 `value`、`known_subtotal` 和 `status`。以下只是**指标形状示例，不是一次实际运行或报价**：
+
+```json
+{
+  "complete_metric": {"value": 120, "known_subtotal": 120, "status": "complete"},
+  "partial_metric": {"value": null, "known_subtotal": 80, "status": "partial"},
+  "unknown_metric": {"value": null, "known_subtotal": null, "status": "unknown"}
+}
+```
+
+`partial` 的已知小计不是完整总数；缺失数据保持 `unknown`／`null`，不能当作零。`coverage` 描述事件覆盖情况，不保证每项指标完整。费用来自 OMP 原生报告，不是账单，也不会根据模型名称虚构价格；缺失或零价目录不能证明免费。时间与模型来源也应按结果实际报告解释。
+
+<a id="snapshot-reviews"></a>
+## 不可变快照审查
+
+先用 `tandem_review(action=create)` 固定审查材料，再启动只读取快照的独立任务。以下调用中的路径、检查输出和论据为教学数据，请换成真实材料；后续 `<...>` ID 必须替换为前一次响应中的实际值。
+
+### 1. 捕获需求、代码与证据
+
+调用 `tandem_review`：
+
+```json
+{
+  "action": "create",
+  "request": {
+    "requirements": "相同上传请求重试不得生成第二份记录；正常上传仍可自动完成。",
+    "criteria": ["核对去重键的有效范围", "区分已证实缺陷与需要运行验证的假设"],
+    "base": "HEAD",
+    "paths": ["src/upload.py", "tests/test_upload.py"],
+    "checks": [{
+      "name": "上传回归检查",
+      "command": "uv run pytest tests/test_upload.py -q",
+      "output": "教学示例：2 passed；请替换为实际保存的输出",
+      "source": "协调者提供的检查记录"
+    }],
+    "author_proposal": "在请求边界增加幂等键。",
+    "author_rationale": "希望避免重试生成重复记录，同时保留正常自动流程。",
+    "external_boundaries": ["未包含生产数据库配置与外部存储服务状态"]
+  }
+}
+```
+
+返回不可变 `review_id`、`code_fingerprint` 和范围元数据。省略 `paths` 时，选择当前未被忽略的 Git 变更；`base` 默认 `HEAD`。非 Git 项目必须显式提供相对文件路径。被选中的子模块和未合并 Git 条目会明确拒绝，而不是当作普通文件处理。
+
+保存的内容包括所选工作区、基准和暂存区的文件字节／模式／哈希，以及派生 diff、需求、标准和提供的检查记录。最多 256 个文件、每文件 4 MiB、保存材料共 16 MiB。捕获时的有限双读检查不是文件系统事务，不能保证整个环境不可变。未选择文件、依赖、运行时、外部服务和测试执行仍在未知边界之外。
+
+**捕获不会运行 `command`，更不会自动执行测试。** 所有提供的检查都标为 `verified=false`、`provenance=supplied_not_executed`。可选 `checks[].code_fingerprint` 必须为实际来源的 64 位小写 SHA-256；匹配只表示与提供指纹的关联，不证明检查执行或通过。没有指纹时关联为 `unknown`，不能借用旁边的代码内容将其升格为已验证。
+
+### 2. 独立判断，只读已保存材料
+
+调用 `tandem_start`，不要把作者方案再复制进提示词：
+
+```json
+{
+  "cwd": "/absolute/project",
+  "mode": "think",
+  "review_id": "<捕获返回的 review_id>",
+  "review_stage": "independent",
+  "execution": {"profile": "balanced"},
+  "prompt": "通过 tandem_review_read 阅读需求、标准、清单、diff、相关文件和检查记录。先独立判断；分别报告证据、假设和未覆盖边界。不要读取作者方案。"
+}
+```
+
+绑定 `review_id` 的任务**必须使用 `think`**，默认阶段为 `independent`。工作进程的 `tandem_review_read` 绑定当前任务与阶段，只能读取保存材料，没有实时项目文件或 shell 工具。作者材料在独立阶段不可访问；它不会提供绕过阶段的隐藏读取入口。
+
+协调者可用 `tandem_review(action=read)` 查看清单或分页材料：
+
+```json
+{
+  "action": "read",
+  "review_id": "<review_id>",
+  "section": "selected",
+  "path": "src/upload.py",
+  "offset": 0,
+  "limit": 16000
+}
+```
+
+可读 section 为 `manifest`、`requirements`、`criteria`、`diff`、`selected`、`base`、`staged`、`checks`、`author`。只有文件 section（`selected`／`base`／`staged`）接收 `path`。遵循 `next_offset`，直到为 `null`；偏移按返回文本字符计数，二进制内容按 `encoding=base64` 解释。`author` 必须显式 `reveal_author=true`；独立阶段不要提前读取后传给协作者。
+
+### 3. 完成后比较作者方案
+
+等待并读取第一轮答案，保留原文。只有同一对话已完成**同一 `review_id`** 的独立评估后，才可调用 `tandem_continue` 进入比较：
+
+```json
+{
+  "conversation_id": "<独立任务返回的 conversation_id>",
+  "review_id": "<同一 review_id>",
+  "review_stage": "comparison",
+  "prompt": "现在读取保存的作者材料，与已保留的独立判断比较。说明哪些结论改变、依据是什么，以及仍未解决的分歧；不要改写第一轮答案。"
+}
+```
+
+比较阶段可显式读取作者材料；协调者的对应调用为：
+
+```json
+{"action": "read", "review_id": "<review_id>", "section": "author", "reveal_author": true}
+```
+
+代码或上下文已经泄露作者思路时，承认可能的锚定影响，不声称绝对盲审。捕获新快照会产生新 `review_id`，必须重新从独立阶段开始，不能复用旧快照的比较资格。
+
+### 4. 观察适用范围
+
+调用 `tandem_review`：
+
+```json
+{"action": "assess", "review_id": "<review_id>"}
+```
+
+| `status` | 含义 |
+|---|---|
+| `current_selected_state` | 观察时所选文件、暂存内容和所捕获 Git 身份仍匹配 |
+| `stale` | 所选文件或暂存内容已改变 |
+| `previous_version` | 文件仍匹配，但 HEAD 或基准引用已改变 |
+| `unknown` | 无法可靠观察相关范围；应阅读 `unknown` 明细 |
+
+结果的 `review.applicability` 绑定该快照和观察时刻，不是实时工作区或整个系统正确性的保证。`whole_environment_immutable` 仍为 `false`。过期、无法观察或后续修复不会重写第一轮保留答案。
+
+<a id="finding-lifecycle"></a>
+## 问题生命周期
+
+`tandem_findings` 将具体问题绑定到审查快照与对话；稳定 UUID `finding_id` 用于更新，对话内稳定 `number` 便于人类引用。创建时 `location.path` 必须出现在原始快照清单中。原始位置始终指向原始快照，不会随代码移动。历史只追加，不覆盖先前证据。
+
+以下教学示例创建假设；实际调用应使用真实证据：
+
+```json
+{
+  "action": "create",
+  "conversation_id": "<审查 conversation_id>",
+  "review_id": "<原始 review_id>",
+  "finding": {
+    "title": "并发重试可能产生重复记录",
+    "description": "检查与写入分离时，两次请求可能同时通过存在性判断。",
+    "location": {"path": "src/upload.py", "start_line": 40, "end_line": 52},
+    "reproduction_conditions": ["同一幂等键的两次请求并发进入检查与写入之间"],
+    "evidence": ["教学示例：保存的 selected 内容显示先查询再独立插入"],
+    "reason": "尚缺并发运行证据，先记录为假设",
+    "validity": "hypothesis"
+  }
+}
+```
+
+`validity` 与 `resolution` 是两条独立轴。创建时有效性只允许 `hypothesis` 或 `confirmed`；修复声明不会把假设变成已确认，也不会把已确认问题变成被否决的问题。
+
+| `change.action` | 作用与前提 |
+|---|---|
+| `note` | 添加理由／证据，不改变有效性或修复状态 |
+| `confirm` | 将假设变为 `confirmed`，必须有证据 |
+| `reject` | 以证据否决问题，变为 `rejected`；修复状态回到 `open` |
+| `reopen` | 重新打开；被否决的问题先回到 `hypothesis` |
+| `claim_fixed` | 仅限 `confirmed` 且 `open`，附证据后变为 `claimed_fixed`，不是验证通过 |
+| `verify_fixed` | 仅限 `confirmed` 且 `claimed_fixed`，附证据及已完成、结构化结果为 `success` 的验证任务后变为 `verified_fixed` |
+
+每次更新都要提供最新 `expected_revision`、当前或更新快照的 `change.review_id`、`reason`。`confirm`／`reject`／`claim_fixed`／`verify_fixed` 必须有非空 `evidence`。例：已经实际获得复现证据后调用：
+
+```json
+{
+  "action": "update",
+  "finding_id": "<finding_id>",
+  "expected_revision": 1,
+  "change": {
+    "action": "confirm",
+    "review_id": "<原始 review_id>",
+    "reason": "已检查并发复现证据",
+    "evidence": ["替换为实际复现记录及其来源"]
+  }
+}
+```
+
+完成经授权的修复后重新捕获快照。读取问题的最新修订号，再声明修复：
+
+```json
+{
+  "action": "update",
+  "finding_id": "<finding_id>",
+  "expected_revision": 2,
+  "change": {
+    "action": "claim_fixed",
+    "review_id": "<修复后新 review_id>",
+    "reason": "修复版本已捕获，仍需独立核对",
+    "evidence": ["替换为实际修复位置与验证材料来源"]
+  }
+}
+```
+
+接着在**同一对话**中为该修复快照开始新的 `independent` 审查轮次：
+
+```json
+{
+  "conversation_id": "<同一 conversation_id>",
+  "review_id": "<修复后新 review_id>",
+  "review_stage": "independent",
+  "prompt": "针对该问题核对修复快照和已保存的复现证据，明确仍未覆盖的环境。不执行实时测试，也不自行宣称已完成本轮。"
+}
+```
+
+等它实际 `completed`，且结构化报告 `outcome=success`，协调者阅读并核对证据后才可提交；`partial`／`blocked` 的已完成轮次不能认证修复：
+
+```json
+{
+  "action": "update",
+  "finding_id": "<finding_id>",
+  "expected_revision": 3,
+  "change": {
+    "action": "verify_fixed",
+    "review_id": "<修复后新 review_id>",
+    "reason": "已核对该快照已成功完成的结构化验证结果",
+    "evidence": ["替换为验证结果中实际支持修复的证据"],
+    "verification_task_id": "<同一对话、绑定该快照且成功完成的验证任务 ID>"
+  }
+}
+```
+
+示例修订号仅适用于没有其他更新的上述顺序；发生冲突时先读取现状，不能盲目递增重试。`verification_task_id` 仅用于 `verify_fixed`。工作进程不能在自己的任务完成前拿本轮验证自己。系统检查任务关联、完成状态和结构化 `success`，并不自动证明证据内容为真；协调者仍需审阅证据。历史 `verified_fixed` 只针对所引用快照，不保证实时环境已修复或任意外部操作正确。
+
+用 `{"action":"get","finding_id":"<finding_id>","offset":0,"limit":50}` 分页读取历史，或用 `{"action":"get","conversation_id":"<conversation_id>","number":1}` 按稳定人类编号读取。历史分页依据 `history_offset`、已返回条数和 `history_total` 继续。`list` 返回分页摘要，例如 `{"action":"list","conversation_id":"<conversation_id>","offset":0,"limit":50}`；可按 `review_id` 筛选，或单独按 `task_id` 筛选，后者不能混用对话／审查筛选。列表分页遵循 `next_offset`。
+
+快照任务的 `TaskOutcome` 可带 `findings`（上述 FindingDraft 数组）和 `finding_updates`（包含 `finding_id`、`expected_revision`、`change` 的数组）；普通备注或自由文本中的“已修复”不会代替生命周期转换。
 
 <a id="product-knowledge-and-decisions"></a>
 ## 产品知识与决策
@@ -454,13 +719,13 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 <a id="mcp-tools"></a>
 ## MCP 工具
 
-宿主前缀可能不同；以下是稳定的工具后缀。MCP `Context` 由系统注入，不是用户参数。
+共 18 个 MCP 工具。宿主前缀可能不同；以下是稳定的工具后缀。MCP `Context` 由系统注入，不是用户参数。
 
 | 工具 | 主要输入 | 用途 |
 |---|---|---|
 | `tandem_scope` | 无 | 检查不可变的项目边界和启动迁移结果 |
-| `tandem_start` | `cwd`、`prompt` 或 `contract`、`mode`、超时参数、`project_context_id` | 新建任务和对话 |
-| `tandem_continue` | `conversation_id`、`prompt` 或 `contract`、超时参数、`project_context_id` | 基于已有历史开启新轮次 |
+| `tandem_start` | `cwd`、`prompt` 或 `contract`、`mode`、超时参数、`execution`、`review_id`、`review_stage`、`project_context_id` | 新建任务和对话 |
+| `tandem_continue` | `conversation_id`、`prompt` 或 `contract`、超时参数、`execution`、`review_id`、`review_stage`、`project_context_id` | 基于已有历史开启新轮次 |
 | `tandem_result` | `task_id`、`wait_seconds`、`details` | 读取回答、结果判定、问题、产物和诊断信息 |
 | `tandem_wait` | `task_ids`、`wait_seconds` | 等待任意选定结果／问题 |
 | `tandem_list` | `limit` | 列出本命名空间中的近期任务，不包含大段正文 |
@@ -472,8 +737,12 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 | `tandem_export_context` | `context_id`、`target_project_root` | 向特定接收方提供快照 |
 | `tandem_import_context` | `transfer_id`、`expected_revision` | 接收定向发送的快照 |
 | `tandem_channel` | `action=status/probe/ack/pending/recover`、相关 ID／令牌、`include_previous`、`limit` | 管理可选投递机制 |
+| `tandem_review` | `action=create/read/assess`、`request` 或 `review_id`、`section`、`path`、`offset`、`limit`、`reveal_author` | 保存／分页读取审查包，观察快照适用性 |
+| `tandem_findings` | `action=create/update/get/list`、对话／审查／问题 ID、`finding`、`change`、`expected_revision`、`number`、`task_id`、分页 | 管理只追加的问题历史 |
+| `tandem_diagnose` | `live`、`task_id`、`expected_project`、`wait_seconds`、`timeout_seconds` | 当前客户端本地或显式在线检查 |
+| `tandem_receipt` | `task_id`、`action=status/claim/complete`、`token` | 单独领取并确认终态结果处理 |
 
-OMP 自身会获得绑定到其任务的宿主工具：`tandem_ask`、`tandem_finish`、`tandem_publish_artifact` 和 `tandem_read_artifact`。即使只是纯文本回答，也必须调用 `tandem_finish`；它不是普通的协调者工具。
+OMP 自身会获得绑定到其任务的宿主工具：`tandem_ask`、`tandem_finish`、`tandem_publish_artifact` 和 `tandem_read_artifact`。绑定审查的 `think` 任务还可使用 `tandem_review_read`，它只读取该任务／阶段允许的已保存材料，不提供实时文件系统访问。即使只是纯文本回答，也必须调用 `tandem_finish`；它不是普通的协调者工具。报告的可选 `findings` 和 `finding_updates` 用于提交[结构化问题](#finding-lifecycle)。
 
 <a id="results-questions-and-artifacts"></a>
 ## 结果、问题与产物
@@ -499,22 +768,79 @@ OMP 自身会获得绑定到其任务的宿主工具：`tandem_ask`、`tandem_fi
 
 问题的截止时间由协调者控制。超时不等于同意。`tandem_reply` 会恢复等待中的工作进程；新的 `tandem_continue` 则用于完成后开启新轮次。内容完全相同的重复回复具有幂等性；冲突或过期的回复会被拒绝。
 
-`tandem_wait` 返回就绪信息，而非完整回答。请读取已就绪的结果，并从后续等待集合中移除已处理的终态 ID。推送确认后，应遵循 `await_event`，而不是反复轮询。
+`tandem_wait` 返回就绪信息，而非完整回答。请读取已就绪的结果，并从后续等待集合中移除已处理的终态 ID。应用终态结果前先[领取处理凭据](#result-receipts)。只有当前有效的独立看门狗已就绪时才遵循 `await_event`；推送确认本身不够。
 
 产物是附带 SHA-256 的不可变文本／Markdown／JSON 版本。名称是逻辑标签，不是任意文件系统路径。使用 `next_offset` 分页读取；偏移量按 Unicode 字符计数，而不是字节。暂定产物不等于已认可的最终结果。
+
+<a id="result-receipts"></a>
+## 结果处理凭据
+
+读取结果、收到重复通知、确认通道事件，与获准执行结果带来的副作用是不同操作。先读取实际终态结果，再在**应用结果之前**调用 `tandem_receipt`：
+
+```json
+{"task_id": "<终态 task_id>", "action": "claim"}
+```
+
+只有本次新领取返回 `authorized=true` 时才可处理。保存本次返回的 `token`；处理成功后，以同一客户端会话完成：
+
+```json
+{"task_id": "<同一 task_id>", "action": "complete", "token": "<claim 返回的 token>"}
+```
+
+用 `{"task_id":"<task_id>","action":"status"}` 检查状态：`not_ready` 表示任务尚未终止，`unclaimed` 表示尚未领取，`completed` 表示处理凭据已完成，`uncertain` 表示存在尚未完成的领取。重复读取、重复领取（即使同一接收者）和通知重放都不会重新授权副作用。初次授权领取在存储中也属于尚未完成状态；授权仅来自本次 `authorized=true`。
+
+领取后崩溃或断连时，不自动释放或重领，因为外部操作可能已经执行。应先核对外部状态再有意处理；不要重放不确定操作。凭据防止本地接收流程重复授权，但不能保证任意外部操作“恰好一次”，外部系统仍需自己的幂等键或事务边界。
+
+<a id="live-diagnostics"></a>
+## 当前客户端与在线诊断
+
+`tandem_diagnose` 检查当前 MCP 客户端绑定的项目、运行时、实际模型和投递／看门狗状态。默认只检查本地状态，不调用提供商：
+
+```json
+{"expected_project": "/absolute/project"}
+```
+
+`expected_project` 只比较，不会重绑项目。项目无法确定或不匹配时，修正客户端启动根目录／项目配置并重新连接；任务的 `cwd` 或诊断期望值都不能切换数据命名空间。
+
+**仅在用户明确要求在线检查时**调用以下参数；它会启动一次短小的 OMP 提供商请求，可能收费：
+
+```json
+{
+  "live": true,
+  "expected_project": "/absolute/project",
+  "wait_seconds": 25,
+  "timeout_seconds": 90
+}
+```
+
+若响应为 `status=running`，保存 `task_id`，继续检查**同一个**任务，不要再次传 `live=true` 启动付费任务：
+
+```json
+{
+  "task_id": "<诊断返回的 task_id>",
+  "expected_project": "/absolute/project",
+  "wait_seconds": 25
+}
+```
+
+每次等待最多 25 秒。`live=true` 与 `task_id` 不能同时提供。只有任务成功并返回正确的随机挑战内容后，`runtime.authentication` 才为 `verified_by_task`；本地 `local_ready`、可执行文件存在或普通文本回复都不能证明认证成功。实际模型来自 `runtime.actual_model` 的执行观测，无法观测时保持未知。
+
+诊断会显示 `project`、`runtime`、`channel`（包括投递／看门狗状态），在线任务另有 `execution`／`usage`。提供商成功不等于客户端推送可用，更不等于独立看门狗已就绪；按当前 `delivery_instructions` 继续有界等待或允许的事件等待。认证失败时检查自己的 OMP 配置，不编造凭据或权限。独立 CLI `--doctor` 仍是本地诊断，不能证明当前会话收件；不需要为了补通道确认而重跑付费检查。
 
 <a id="polling-channels-and-webhooks"></a>
 ## 轮询、Channels 与 Webhook
 
 轮询是每个受支持 MCP 客户端都可使用的常规、功能完整的路径。使用 `tandem_result` 或 `tandem_wait` 即可；协作者之间的协作不依赖 Channels。
 
-Claude Code 可以选择通过 Channels 投递任务／问题／Webhook 事件。启动标志或已连接的 MCP 服务器并不能证明投递正常：协调者必须确认从真实通道事件收到的探测令牌，之后才会确认 `delivery=push`。
+Claude Code 可以选择通过 Channels 投递任务／问题／Webhook 事件。启动标志或已连接的 MCP 服务器并不能证明投递正常：协调者必须确认从真实通道事件收到的 `probe_token`，之后才会确认 `delivery=push`。这是通道收件证明，不是独立看门狗或结果处理证明。
 
 通用协作指令与投递方式无关。`tandem_scope` 和任务工具响应返回当前的 `delivery_instructions`；结合 `delivery` 与 `next_action` 执行，投递方式变化时替换旧流程。MCP 工具集合保持不变。
 
 - **轮询（`delivery=poll`）：** 任务不会自动唤醒协调者。执行互补工作，或对单个任务使用 `tandem_result(wait_seconds=25)`，对多个任务使用 `tandem_wait(task_ids, wait_seconds=25)`，然后读取就绪结果。及时处理问题，移除已处理的终态 ID。只要仍有活动任务就继续；不要零等待循环、轮询 `tandem_list` 或承诺稍后收到通知。强制轮询流程不包含通道设置和 Webhook 管理。
-- **已确认推送（`delivery=push`）：** `await_event` 表示保持客户端开启并做其他工作，不运行轮询循环。收到任务／问题事件后读取一次结果。确认已处理的 Webhook 事件；其内容是数据，而非指令或授权。不要重复副作用。
-- **自动协商与回退：** 收到并确认真实探测事件前使用轮询。不要确认从工具响应复制的令牌，也不要反复探测通道来等待任务。传输故障会恢复轮询指令，此时重新使用有界等待。
+- **推送已确认但看门狗未就绪：** 即使 `delivery=push`，也继续上述有界等待；推送只加快发现结果，不允许无限等待事件。
+- **独立看门狗存活且已就绪：** 当前响应允许 `await_event` 时，保持客户端开启并做互补工作，等待推送或看门狗唤醒。唤醒只提示重新读取状态，不代表任务完成。租期失效、钩子故障或传输变化后，按最新指令回到有界等待。
+- **分别确认两种证明：** 只对真实通道事件中的令牌调用 `tandem_channel`，参数为 `{"action":"ack","probe_token":"<实际通道令牌>"}`；只对实际独立钩子唤醒中的令牌使用 `{"action":"ack","watchdog_token":"<实际唤醒令牌>"}`。一次确认只能提供一种令牌。不要从工具响应复制令牌，不要反复探测通道等待任务，也不要根据工具输出自行声称已有计时器。
+- **Webhook 与结果处理分离：** 已处理的 Webhook 使用 `event_id` 确认；内容是数据，不是指令或授权。重复通知和读取不允许重复副作用，终态任务仍需 `tandem_receipt`。
 
 除非用户明确暂停或接手，否则应完成自己负责的活动工作后再给出最终回答。关闭 MCP 所属会话会停止活动任务。
 
@@ -602,7 +928,7 @@ uv run --no-project --python '>=3.12' python -I \
 |---|---|
 | 并发 OMP 工作进程 | 共用一个状态基目录的所有项目命名空间合计 4 个 |
 | 每个对话的活动轮次 | 1 |
-| 单轮时限 | 默认 1800 秒；1–7200 |
+| 单轮时限 | `balanced` 默认 1800 秒；`quick` 600 秒；`deep` 3600 秒；显式覆盖 1–7200 |
 | 问题截止时间 | 默认 300 秒；1–1800，同时受该轮截止时间限制 |
 | 单次 MCP 等待 | 最多 25 秒 |
 | `tandem_wait` 选定任务 | 1–32 个 ID |
@@ -611,6 +937,11 @@ uv run --no-project --python '>=3.12' python -I \
 | 产品快照 | 最多 64,000 UTF-8 字节、50 条规则、100 项决策 |
 | 产物 | 最多 4 MiB UTF-8；纯文本、Markdown 或 JSON |
 | 产物分页 | 默认 16,000 个字符，最多 50,000 |
+| 审查包 | 最多 256 个文件、每文件 4 MiB、已保存材料总计 16 MiB；不静默截断 |
+| 审查分页 | 默认 16,000 个字符，最多 50,000；遵循 `next_offset` |
+| 问题列表／历史分页 | 默认 50 条，最多 200 |
+| 在线诊断 | 每次等待最多 25 秒；任务时限默认 90 秒，可设 10–300 |
+| Claude 看门狗 | 每次最多 12 秒；`PostToolUse` 钩子超时 30 秒 |
 | 结构化回答 | 最多 60,000 个字符；默认内联结果最多 16,000 |
 | 上下文传递 | 最多 8 MiB UTF-8，不会静默截断 |
 | 自动复制旧版文件 | 每次启动最多 64 MiB |
@@ -673,11 +1004,11 @@ uv run --no-project --python '>=3.12' python -I "$TANDEM_ROOT/server.py" \
 
 | 现象 | 处理方式 |
 |---|---|
-| 无法获取仓库／市场 | 检查访问权限和 Git 身份验证；私有开发阶段需要授权 |
+| 无法获取仓库／市场 | 仓库公开，无需邀请；检查仓库地址、网络、Git 配置和客户端策略 |
 | 缺少 `uv` 或 `omp` | 安装前置工具；如果 `PATH` 发生变化，重新打开终端 |
 | 运行环境准备失败 | 检查 stderr；失败时不会发布就绪标记 |
 | MCP 首次启动超时 | 预热正确的缓存，或在下载完成后重新连接；检查宿主的超时控制 |
-| OMP 无法访问模型 | 直接在 OMP 中配置并验证提供商；doctor 不检查登录 |
+| OMP 无法访问模型 | 在 OMP 中配置提供商；`--doctor` 不检查登录，经用户要求才运行 `tandem_diagnose(live=true)` |
 | 独立安装／插件工具重复 | 完成工作后，显式禁用或删除旧注册 |
 | Codex 已存在注册 | 辅助程序拒绝替换检测到的现有条目；请显式解决，并避免并发编辑配置 |
 | 无法推断插件工作区 | 使用受支持的客户端元数据／根目录机制，或显式按项目配置 `--project-root` |
@@ -691,7 +1022,11 @@ uv run --no-project --python '>=3.12' python -I "$TANDEM_ROOT/server.py" \
 | 产品修订版本冲突 | 读取当前修订版本，并有意使用 `expected_revision` 发布 |
 | 传递内容不可用 | 检查目标接收方和共享状态基目录，而不是使用外部命名空间的来源 ID |
 | 已连接但仍为 `delivery=poll` | 探测／确认流程或组织策略尚未启用推送 |
-| 钩子不受信任／已禁用 | 核心 MCP 仍可工作；正常审查钩子，不要绕过信任机制 |
+| 钩子不受信任／已禁用 | 核心 MCP 仍可工作，但必须有界轮询；正常审查钩子，不要绕过信任机制 |
+| 已有推送确认但仍要求等待 | 检查看门狗是否有真实唤醒证明且当前已就绪；通道确认不等于独立唤醒 |
+| 审查为 `stale`／`previous_version`／`unknown` | 阅读具体范围，必要时捕获新快照并重新独立审查；不要改写旧答案 |
+| 问题修订冲突 | 先读取最新 `revision`，理解并发历史后再提交更新 |
+| 处理凭据为 `uncertain` | 先核对外部操作是否已执行；不要自动释放、重新领取或重放副作用 |
 
 <a id="repository-layout"></a>
 ## 仓库结构
@@ -765,6 +1100,6 @@ uv build --wheel
 
 OMP Tandem 采用 [MIT 许可证](../LICENSE)，copyright (c) 2026 Flyozzzz。你可以使用、复制、修改、再分发、再许可及销售本软件，包括用于商业和闭源产品；分发副本或软件的重要部分时，必须保留版权声明和许可声明。本软件按“原样”提供，不附带任何担保。依赖项仍适用各自的许可证和条款。
 
-仓库可见性仍由所有者控制；MIT 许可证不会自动将私有仓库设为公开。发布前，请检查分发内容中是否存在密钥／内部数据，并验证发布产物。请遵循[贡献指南](../CONTRIBUTING.md)和[安全报告政策](../SECURITY.md)。安装和更新不得改写 Git 历史或更改仓库可见性。
+本项目公开托管于 [Flyozzzz/omp-tandem-public](https://github.com/Flyozzzz/omp-tandem-public)。发布前，请检查分发内容中是否存在密钥／内部数据，并验证发布产物。请遵循[贡献指南](../CONTRIBUTING.md)和[安全报告政策](../SECURITY.md)。安装和更新不得改写 Git 历史或更改仓库可见性。
 
 上游参考资料：[Oh My Pi](https://github.com/can1357/oh-my-pi)、[Claude 插件](https://code.claude.com/docs/en/plugins-reference)、[Codex 插件](https://developers.openai.com/plugins/build/plugins)、[Agent Plugins 规范](https://agent-plugins.org/specification)、[uv](https://docs.astral.sh/uv/)。

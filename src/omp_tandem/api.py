@@ -13,9 +13,12 @@ from pydantic import Field
 from .binding import BridgeBinding, RuntimeOptions
 from .bridge import Bridge
 from .channel import ChannelFastMCP
+from .execution import ExecutionOptions
+from .findings import FindingChange, FindingDraft
 from .models import ArtifactInfo, TaskContract, TurnContract
 from .project_context import ProjectContext
 from .prompts import coordinator_instructions
+from .reviews import ReviewRequest
 from .runtime_models import ACTIVE, Mode, TaskSummary
 from .workspace import client_root_paths
 
@@ -73,9 +76,12 @@ def build_server(configuration: Bridge | RuntimeOptions):
         prompt: str | None = None,
         contract: TaskContract | None = None,
         mode: Mode = "analyze",
-        timeout_seconds: Annotated[int, Field(ge=1, le=7200)] = 1800,
+        timeout_seconds: Annotated[int | None, Field(ge=1, le=7200)] = None,
         project_context_id: str | None = None,
         question_timeout_seconds: Annotated[int, Field(ge=1, le=1800)] = 300,
+        execution: ExecutionOptions | None = None,
+        review_id: str | None = None,
+        review_stage: Literal["independent", "comparison"] | None = None,
     ) -> dict:
         """Start a task with exactly one of prompt or structured contract. Returns immediately.
 
@@ -95,6 +101,9 @@ def build_server(configuration: Bridge | RuntimeOptions):
             project_context_id=project_context_id,
             question_timeout_seconds=question_timeout_seconds,
             granted_roots=await granted_roots(ctx),
+            execution=execution,
+            review_id=review_id,
+            review_stage=review_stage,
         )
         return bridge.channel.decorate(result)
 
@@ -104,9 +113,12 @@ def build_server(configuration: Bridge | RuntimeOptions):
         ctx: Context,
         prompt: str | None = None,
         contract: TurnContract | None = None,
-        timeout_seconds: Annotated[int, Field(ge=1, le=7200)] = 1800,
+        timeout_seconds: Annotated[int | None, Field(ge=1, le=7200)] = None,
         project_context_id: str | None = None,
         question_timeout_seconds: Annotated[int | None, Field(ge=1, le=1800)] = None,
+        execution: ExecutionOptions | None = None,
+        review_id: str | None = None,
+        review_stage: Literal["independent", "comparison"] | None = None,
     ) -> dict:
         """Start a NEW current goal after completion; supply exactly one of prompt or turn contract.
 
@@ -125,6 +137,9 @@ def build_server(configuration: Bridge | RuntimeOptions):
             project_context_id=project_context_id,
             question_timeout_seconds=question_timeout_seconds,
             granted_roots=await granted_roots(ctx),
+            execution=execution,
+            review_id=review_id,
+            review_stage=review_stage,
         )
         return bridge.channel.decorate(result)
 
@@ -145,13 +160,14 @@ def build_server(configuration: Bridge | RuntimeOptions):
         await bridge.channel.bind(ctx)
         deadline = time.monotonic() + wait_seconds
         while True:
-            result = await asyncio.to_thread(bridge.view, task_id, details)
+            task = await asyncio.to_thread(bridge.tasks.get, task_id)
             if (
-                result["status"] == "waiting_input"
-                or result["status"] not in ACTIVE
-                or bridge.channel.confirmed
+                task["status"] == "waiting_input"
+                or task["status"] not in ACTIVE
+                or bridge.channel.can_await([task_id])
                 or time.monotonic() >= deadline
             ):
+                result = await asyncio.to_thread(bridge.view, task_id, details)
                 await asyncio.to_thread(
                     bridge.channel.seen,
                     task_id,
@@ -241,7 +257,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
 
         Returns ready IDs/questions, not full answers. Read ready terminal results with tandem_result
         and remove them from later wait sets; reply directly to a returned question. Does not
-        acknowledge terminal events or rerun work. Confirmed push returns await_event immediately.
+        acknowledge terminal events or rerun work. Await events only with a live independent watchdog.
         """
         bridge = await runtime.get(ctx)
         await bridge.channel.bind(ctx)
@@ -250,7 +266,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
             result = await asyncio.to_thread(bridge.wait_snapshot, task_ids)
             if (
                 result["ready"]
-                or result["delivery"] == "push"
+                or bridge.channel.can_await(result["pending"])
                 or time.monotonic() >= deadline
             ):
                 return bridge.channel.decorate(result)
@@ -341,6 +357,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
         action: Literal["status", "probe", "ack", "pending", "recover"] = "status",
         event_id: str | None = None,
         probe_token: str | None = None,
+        watchdog_token: str | None = None,
         task_id: str | None = None,
         include_previous: bool = False,
         limit: Annotated[int, Field(ge=1, le=20)] = 10,
@@ -348,7 +365,8 @@ def build_server(configuration: Bridge | RuntimeOptions):
         """Manage optional Claude Code Channels push delivery; ordinary polling always remains available.
 
         probe sends a receipt challenge only through the channel; ack with its probe_token confirms
-        delivery. ack with event_id acknowledges a webhook. pending lists unacknowledged events
+        delivery. watchdog_token acknowledges an actual independent hook wake, never a tool-response
+        assertion. ack with event_id acknowledges a webhook. pending lists unacknowledged events
         (include_previous explicitly includes earlier sessions). recover replays one event_id or a
         completed task_id; never changes task outcomes or reruns work. Token-file contents are secret.
         """
@@ -359,8 +377,18 @@ def build_server(configuration: Bridge | RuntimeOptions):
         if action == "probe":
             return await bridge.channel.probe(resend=True)
         if action == "ack":
-            if (event_id is None) == (probe_token is None):
-                raise ValueError("ack requires exactly one of event_id or probe_token")
+            if (
+                sum(
+                    value is not None
+                    for value in (event_id, probe_token, watchdog_token)
+                )
+                != 1
+            ):
+                raise ValueError(
+                    "ack requires exactly one of event_id, probe_token or watchdog_token"
+                )
+            if watchdog_token is not None:
+                return await bridge.channel.confirm_watchdog(watchdog_token)
             if probe_token is not None:
                 return await bridge.channel.confirm(probe_token)
             changed = await asyncio.to_thread(
@@ -403,5 +431,195 @@ def build_server(configuration: Bridge | RuntimeOptions):
             result = {"recovered": count, "task_id": task_id}
         bridge.channel.signal()
         return bridge.channel.decorate(result)
+
+    @mcp.tool()
+    async def tandem_review(
+        ctx: Context,
+        action: Literal["create", "read", "assess"],
+        request: ReviewRequest | None = None,
+        review_id: str | None = None,
+        section: Literal[
+            "manifest",
+            "requirements",
+            "criteria",
+            "diff",
+            "selected",
+            "base",
+            "staged",
+            "checks",
+            "author",
+        ] = "manifest",
+        path: str | None = None,
+        offset: Annotated[int, Field(ge=0)] = 0,
+        limit: Annotated[int, Field(ge=1, le=50000)] = 16000,
+        reveal_author: bool = False,
+    ) -> dict:
+        """Capture or read an immutable review bundle, or compare it with current selected files.
+
+        create collects the bound project's selected Git/working-tree bytes, diff, requirements,
+        supplied checks and explicit boundaries; it never executes test commands. Bind review_id
+        to a think task for snapshot-only review. Author rationale is withheld unless explicitly
+        revealed in a comparison turn. Read pages by next_offset, not the live working directory.
+        assess reports applicability at observation time, not whole-system correctness.
+        """
+        bridge = await runtime.get(ctx)
+        if action == "create":
+            if request is None or review_id is not None:
+                raise ValueError("create requires request and no review_id")
+            return await asyncio.to_thread(bridge.reviews.create, request)
+        if review_id is None or request is not None:
+            raise ValueError("read/assess require review_id and no request")
+        if action == "assess":
+            return await asyncio.to_thread(bridge.reviews.assess, review_id)
+        return await asyncio.to_thread(
+            bridge.reviews.read,
+            review_id,
+            section=section,
+            path=path,
+            offset=offset,
+            limit=limit,
+            reveal_author=reveal_author,
+        )
+
+    @mcp.tool()
+    async def tandem_findings(
+        ctx: Context,
+        action: Literal["create", "update", "get", "list"],
+        conversation_id: str | None = None,
+        review_id: str | None = None,
+        finding_id: str | None = None,
+        number: Annotated[int | None, Field(ge=1)] = None,
+        finding: FindingDraft | None = None,
+        change: FindingChange | None = None,
+        expected_revision: Annotated[int | None, Field(ge=1)] = None,
+        task_id: str | None = None,
+        offset: Annotated[int, Field(ge=0)] = 0,
+        limit: Annotated[int, Field(ge=1, le=200)] = 50,
+    ) -> dict:
+        """Track version-bound review findings without rewriting their history.
+
+        Validity and resolution are separate. A claimed fix is not verified; verify_fixed needs
+        evidence and a completed verification task for its snapshot. Update requires the current
+        expected_revision. Get by stable finding_id or conversation_id plus human number.
+        """
+        bridge = await runtime.get(ctx)
+        store = bridge.findings
+        if action == "create":
+            if conversation_id is None or review_id is None or finding is None:
+                raise ValueError(
+                    "create requires conversation_id, review_id and finding"
+                )
+            return await asyncio.to_thread(
+                store.create,
+                conversation_id,
+                review_id,
+                finding,
+                task_id=task_id,
+            )
+        if action == "update":
+            if finding_id is None or change is None or expected_revision is None:
+                raise ValueError(
+                    "update requires finding_id, change and expected_revision"
+                )
+            return await asyncio.to_thread(
+                store.update,
+                finding_id,
+                change,
+                expected_revision,
+                task_id=task_id,
+            )
+        if action == "list":
+            if task_id is not None:
+                if conversation_id is not None or review_id is not None:
+                    raise ValueError("List by task_id OR conversation/review filters")
+                items = await asyncio.to_thread(
+                    store.for_task, task_id, limit=limit, offset=offset
+                )
+            else:
+                items = await asyncio.to_thread(
+                    store.list,
+                    conversation_id=conversation_id,
+                    review_id=review_id,
+                    limit=limit,
+                    offset=offset,
+                )
+            return {
+                "findings": items,
+                "next_offset": offset + len(items) if len(items) == limit else None,
+            }
+        if finding_id is not None:
+            if number is not None or conversation_id is not None:
+                raise ValueError("Get by finding_id OR conversation_id and number")
+            return await asyncio.to_thread(
+                store.get, finding_id, history_offset=offset, history_limit=limit
+            )
+        if conversation_id is None or number is None:
+            raise ValueError("get requires finding_id OR conversation_id and number")
+        return await asyncio.to_thread(
+            store.get_by_number,
+            conversation_id,
+            number,
+            history_offset=offset,
+            history_limit=limit,
+        )
+
+    @mcp.tool()
+    async def tandem_diagnose(
+        ctx: Context,
+        live: bool = False,
+        task_id: str | None = None,
+        expected_project: str | None = None,
+        wait_seconds: Annotated[int, Field(ge=0, le=25)] = 25,
+        timeout_seconds: Annotated[int, Field(ge=10, le=300)] = 90,
+    ) -> dict:
+        """Diagnose this client session's project, OMP execution, actual model and delivery.
+
+        live=true starts one short provider request and may incur a charge: use only for a
+        user-requested live check. Default checks local state without contacting a provider.
+        If still running, inspect the returned task_id instead of starting another check.
+        A separate CLI process cannot certify this session's push receipt.
+        """
+        bridge = await runtime.get(ctx)
+        await bridge.channel.bind(ctx)
+        return await bridge.diagnostics.run(
+            live=live,
+            task_id=task_id,
+            expected_project=expected_project,
+            wait_seconds=wait_seconds,
+            timeout_seconds=timeout_seconds,
+        )
+
+    @mcp.tool()
+    async def tandem_receipt(
+        ctx: Context,
+        task_id: str,
+        action: Literal["status", "claim", "complete"] = "status",
+        token: str | None = None,
+    ) -> dict:
+        """Gate result processing separately from reading/acknowledging notification events.
+
+        Claim before applying a terminal result; only an authorized fresh claim may proceed.
+        Complete with its token after handling. Duplicate reads do not authorize repeated effects.
+        A stranded claim is uncertain, never automatically released: reconcile external state.
+        Claims grant no filesystem/external permissions. External effects still need their own
+        idempotency/transaction boundary.
+        """
+        bridge = await runtime.get(ctx)
+        if action == "status":
+            return await asyncio.to_thread(bridge.receipts.status, task_id)
+        if action == "claim":
+            return await asyncio.to_thread(
+                bridge.receipts.claim,
+                task_id,
+                bridge.channel.owner,
+            )
+        if token is None:
+            raise ValueError("complete requires the token from the authorized claim")
+        return await asyncio.to_thread(
+            bridge.receipts.complete,
+            task_id,
+            bridge.channel.owner,
+            token,
+        )
 
     return mcp

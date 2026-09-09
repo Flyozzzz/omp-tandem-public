@@ -6,6 +6,7 @@ from contextlib import closing
 from uuid import uuid4
 
 from .artifacts import ArtifactStore
+from .findings import FindingStore
 from .models import TaskOutcome
 from .project_context import ProjectContextStore
 from .runtime_models import ACTIVE, Cancelled, QuestionRequest
@@ -14,11 +15,16 @@ from .task_store import TaskStore
 
 class TaskInteraction:
     def __init__(
-        self, tasks: TaskStore, artifacts: ArtifactStore, projects: ProjectContextStore
+        self,
+        tasks: TaskStore,
+        artifacts: ArtifactStore,
+        projects: ProjectContextStore,
+        findings: FindingStore,
     ):
         self.tasks = tasks
         self.artifacts = artifacts
         self.projects = projects
+        self.findings = findings
 
     def submit_report(self, task_id, report):
         report = TaskOutcome.model_validate(report)
@@ -60,6 +66,13 @@ class TaskInteraction:
                 )
             if task["report_json"] is not None and task["report_json"] != payload:
                 raise ValueError("A final report has already been submitted")
+            if report.findings or report.finding_updates:
+                self.findings.ingest_report(
+                    db,
+                    task_id,
+                    findings=report.findings,
+                    finding_updates=report.finding_updates,
+                )
             db.execute(
                 "UPDATE tasks SET report_json=?, updated=? WHERE task_id=?",
                 (payload, time.time(), task_id),

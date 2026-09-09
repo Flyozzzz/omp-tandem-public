@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Version: 3.0.2** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Version: 3.1.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -30,6 +30,10 @@ This repository starts from a reviewed snapshot of earlier private development; 
 - [Hooks and skills](#hooks-and-skills)
 - [Working with a peer](#working-with-a-peer)
 - [Tasks and execution modes](#tasks-and-execution-modes)
+- [Immutable review bundles](#immutable-review-bundles)
+- [Live diagnostics](#live-diagnostics)
+- [Computation profiles and usage](#computation-profiles-and-usage)
+- [Finding history](#finding-history)
 - [Product knowledge and decisions](#product-knowledge-and-decisions)
 - [Project isolation](#project-isolation)
 - [Explicit context sharing](#explicit-context-sharing)
@@ -63,6 +67,10 @@ A second agent is useful before implementation, not only after it. OMP can chall
 | Project isolation | Separate task, history, artifact, product, and event stores |
 | Explicit context transfer | Share only a selected snapshot and its referenced evidence |
 | Optional push delivery | Claude Code Channels plus a protected localhost webhook |
+| Review bundles | Save exact code, diff, requirements and supplied checks; detect stale conclusions |
+| Independent watchdog | Bound Claude event waiting independently of Channels; polling remains the fallback |
+| Computation and usage | Choose depth/budget without changing permissions; report known and unknown costs |
+| Finding history | Stable IDs, separate validity and fix verification, immutable version-bound evidence |
 | Copy-only migration | Preserve old results and native sessions without deleting their originals |
 
 ## Architecture
@@ -162,7 +170,7 @@ Before using the plugin, make one harmless request directly in OMP. This verifie
 
 ## Install the plugin
 
-During private development, you need repository access. If access is granted by invitation, accept it first and authenticate your Git client. The installer never switches GitHub accounts for you.
+This repository is public. The installer never switches GitHub accounts for you.
 
 ### Claude Code
 
@@ -269,15 +277,15 @@ Cold downloads can exceed a client's startup timeout. Prewarm or reconnect after
 
 ## Hooks and skills
 
-The plugin deliberately ships **one kind of hook: a lightweight `SessionStart` diagnostic**.
+The Claude plugin combines the existing lightweight `SessionStart` prerequisite diagnostic with an optional independent watchdog:
 
-- Checks only whether `uv` and `omp` are available on `PATH`.
-- Is silent when both are present.
-- Emits bounded setup guidance when a prerequisite is missing.
-- Ignores hook payloads instead of copying prompts or paths into output.
-- Does not install packages, call a model, read authentication, poll tasks, cancel work, or approve permissions.
+- `SessionStart` establishes a private client-session epoch.
+- `PostToolUse` runs a bounded `asyncRewake` hook: a 12-second timer within a 30-second hook timeout. An actual hook wake must be acknowledged before event-only waiting is trusted.
+- Timers are tied to the client session, MCP incarnation, task and generation. Duplicate or stale timers do not authorize a new task or repeated result application.
+- `SessionEnd` invalidates session markers. Hooks never cancel OMP work, approve permissions, return task answers or run a model.
+- The watchdog wrapper uses `uv` offline and outside the project environment. If hooks or the cached interpreter are unavailable, bounded polling remains the working path.
 
-There are no `Stop`, `SessionEnd`, or permission-approval hooks. Task waiting, cancellation, and durable events already belong to the bridge; duplicating them in hooks could interfere with other sessions. Missing or untrusted hooks do not disable the core MCP workflow.
+There are no permission-approval hooks. Claude may label watchdog exit `2` as a hook error in its debug log; it is a control wake, not an OMP task failure. Codex retains its lightweight diagnostic hook and uses polling.
 
 The shared skills provide:
 
@@ -331,6 +339,108 @@ Provide **exactly one** of `prompt` and `contract`. Example `tandem_start` argum
 Owned files are explicit relative paths inside `cwd`, without globs or traversal. Do not declare ownership you have not actually agreed on.
 
 A new `tandem_start` creates a new conversation. A `tandem_continue` creates a new task/turn in the existing conversation. Mode, cwd, and base `WorkPolicy` persist; a new `TurnContract` replaces goal/context/acceptance and supplies turn-only constraints. It cannot change file ownership or expand the base policy.
+
+## Immutable review bundles
+
+Prepare all review materials with one `tandem_review(action="create")` call. Example arguments:
+
+```json
+{
+  "action": "create",
+  "request": {
+    "requirements": "A retried payment must not create a second charge.",
+    "criteria": ["Examine concurrent requests and an ambiguous gateway response."],
+    "base": "HEAD",
+    "author_proposal": "Serialize calls with a process-local lock.",
+    "author_rationale": "The author believes serialization prevents duplicates.",
+    "external_boundaries": ["The payment gateway and production data are not captured."]
+  }
+}
+```
+
+Without `paths`, capture selects current nonignored Git changes, including staged, unstaged and new files. Explicit `paths` select a bounded set relative to the bound project; they also support non-Git projects. The bundle stores selected/base/staged bytes, modes and hashes, Git identities and a diff derived from the captured bytes. Renames are represented as deletion/addition pairs. Selected submodules and unmerged index entries require a separate review and are rejected explicitly.
+
+Optional `checks` entries contain `name`, `output`, optional `command`, `source` and `code_fingerprint`. Collection never executes those commands. Supplied reports remain `verified=false`; without a matching supplied fingerprint, their association with this code version is unknown or different, not silently certified.
+
+Use the returned IDs in these steps, replacing placeholders with actual returned values:
+
+```json
+{"cwd":"/absolute/project","mode":"think","prompt":"Read the saved requirements, criteria and code; give an independent assessment.","review_id":"<review_id>"}
+```
+
+After reading that completed independent answer:
+
+```json
+{"conversation_id":"<conversation_id>","prompt":"Compare the author's proposal with your recorded assessment.","review_stage":"comparison"}
+```
+
+Snapshot-bound tasks require `think` mode. Their `tandem_review_read` host tool reads saved material, not the live working directory; `analyze`/`work` cannot be attached as if their live reads were frozen. Use a separate work conversation for edits. A comparison turn requires a completed independent assessment of the same snapshot in the same conversation. A new `review_id` starts a new independent assessment, while existing conversation exposure must still be acknowledged.
+
+Coordinator reads use `tandem_review(action="read", review_id=..., section=...)`. Sections are `manifest`, `requirements`, `criteria`, `diff`, `selected`, `base`, `staged`, `checks`, and explicitly revealed `author`. File sections require `path`; page with `offset`, `limit` and `next_offset`. Binary bytes use base64 pages. Author proposal/rationale are stored separately and excluded from first-stage manifests and metadata; the worker cannot read them before comparison.
+
+`tandem_review(action="assess", review_id=...)` and terminal result `review.applicability` report `current_selected_state`, `stale`, `previous_version`, or `unknown`, with an observation time. The old answer remains tied to its saved snapshot; changes do not rewrite it or automatically prove it wrong. Unrelated files are outside the selected scope.
+
+The manifest separates **saved**, **observed**, and **external** boundaries. Capture checks for changes across bounded repeated reads; it is not an atomic filesystem snapshot. A saved lockfile does not prove installed dependencies, and unchanged selected bytes do not certify external services or the whole system.
+
+## Live diagnostics
+
+`--doctor` remains a local prerequisite check and does not contact a provider. In the actual connected client, `tandem_diagnose()` additionally reports the bound project and delivery state without launching a task.
+
+For a user-requested live check:
+
+```json
+{"live":true,"expected_project":"/absolute/project","timeout_seconds":90}
+```
+
+This starts one short `think` task and may incur provider cost. A mismatched expected project blocks execution; the argument does not rebind the server. Success proves the expected structured diagnostic answer was received and exposes the actual model when reported. Authentication otherwise remains unverified; the diagnostic never changes credentials.
+
+The tool waits at most 25 seconds. If still running, call `tandem_diagnose(task_id=...)` for that same check, not `live=true` again. Reports distinguish OMP execution from channel receipt and watchdog readiness, with a reason and next step. A successful separate CLI process cannot prove this client's push path. Acknowledge real delivery probes without rerunning the paid model check.
+
+## Computation profiles and usage
+
+Computation settings are independent of `think`/`analyze`/`work` permissions:
+
+| Profile | Thinking | Default turn budget |
+|---|---|---|
+| `quick` | `low` | 600 seconds |
+| `balanced` | `high` | 1800 seconds |
+| `deep` | `high` | 3600 seconds |
+
+Pass `execution` to `tandem_start` or `tandem_continue`:
+
+```json
+{"profile":"quick","thinking":"medium","timeout_seconds":120}
+```
+
+An optional `model` overrides the configured OMP model. Explicit top-level `timeout_seconds` takes precedence over the execution override/profile; otherwise effective settings persist on continuation unless overridden. The bridge checks the actual thinking selection and reports unsupported/clamped requests rather than pretending they applied. Profiles never grant additional tools.
+
+Ordinary results include `execution.requested`, `execution.effective`, `execution.actual`, and `usage.task` / `usage.conversation`. Task usage reports duration, model responses, token categories and native-reported cost. Conversation totals include both review stages without counting resumed history again.
+
+Token/cost metrics use `{value, known_subtotal, status}`: unknown full totals are `null`, and partial known subtotals are not complete totals. Native cost is not an invoice; missing/ambiguous cost is unknown, not zero or invented pricing. Historical tasks without usage remain unknown.
+
+## Finding history
+
+`tandem_findings` manages stable UUIDs and human numbers within a conversation. Create a finding with `conversation_id`, `review_id` and a `finding` object:
+
+```json
+{
+  "title":"Retry may duplicate a charge",
+  "description":"A lost gateway response leaves the local order unpaid.",
+  "location":{"path":"src/payments.py","start_line":12},
+  "reproduction_conditions":["Retry after a gateway success whose response was lost."],
+  "evidence":["The captured flow has no durable gateway idempotency key."],
+  "reason":"The requirement forbids duplicate charges.",
+  "validity":"hypothesis"
+}
+```
+
+The location must belong to captured material and always retains its original snapshot. `get` accepts `finding_id` or `conversation_id` plus `number`; `list` filters by conversation/review or task. `offset`/`limit` page history or lists.
+
+Validity (`hypothesis`, `confirmed`, `rejected`) and resolution (`open`, `claimed_fixed`, `verified_fixed`) are separate. Updates require `finding_id`, `expected_revision` and `change` with `action`, `review_id`, `reason` and evidence. Actions are `note`, `confirm`, `reject`, `reopen`, `claim_fixed`, `verify_fixed`.
+
+`verify_fixed` additionally requires `verification_task_id`: a completed task with a successful structured outcome in the same conversation, bound to the specified snapshot. A running worker cannot verify itself. Read its evidence first, then record the verification. A confirmed defect remains confirmed after its fix; historical verification never automatically applies to newer code.
+
+Worker reports may include optional `findings` and `finding_updates`. Their ingestion is atomic and idempotent; concurrent stale revisions are rejected rather than overwriting history.
 
 ## Product knowledge and decisions
 
@@ -438,8 +548,8 @@ Host prefixes vary; these are the stable tool suffixes. MCP `Context` is injecte
 | Tool | Main inputs | Purpose |
 |---|---|---|
 | `tandem_scope` | None | Inspect the immutable project boundary and startup migration result |
-| `tandem_start` | `cwd`, `prompt` or `contract`, `mode`, timeouts, `project_context_id` | New task and conversation |
-| `tandem_continue` | `conversation_id`, `prompt` or `contract`, timeouts, `project_context_id` | New turn with existing history |
+| `tandem_start` | `cwd`, `prompt` or `contract`, `mode`, timeouts, `execution`, `review_id`, `review_stage`, `project_context_id` | New task and conversation |
+| `tandem_continue` | `conversation_id`, `prompt` or `contract`, timeouts, `execution`, review binding, `project_context_id` | New turn with existing history |
 | `tandem_result` | `task_id`, `wait_seconds`, `details` | Read answer, outcome, question, artifacts, and diagnostics |
 | `tandem_wait` | `task_ids`, `wait_seconds` | Wait for any selected result/question |
 | `tandem_list` | `limit` | Recent tasks in this namespace without large bodies |
@@ -451,8 +561,12 @@ Host prefixes vary; these are the stable tool suffixes. MCP `Context` is injecte
 | `tandem_export_context` | `context_id`, `target_project_root` | Offer a snapshot to a specific recipient |
 | `tandem_import_context` | `transfer_id`, `expected_revision` | Accept an addressed snapshot |
 | `tandem_channel` | `action=status/probe/ack/pending/recover`, relevant IDs/token, `include_previous`, `limit` | Manage optional delivery |
+| `tandem_review` | `action=create/read/assess`, request or review ID, section/path, paging | Immutable review materials and current applicability |
+| `tandem_findings` | `action=create/update/get/list`, IDs, draft/change, revision, paging | Snapshot-bound findings and append-only history |
+| `tandem_diagnose` | `live`, existing diagnostic `task_id`, expected project, bounded wait | Explicit current-client connectivity check |
+| `tandem_receipt` | `task_id`, `action=status/claim/complete`, claim token | Gate result application separately from notification acknowledgment |
 
-OMP itself receives `tandem_ask`, `tandem_finish`, `tandem_publish_artifact`, and `tandem_read_artifact` as host tools bound to its task. `tandem_finish` is mandatory even for a plain-text answer; it is not an ordinary coordinator tool.
+OMP itself receives `tandem_ask`, `tandem_finish`, `tandem_publish_artifact`, and `tandem_read_artifact` as host tools bound to its task. Snapshot tasks additionally receive `tandem_review_read`. `tandem_finish` is mandatory even for a plain-text answer; it is not an ordinary coordinator tool.
 
 ## Results, questions, and artifacts
 
@@ -473,11 +587,13 @@ OMP itself receives `tandem_ask`, `tandem_finish`, `tandem_publish_artifact`, an
 
 Read **`answer`**, not just `summary`. Long default responses expose `answer_truncated` and `answer_artifact_id`. `details=true` includes the full answer/report, contract, current goal, and `diagnostics` such as native session path and effective limits.
 
+Before applying a terminal result, call `tandem_receipt(action="claim", task_id=...)`. Only `authorized=true` grants a fresh processing claim; keep its token and complete the receipt after handling. Duplicate reads/events/claims do not authorize replay. A stranded claim remains `uncertain`, including across restart; reconcile external state rather than retrying effects automatically. External actions need their own idempotency/transaction mechanism.
+
 A missing `tandem_finish` does not become success because ordinary text sounds confident. Preserved text and `provisional_artifacts` remain available. Review them before rerunning an entire task.
 
 The coordinator controls question deadlines. Expiry is not consent. `tandem_reply` resumes the waiting worker; a new `tandem_continue` is for a new turn after completion. Identical duplicate replies are idempotent; conflicting or stale replies are rejected.
 
-`tandem_wait` returns readiness, not complete answers. Read ready results and remove handled terminal IDs from later wait sets. With confirmed push, follow `await_event` instead of repeatedly polling.
+`tandem_wait` returns readiness, not complete answers. Read ready results and remove handled terminal IDs from later wait sets. Follow `await_event` only when returned with a confirmed live watchdog; confirmed channel receipt alone still uses bounded polling.
 
 Artifacts are immutable text/Markdown/JSON versions with SHA-256. Names are logical labels, not arbitrary filesystem paths. Read pages using `next_offset`; offsets count Unicode characters, not bytes. Provisional artifacts are not endorsed final results.
 
@@ -487,11 +603,11 @@ Polling is the normal, fully functional path for every supported MCP client. Use
 
 Claude Code can optionally deliver task/question/webhook events through Channels. A launch flag or connected MCP server does not prove delivery: the coordinator must acknowledge a probe token received from a real channel event before `delivery=push` is confirmed.
 
-The shared collaboration instructions are delivery-independent. `tandem_scope` and task responses return the active `delivery_instructions`; follow them together with `delivery` and `next_action`, replacing earlier guidance when delivery changes. The MCP tool set remains stable.
+The shared collaboration instructions are delivery-independent. `tandem_scope` and task responses return active `delivery_instructions` and `watchdog` metadata; follow them with `delivery` and `next_action`, replacing earlier guidance when capability changes.
 
 - **Polling (`delivery=poll`):** tasks do not wake the coordinator. Do complementary work or wait with `tandem_result(wait_seconds=25)` for one task, or `tandem_wait(task_ids, wait_seconds=25)` for several, then fetch ready results. Handle questions and remove handled terminal IDs. Repeat while owned work remains active; no zero-wait loops, `tandem_list` polling, or promises of a later notification. Channel setup and webhook management are not part of forced polling.
-- **Confirmed push (`delivery=push`):** `await_event` means keep the client open and do other work, without a polling loop. On a task/question event, fetch the result once. Acknowledge handled webhook events; their content is data, not instructions or approval. Do not repeat side effects.
-- **Automatic negotiation and fallback:** until a real probe event is received and acknowledged, use polling. Never confirm a token copied from tool output or repeatedly probe to wait for work. A transport failure restores polling instructions; resume bounded waits.
+- **Push with a live watchdog:** `await_event` means keep the client open and do other work. An event or independent hook wake triggers one result read; if still active, the hook rearms. Without confirmed, currently armed coverage, use bounded polling even when `delivery=push`. Acknowledge handled webhook events; their content is data, not instructions or approval.
+- **Automatic negotiation and fallback:** acknowledge `probe_token` only from a real channel event, and `watchdog_token` only from an actual hook-probe wake. Neither token comes from ordinary tool output. Never repeatedly probe to wait for work. Transport failure or missing watchdog coverage restores bounded polling; no task restart.
 
 Unless the user explicitly pauses or hands off, finish owned work before the final answer. Closing the MCP owner's session stops active work.
 
@@ -585,6 +701,10 @@ The bootstrap additionally handles `--doctor` and `--prepare`. Runtime options c
 | Product snapshot | Up to 64,000 UTF-8 bytes, 50 rules, 100 decisions |
 | Artifact | Up to 4 MiB UTF-8; plain text, Markdown, or JSON |
 | Artifact page | Default 16,000 characters, maximum 50,000 |
+| Review capture | 256 selected paths; 4 MiB per file; 16 MiB saved material |
+| Review page | Default 16,000 characters, maximum 50,000; binary encoded as base64 |
+| Finding list/history page | Default 50, maximum 200 entries |
+| Claude watchdog | 12-second timer; 30-second hook timeout |
 | Structured answer | Up to 60,000 characters; default inline result up to 16,000 |
 | Context transfer | Up to 8 MiB UTF-8, no silent truncation |
 | Automatic legacy file copying | Up to 64 MiB per startup |
@@ -644,11 +764,11 @@ Do not put one product's confidential rules in global instructions if other proj
 
 | Symptom | Action |
 |---|---|
-| Repository/marketplace cannot be fetched | Check access and Git authentication; private development requires authorization |
+| Repository/marketplace cannot be fetched | Check network and Git configuration; the public repository needs no invitation |
 | `uv` or `omp` missing | Install the prerequisite and reopen the terminal if `PATH` changed |
 | Runtime preparation failed | Inspect stderr; no ready marker is published on failure |
 | First MCP startup times out | Prewarm the correct cache or reconnect after downloads; inspect host timeout controls |
-| OMP cannot access a model | Configure and verify the provider directly in OMP; doctor does not check login |
+| OMP cannot access a model | Configure the provider directly in OMP; request `tandem_diagnose(live=true)` in the actual client for a bounded live check |
 | Duplicate standalone/plugin tools | Finish work and explicitly disable/remove the old registration |
 | Existing Codex registration | The helper refuses to replace an observed existing entry; resolve it explicitly and avoid concurrent config edits |
 | Plugin workspace cannot be inferred | Use a supported client metadata/root mechanism or an explicit per-project `--project-root` |
@@ -662,7 +782,7 @@ Do not put one product's confidential rules in global instructions if other proj
 | Product revision conflict | Read the current revision and deliberately publish with `expected_revision` |
 | Transfer unavailable | Check the intended recipient and shared state-base, not a foreign source ID |
 | Connected but `delivery=poll` | Probe/confirmation or organization policy has not enabled push |
-| Untrusted/disabled hooks | Core MCP still works; review hooks normally rather than bypassing trust |
+| Untrusted/disabled hooks or no watchdog confirmation | Use bounded polling; review hooks normally rather than bypassing trust |
 
 ## Repository layout
 
@@ -688,6 +808,12 @@ omp-tandem/
     task_interaction.py       Questions and structured report validation
     task_contracts.py         Persistent policy and per-turn messages
     task_results.py           Result projection and readiness snapshots
+    reviews.py                Immutable selected code and version applicability
+    findings.py               Stable findings and evidence history
+    execution.py              Computation profiles and honest usage aggregation
+    diagnostics.py            Explicit session-bound live checks
+    watchdog.py               Independent bounded client control wake
+    receipts.py               Durable result-application claims
     runtime_models.py         Shared request/status types
     prompts.py                Product-neutral peer instructions
     models.py                 Contracts and reports

@@ -8,6 +8,38 @@
             "command": "sh",
             "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh"],
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "sh",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/watchdog-hook.sh", "${CLAUDE_PLUGIN_ROOT}/scripts/watchdog-hook.py"],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^mcp__.*omp-tandem.*__tandem_(scope|start|continue|result|wait|reply|cancel|channel)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/watchdog-hook.sh", "${CLAUDE_PLUGIN_ROOT}/scripts/watchdog-hook.py"],
+            "asyncRewake": true,
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/watchdog-hook.sh", "${CLAUDE_PLUGIN_ROOT}/scripts/watchdog-hook.py"],
+            "timeout": 5
           }
         ]
       }

@@ -37,6 +37,12 @@ def doctor(root: Path) -> dict:
         "missing": missing,
         "authentication": "not_checked",
         "message": "Provider authentication is required and was not checked.",
+        "live_check": {
+            "tool": "tandem_diagnose",
+            "arguments": {"live": True},
+            "requires_user_request": True,
+            "scope": "Run in the actual connected MCP client session; may incur provider cost.",
+        },
         "requirements": {
             "uv": "Install uv: https://docs.astral.sh/uv/getting-started/installation/",
             "omp": "Install OMP once: https://omp.sh/; configure your own provider login separately.",

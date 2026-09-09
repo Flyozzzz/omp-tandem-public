@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from .events import EventConflict, EventStore, QueueFull
 from .prompts import POLLING_INSTRUCTIONS, PUSH_INSTRUCTIONS
+from .watchdog import Watchdog
 from .webhook import WebhookRejected, WebhookServer
 
 logger = logging.getLogger(__name__)
@@ -63,12 +64,21 @@ class ChannelFastMCP(FastMCP):
 
 class ChannelDelivery:
     def __init__(
-        self, db_path: Path, *, enabled=True, webhook_enabled=True, webhook_port=0
+        self,
+        db_path: Path,
+        *,
+        enabled=True,
+        webhook_enabled=True,
+        webhook_port=0,
+        project_root: Path | None = None,
     ):
         if not 0 <= webhook_port <= 65535:
             raise ValueError("Webhook port must be 0..65535")
         self.store = EventStore(db_path)
         self.owner = str(uuid4())
+        self.watchdog = (
+            Watchdog(project_root, self.owner) if enabled and project_root else None
+        )
         self.root = db_path.parent
         self.enabled = enabled
         self.webhook_enabled = webhook_enabled
@@ -93,6 +103,8 @@ class ChannelDelivery:
     async def start(self):
         self.loop = asyncio.get_running_loop()
         self.wake = asyncio.Event()
+        if self.watchdog is not None:
+            await asyncio.to_thread(self.watchdog.start)
         self.pump = asyncio.create_task(self._pump())
 
     async def bind(self, context, *, auto_probe=True):
@@ -166,6 +178,12 @@ class ChannelDelivery:
             self.signal()
         return self.status()
 
+    async def confirm_watchdog(self, token):
+        if self.watchdog is None:
+            raise ValueError("Watchdog is not available for this project")
+        self.watchdog.confirm(token)
+        return self.status()
+
     def signal(self):
         if self.loop is not None and self.wake is not None and not self.closed:
             self.loop.call_soon_threadsafe(self.wake.set)
@@ -185,6 +203,8 @@ class ChannelDelivery:
         return event
 
     def seen(self, task_id, status, question_id=None):
+        if self.watchdog is not None:
+            self.watchdog.seen(task_id, status)
         if status in ("completed", "failed", "cancelled", "interrupted"):
             self.store.acknowledge_key(self.owner, f"task:{task_id}:{status}")
         elif status == "waiting_input" and question_id:
@@ -198,25 +218,47 @@ class ChannelDelivery:
     def delivery_instructions(self):
         return PUSH_INSTRUCTIONS if self.delivery == "push" else POLLING_INSTRUCTIONS
 
+    def can_await(self, task_ids):
+        return bool(
+            self.delivery == "push"
+            and self.watchdog is not None
+            and self.watchdog.metadata(task_ids)["armed"]
+        )
+
+    def _watchdog_metadata(self, task_ids=()):
+        if self.watchdog is not None:
+            return self.watchdog.metadata(task_ids)
+        return {
+            "available": False,
+            "confirmed": False,
+            "armed": False,
+            "lifetime_seconds": 12,
+            "remaining_seconds": 0,
+            "tickets": [],
+        }
+
     def decorate(self, result):
+        task_id, status = result.get("task_id"), result.get("status")
+        if self.watchdog is not None and task_id and status:
+            self.watchdog.observe(task_id, status)
+        ids = list(result.get("pending", []))
+        if task_id and status in ("starting", "running", "cancelling"):
+            ids.append(task_id)
         result["delivery"] = self.delivery
         result["delivery_instructions"] = self.delivery_instructions
+        result["watchdog"] = self._watchdog_metadata(ids)
+        automatic = self.can_await(ids)
         if "ready" in result and "pending" in result:
             result["next_action"] = (
                 "handle_ready"
                 if result["ready"]
-                else "await_event"
-                if result["delivery"] == "push"
-                else "wait"
+                else ("await_event" if automatic else "wait")
             )
-        if result["delivery"] == "push" and (
-            result.get("status") in ("starting", "running", "cancelling")
-            or (result.get("accepted") and "question_id" in result)
+        elif status in ("starting", "running", "cancelling") or (
+            result.get("accepted") and "question_id" in result
         ):
-            result["next_action"] = "await_event"
-        elif (
-            result["delivery"] == "poll" and result.get("next_action") == "await_event"
-        ):
+            result["next_action"] = "await_event" if automatic else "wait"
+        elif result.get("next_action") == "await_event" and not automatic:
             result["next_action"] = "wait"
         return result
 
@@ -225,15 +267,14 @@ class ChannelDelivery:
             "delivery": self.delivery,
             "delivery_instructions": self.delivery_instructions,
             "confirmed": self.confirmed and not self.closed,
+            "watchdog": self._watchdog_metadata(),
             "probe_pending": bool(
                 self.probe_token
                 and not self.confirmed
                 and time.monotonic() < self.probe_deadline
             ),
             "session_id": self.owner,
-            "next_action": "await_event"
-            if self.confirmed and not self.closed
-            else "use_polling",
+            "next_action": "use_polling",
             "error": self.last_error,
             "webhook": {
                 "enabled": self.webhook is not None,
@@ -377,6 +418,8 @@ class ChannelDelivery:
     async def close(self):
         self.closed = True
         self.confirmed = False
+        if self.watchdog is not None:
+            await asyncio.to_thread(self.watchdog.close)
         if self.startup_probe is not None:
             self.startup_probe.cancel()
             with suppress(asyncio.CancelledError):
