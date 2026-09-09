@@ -6,6 +6,7 @@ import asyncio
 import http.client
 import json
 import os
+import signal
 import sys
 import tempfile
 import unittest
@@ -39,8 +40,9 @@ class ChannelStdioTests(unittest.IsolatedAsyncioTestCase):
         command = [
             sys.executable,
             "-I",
-            "-m",
-            "omp_tandem",
+            "-c",
+            "import faulthandler, signal; faulthandler.register(signal.SIGUSR1); "
+            "from omp_tandem.cli import main; main()",
             "--state-dir",
             str(self.root / "state"),
             "--omp",
@@ -93,7 +95,16 @@ class ChannelStdioTests(unittest.IsolatedAsyncioTestCase):
         await self.process.stdin.drain()
 
     async def read(self):
-        raw = await asyncio.wait_for(self.process.stdout.readline(), 6)
+        try:
+            raw = await asyncio.wait_for(self.process.stdout.readline(), 6)
+        except TimeoutError:
+            if self.process.returncode is None:
+                self.process.send_signal(signal.SIGUSR1)
+                await asyncio.sleep(0.1)
+            self.fail(
+                "MCP response timed out; child diagnostics:\n"
+                + (self.root / "stderr.log").read_text()
+            )
         self.assertTrue(raw, (self.root / "stderr.log").read_text())
         return json.loads(raw)
 

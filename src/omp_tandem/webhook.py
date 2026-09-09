@@ -10,6 +10,7 @@ import threading
 from collections.abc import Callable
 from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 
 logger = logging.getLogger(__name__)
 _MAX_BODY = 32768
@@ -81,6 +82,12 @@ class _HTTPServer(ThreadingHTTPServer):
         self.callback = callback
         self.slots = threading.BoundedSemaphore(8)
         super().__init__(("127.0.0.1", port), _Handler)
+
+    def server_bind(self):
+        # This listener is always numeric loopback; reverse DNS is unnecessary
+        # and can stall channel confirmation on hosts with a slow resolver.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address
 
     def get_request(self):
         request, address = super().get_request()

@@ -8,6 +8,7 @@ import socket
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 from omp_tandem.webhook import WebhookRejected, WebhookServer
 
@@ -239,6 +240,16 @@ class WebhookServerTests(unittest.TestCase):
             finally:
                 release.set()
             self.assertEqual([future.result()[0] for future in pending], [202] * 8)
+
+    def test_loopback_startup_does_not_require_reverse_dns(self):
+        self.server.stop()
+        with patch(
+            "socket.getfqdn", side_effect=AssertionError("Unexpected DNS lookup")
+        ):
+            self.port = self.server.start()
+            status, response, _ = self.request({"content": "Loopback without DNS"})
+        self.assertEqual(status, 202)
+        self.assertTrue(response["accepted"])
 
     def test_stop_is_idempotent_and_releases_listener(self):
         self.assertEqual(self.server.port, self.port)
