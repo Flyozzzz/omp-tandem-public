@@ -1,0 +1,12 @@
+# Delegated workers cannot recursively import the coordinator's MCP bridge.
+enabledProviders: []
+mcp:
+  enableProjectConfig: false
+# Explicit work mode authorizes unattended execution; per-tool deny policies still apply.
+tools:
+  approvalMode: yolo
+# Product knowledge comes from this project's pinned snapshots, not a shared memory bank.
+memory:
+  backend: "off"
+autolearn:
+  enabled: false

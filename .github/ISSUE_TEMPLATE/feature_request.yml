@@ -1,0 +1,36 @@
+name: Feature request
+description: Propose a concrete use case or improvement.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For security issues, follow [SECURITY.md](https://github.com/Flyozzzz/omp-tandem-public/blob/main/SECURITY.md) instead of posting public details.
+        Use synthetic examples; do not include credentials or private runtime data.
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: What problem are you trying to solve, and what observable outcome would help?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior and alternatives
+      description: Describe the change, existing workarounds, and alternatives you considered.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Relevant environment
+      description: Include relevant omp-tandem/OMP versions, operating system, and MCP host/client name and version, or explain why these do not apply.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Boundary implications
+      description: Would this affect project isolation, permissions, session ownership, explicit context transfers, external services, or stored/shared data? Describe any implications, or state that none are expected.
+    validations:
+      required: true

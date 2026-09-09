@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "omp-tandem"
+version = "3.0.1"
+description = "Project-isolated AI peer collaboration through Oh My Pi, MCP, and agent plugins"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp==2.14.7",
+    "mcp>=1.30,<2",
+    "pydantic>=2.11,<3",
+    "omp-rpc @ https://github.com/can1357/oh-my-pi/archive/daf07999c2fee9b22edc7bf8fea1fb6272e0df5e.tar.gz#subdirectory=python/omp-rpc",
+]
+
+[project.scripts]
+omp-tandem = "omp_tandem.cli:main"
+
+[dependency-groups]
+dev = ["ruff>=0.15,<1", "jsonschema>=4.23,<5", "pytest>=8.3,<10"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/omp_tandem"]
+
+[project.urls]
+Repository = "https://github.com/Flyozzzz/omp-tandem-public"
+Issues = "https://github.com/Flyozzzz/omp-tandem-public/issues"
+
+# Bootstrap runs before the application's Python requirement can be enforced.
+[tool.ruff.per-file-target-version]
+"src/omp_tandem/bootstrap.py" = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "RUF", "BLE001", "LOG015", "TRY004"]

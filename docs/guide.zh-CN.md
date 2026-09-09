@@ -1,0 +1,721 @@
+# OMP Tandem — 完整指南
+
+[项目首页](../README.zh-CN.md)
+
+[English](guide.md) · [Русский](guide.ru.md) · **简体中文**
+
+**为你的编程智能体配备一位独立的 AI 协作者：通过 Oh My Pi 共同咨询、设计、实现和审查。**
+
+OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
+
+**版本：3.0.1** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+
+本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
+
+本仓库从经过审查的早期私有开发快照开始，版本号延续原有开发顺序。“Legacy history”指本地 OMP 对话数据的迁移，并非导入旧的 Git 提交。本仓库不包含旧 Git 历史。
+
+[参与贡献](../CONTRIBUTING.md) · [安全政策](../SECURITY.md) · [持续集成](https://github.com/Flyozzzz/omp-tandem-public/actions)
+
+> OMP Tandem 使用官方 `omp_rpc` Python 客户端启动真正的 `omp --mode rpc` 进程，不会用直接调用 OpenAI API 的方式取代 OMP。请在 OMP 中配置受支持的提供商；宿主编程智能体使用自己独立的身份验证。本地存储不等于离线推理：任务上下文会发送给已配置的模型提供商。
+
+<a id="contents"></a>
+## 目录
+
+- [功能概览](#what-it-does)
+- [架构](#architecture)
+- [前置要求](#requirements)
+- [安装 OMP 并配置提供商](#install-omp-and-configure-a-provider)
+- [安装插件](#install-the-plugin)
+- [其他 MCP 客户端](#other-mcp-clients)
+- [自动准备运行环境](#automatic-runtime-preparation)
+- [钩子与技能](#hooks-and-skills)
+- [与协作者共同工作](#working-with-a-peer)
+- [任务与执行模式](#tasks-and-execution-modes)
+- [产品知识与决策](#product-knowledge-and-decisions)
+- [项目隔离](#project-isolation)
+- [显式共享上下文](#explicit-context-sharing)
+- [MCP 工具](#mcp-tools)
+- [结果、问题与产物](#results-questions-and-artifacts)
+- [轮询、Channels 与 Webhook](#polling-channels-and-webhooks)
+- [配置与限制](#configuration-and-limits)
+- [升级与旧版历史记录](#upgrades-and-legacy-history)
+- [安全性与局限](#security-and-limitations)
+- [故障排查](#troubleshooting)
+- [仓库结构](#repository-layout)
+- [开发与验证](#development-and-verification)
+- [分发与许可](#distribution-and-licensing)
+
+<a id="what-it-does"></a>
+## 功能概览
+
+第二个智能体不仅在实现之后有用，在动手之前同样有价值。OMP 可以质疑假设、比较替代方案、负责独立的实现部分，或依据产品需求审查变更。协调者不会天然正确，协作者也一样。
+
+| 能力 | 用途 |
+|---|---|
+| 双向协作 | 咨询、独立推理、设计、实现与审查 |
+| 异步任务 | 启动工作后，继续处理互补的任务 |
+| 原生对话历史 | 继续已有的 OMP 对话，而不是悄悄开启另一个会话 |
+| 每轮目标 | 替换当前目标，而不是重复之前的整轮审计 |
+| 结构化契约 | 指定约束、文件归属、上下文和验收标准 |
+| 带版本的产品快照 | 保存有来源的规则、示例，以及已接受或已否决的决策 |
+| 带截止时间的问题 | 向协调者提问，而不是自行编造尚未确定的决策 |
+| 不可变产物 | 通过带版本的 ID 和 SHA-256 摘要共享报告与证据 |
+| 暂定结果 | 即使缺少最终报告，也能找回有用的材料 |
+| 成组等待 | 等待任意选定任务完成或提出问题 |
+| 项目隔离 | 分离任务、历史记录、产物、产品和事件的存储 |
+| 显式上下文传递 | 仅共享选定的快照及其引用的证据 |
+| 可选推送投递 | Claude Code Channels 与受保护的 localhost Webhook |
+| 仅复制式迁移 | 保留旧结果和原生会话，不删除原始数据 |
+
+<a id="architecture"></a>
+## 架构
+
+```mermaid
+flowchart LR
+    U[User] --> A[Coding agent]
+    P[Plugin or manual MCP configuration] --> B[Isolated bootstrap]
+    A <-->|MCP stdio| S[OMP Tandem server]
+    B --> S
+    S <-->|official omp_rpc| O[Oh My Pi RPC process]
+    O <--> M[Model configured in OMP]
+    S <--> D[(Project SQLite store)]
+    O <--> H[Project native sessions]
+    E[Local CI or script] -->|optional webhook| S
+    S -. confirmed Claude Channel .-> A
+```
+
+1. 宿主加载插件，或启动已配置的 stdio 命令。
+2. 引导程序在插件代码目录之外准备一个依赖版本锁定、以非可编辑方式安装的 Python 环境。
+3. MCP 服务器在打开项目数据之前，先从客户端获取可信工作区。它绝不会使用模型提供的任务 `cwd` 来选择命名空间。
+4. 任务获取一个共享工作进程槽位，然后携带当前目标、持久策略和可选的产品快照启动 OMP 进程。
+5. OMP 可以通过宿主工具提问、发布证据并提交结构化最终报告。
+6. 协调者阅读实际回答，并独立评估重要断言。
+
+完成判定依赖请求确认和终止性的 `agent_end` 事件，而不是扫描保留的事件历史来寻找请求的起始位置。
+
+<a id="requirements"></a>
+## 前置要求
+
+- **macOS 或 Linux**，或使用 Linux 内安装工具的 **WSL**。桥接服务使用 POSIX 锁，不支持原生 Windows。
+- `PATH` 中可用的 **[uv](https://docs.astral.sh/uv/getting-started/installation/)**。它负责选择或下载 Python 3.12+，并准备依赖。
+- `PATH` 中可用的 **[Oh My Pi](https://github.com/can1357/oh-my-pi)**，且已配置受支持的提供商和模型。
+- 已配置的宿主，例如 **[Claude Code](https://code.claude.com/docs/en/quickstart)** 或 **[Codex CLI](https://developers.openai.com/codex/cli)**。
+- 能够联网以首次下载依赖，并访问所选的远程模型提供商。
+
+安装插件会自动注册随包提供的 MCP 服务器，但**不会**静默安装 OMP、为提供商进行身份验证、复制凭据或绕过组织策略。`uv` 和 OMP 需要你安装一次；Python 应用依赖会自动准备。
+
+| 宿主 | 集成方式 | 工作区来源 |
+|---|---|---|
+| Claude Code | 原生插件或手动配置 stdio MCP | `CLAUDE_PROJECT_DIR`；也支持操作者显式覆盖 |
+| Codex CLI | 可移植 Agent Plugins 软件包或手动配置 stdio MCP | 客户端生成的 `codex/sandbox-state-meta.sandboxCwd` 请求元数据；Codex 0.145.0 支持此机制 |
+| Codex IDE 集成 | 在支持的界面中手动配置 MCP；插件可用性因具体界面而异 | 客户端发出元数据时，使用相同的客户端元数据机制 |
+| 其他本地 MCP 宿主 | 手动 stdio 配置；若宿主支持，也可使用可移植插件 | 一个无歧义的客户端根目录，或由操作者显式指定项目根目录；也支持普通非插件启动时的 cwd |
+| 纯网页 ChatGPT／移动端 | 安装软件包不会部署本地进程 | 需要合适的本地执行宿主，或另行设计远程集成 |
+
+从 GitHub 添加到本地的插件市场，不等于已获准进入厂商的公共插件目录。尤其是，本地 stdio 服务器并不会自动成为公共 HTTPS MCP 服务。
+
+<a id="install-omp-and-configure-a-provider"></a>
+## 安装 OMP 并配置提供商
+
+<a id="install-the-prerequisites"></a>
+### 安装前置工具
+
+在使用 Homebrew 的机器上：
+
+```sh
+brew install uv
+brew install can1357/tap/omp
+```
+
+macOS/Linux 官方独立安装脚本：
+
+```sh
+curl -LsSf https://astral.sh/uv/install.sh | sh
+curl -fsSL https://omp.sh/install | sh
+```
+
+这些命令会执行来自官方分发端点的脚本。如果组织有相关要求，请先审阅脚本，或使用获准的包管理器。OMP Tandem 不会从钩子中执行这些命令。
+
+如果你已在使用受支持版本的 Bun，OMP 还提供以下安装方式：
+
+```sh
+bun install -g @oh-my-pi/pi-coding-agent
+```
+
+平台细节和 Bun 要求请参阅[最新 OMP 安装说明](https://github.com/can1357/oh-my-pi#install)。如果安装程序修改了 `PATH`，请重新打开终端。
+
+<a id="configure-your-own-provider"></a>
+### 配置你自己的提供商
+
+启动 OMP 的配置流程：
+
+```sh
+omp setup
+```
+
+或者打开一个 OMP 会话：
+
+```sh
+omp
+```
+
+在 OMP 中，使用 `/login` 完成受支持的账号身份验证，使用 `/model` 选择默认模型。对于使用 API 密钥的提供商，请遵循 OMP 针对该提供商的配置或环境变量说明。不要将密钥放入插件清单、产品快照、代码仓库或聊天示例中。
+
+OMP 支持多个托管提供商，以及本地／兼容 OpenAI 的后端。请选择支持工具调用工作流、且能遵循所需报告契约的模型。“任意提供商”是指 OMP 支持的提供商，不代表保证任意模型都能可靠完成智能体任务。
+
+对于自定义后端，使用 OMP 的 `~/.omp/agent/models.yml` 配置，并通过 `omp setup` 或 `/model` 选择该提供商／模型。参阅[提供商参考文档](https://omp.sh/docs/providers)。除非显式覆盖，否则桥接服务继承 OMP 的模型选择。
+
+使用插件之前，请直接在 OMP 中发出一个无害请求。这可以验证真实的提供商访问能力；仅找到可执行文件并不能验证身份认证。配置 OMP 不会让你自动登录 Claude Code 或 Codex。
+
+<a id="install-the-plugin"></a>
+## 安装插件
+
+在私有开发阶段，你需要仓库访问权限。如果权限通过邀请授予，请先接受邀请，并完成 Git 客户端身份验证。安装程序绝不会替你切换 GitHub 账号。
+
+<a id="claude-code"></a>
+### Claude Code
+
+```sh
+claude plugin marketplace add Flyozzzz/omp-tandem-public
+claude plugin install omp-tandem@omp-tandem
+```
+
+从目标项目目录启动一个新的 Claude 会话。如果客户端要求执行 `/reload-plugins`，请等正在进行的委派工作结束后再按要求操作。
+
+可以这样提出请求：
+
+> 使用 OMP Tandem。调用 `tandem_scope` 并报告绑定的项目，然后请 OMP 以 `think` 模式为我的提案提供独立意见。等待回答并加以评估，不要默认它一定正确。
+
+共享工作流技能可通过 `/omp-tandem:tandem` 使用；配置技能为 `/omp-tandem:setup`。客户端显示的 MCP 工具名称包含插件前缀，但工具后缀始终为 `tandem_*`。
+
+<a id="codex-cli"></a>
+### Codex CLI
+
+```sh
+codex plugin marketplace add Flyozzzz/omp-tandem-public
+codex plugin add omp-tandem@omp-tandem --json
+```
+
+在目标项目中启动一个新的 Codex 会话。使用 `/plugins` 检查安装情况。要求它使用 OMP Tandem，并在委派任务前调用 `tandem_scope`。
+
+Codex 对非受管钩子要求显式信任审查；使用 `/hooks` 检查这些钩子。MCP 服务器无需可选的诊断钩子也能工作，因此不需要绕过钩子信任机制。
+
+<a id="local-development-or-a-checked-out-copy"></a>
+### 本地开发或已检出的副本
+
+```sh
+TANDEM_ROOT=/absolute/path/to/omp-tandem
+claude plugin marketplace add "$TANDEM_ROOT"
+codex plugin marketplace add "$TANDEM_ROOT"
+```
+
+添加本地市场后，通过相应客户端安装插件。两个市场目录都指向自包含的仓库根目录。不要引用插件目录之外的文件：宿主可能会将插件复制到带版本的缓存中。
+
+**避免重复注册。** 如果已经安装独立 MCP，请先完成其任务，并在切换到插件前显式删除或禁用旧注册。配置辅助程序不会静默覆盖现有条目。在 Codex 中，手动注册的服务器可能优先于插件服务器。
+
+<a id="other-mcp-clients"></a>
+## 其他 MCP 客户端
+
+插件支持不是必需的。可以使用同一个启动器配置本地 stdio MCP 服务器。请将路径替换为软件包真实的绝对路径：
+
+```json
+{
+  "mcpServers": {
+    "omp-tandem": {
+      "command": "uv",
+      "args": [
+        "run", "--no-project", "--python", ">=3.12",
+        "python", "-I", "/absolute/path/to/omp-tandem/server.py"
+      ]
+    }
+  }
+}
+```
+
+宿主必须提供可信的工作区。如果无法提供，请在**该项目的客户端配置中**，向服务器参数添加 `--project-root` 和目标项目的绝对路径，而不是将其硬编码到多个无关项目共用的一份全局配置中。
+
+独立辅助程序可以准备运行环境，并返回准确的配置方案，而不修改客户端设置：
+
+```sh
+uv run --no-project --python '>=3.12' python -I \
+  "$TANDEM_ROOT/scripts/install.py" --client none --json
+```
+
+如需独立注册，选择 `--client claude` 或 `--client codex`。Claude 支持 `--scope user` 和 `--scope local`；辅助程序的 Codex 注册仅支持用户作用域。操作者可以显式维护项目本地的 Codex TOML 配置。使用 `--check` 仅检查前置条件，或使用 `--no-register` 只准备环境而不注册。
+
+客户端配置格式和审批控制各不相同。支持标准 MCP 并不意味着支持 Claude Channels、插件技能、钩子，或能够在纯网页客户端中运行本地进程。
+
+<a id="automatic-runtime-preparation"></a>
+## 自动准备运行环境
+
+标准启动器使用隔离模式的 Python：
+
+```sh
+uv run --no-project --python '>=3.12' python -I "$TANDEM_ROOT/server.py"
+```
+
+`--no-project` 防止将宿主项目的 Python 配置作为启动环境。`-I` 防止 cwd/PYTHONPATH 中的模块替换引导程序或运行时导入的模块；它**不是**操作系统沙箱。实际工作目录和提供商环境仍可供启动的应用使用。
+
+首次使用时，引导程序会：
+
+1. 根据源码／资源字节、依赖／构建元数据、相关忽略文件和所选解释器计算环境标识。
+2. 获取该标识对应的锁，防止并发启动发布不完整的环境。
+3. 在全新的私有环境代次中安装冻结依赖，并以非可编辑方式安装软件包。
+4. 检查准备好的解释器能否导入运行时。
+5. 仅在成功后原子地发布就绪标记。
+6. 执行 `python -I -m omp_tandem`，将 MCP stdout 专用于协议通信。
+
+准备失败不会将环境标记为就绪。新建或修复的环境代次不会覆盖仍在运行的旧环境。依赖日志写入 stderr。
+
+缓存位于 `PLUGIN_DATA` 或 `CLAUDE_PLUGIN_DATA` 下；未设置时则位于 `~/.cache/omp-tandem/runtimes`。缓存与项目历史分开存放。客户端卸载插件时可能删除插件依赖数据；默认项目状态目录不存放在那里。
+
+实用命令：
+
+```sh
+uv run --no-project --python '>=3.12' python -I "$TANDEM_ROOT/server.py" --doctor
+uv run --no-project --python '>=3.12' python -I "$TANDEM_ROOT/server.py" --prepare
+```
+
+`--doctor` 不会安装应用依赖、读取凭据或验证提供商登录。外层 `uv` 调用仍可能下载 Python。`--prepare` 执行实际安装，并以 JSON 返回解释器路径。
+
+首次下载可能超过客户端的启动超时。可以预热环境，或在解决配置错误后重新连接；不要把“MCP 已配置”误认为工作进程已经就绪。在客户端外手动准备环境可能使用不同缓存：为某个客户端的插件运行环境预热时，应使用该客户端提供的同一数据目录。
+
+<a id="hooks-and-skills"></a>
+## 钩子与技能
+
+插件有意只提供**一种钩子：轻量的 `SessionStart` 诊断钩子**。
+
+- 仅检查 `PATH` 中是否存在 `uv` 和 `omp`。
+- 两者均存在时保持静默。
+- 缺少前置工具时，输出长度受限的配置指引。
+- 忽略钩子载荷，不将提示词或路径复制到输出中。
+- 不安装软件包、不调用模型、不读取身份验证信息、不轮询任务、不取消工作，也不批准权限。
+
+没有 `Stop`、`SessionEnd` 或权限审批钩子。任务等待、取消和持久事件本就由桥接服务负责；在钩子中重复实现这些机制可能干扰其他会话。钩子缺失或不受信任，不会禁用核心 MCP 工作流。
+
+共享技能提供：
+
+- **`tandem`**：双向咨询／设计／实现／审查、有明确范围的委派、问题、报告与显式共享。
+- **`setup`**：经用户同意安装前置工具、准备运行环境、配置提供商，以及针对不同客户端的连接指引。
+
+<a id="working-with-a-peer"></a>
+## 与协作者共同工作
+
+好的请求会拆分互补的工作，而不是重复劳动：
+
+> 请 OMP 独立质疑这个设计，并比较替代方案。在它工作的同时，检查我们的 API 约束。然后比较证据，并解释仍未达成一致的地方。
+
+> 将这次实现拆分到互不重叠的文件中。为其中一部分指定验收标准，并以 `work` 模式交给 OMP。整合变更，双方交叉检查重要行为。
+
+> 依据固定版本的产品规则审查这次变更。如果某项安全改进破坏了必须支持的用户场景，请说明冲突并提出替代方案，而不是悄悄删除该场景。
+
+> 继续同一个对话，但只讨论提出的修复方案。不要重复之前的整轮审计，也不要将旧的验收清单继承为新目标。
+
+用户已确认的观察结果与协作者的假设不同。不要仅仅为了再次确认用户的观察而重跑已确认的实验；应调查新的断言或发生变化的代码。任何一方都不应只负责无条件认可另一方。
+
+<a id="tasks-and-execution-modes"></a>
+## 任务与执行模式
+
+| 模式 | OMP 工具 | 典型用途 |
+|---|---|---|
+| `think` | 无项目／shell 工具；协作宿主工具仍可用 | 基于所提供上下文进行咨询和推理 |
+| `analyze` | 读取／搜索／glob／网页搜索；无 shell、编辑或 LSP | 调查与审查；默认模式 |
+| `work` | 分析工具，加上 edit/write/bash/LSP/todo | 经明确授权的实现与验证 |
+
+`work` 允许无人值守执行，但不是沙箱。各工具的拒绝策略仍然生效。文件归属声明用于防止同一项目存储内的任务分配重叠，并不能阻止所有可能的文件系统访问。
+
+`prompt` 和 `contract` **必须且只能提供其中一个**。以下是 `tandem_start` 参数示例；请替换为你自己的路径和文件名：
+
+```json
+{
+  "cwd": "/absolute/project",
+  "mode": "work",
+  "contract": {
+    "goal": "Fix repeated upload handling",
+    "context": "The cause is established; investigate the proposed fix, not the entire system again",
+    "scope": {"owned_files": ["src/upload.py"]},
+    "constraints": ["Keep the public API", "Preserve concurrent changes"],
+    "acceptance": ["Repeated uploads behave correctly", "The existing successful flow is preserved"]
+  },
+  "timeout_seconds": 1800,
+  "question_timeout_seconds": 300
+}
+```
+
+所负责文件必须使用 `cwd` 内明确的相对路径，不能包含 glob 模式或路径穿越。不要声明未经实际协商同意的文件归属。
+
+新的 `tandem_start` 会创建新对话。`tandem_continue` 则在现有对话中创建新的任务／轮次。模式、cwd 和基础 `WorkPolicy` 保持不变；新的 `TurnContract` 会替换目标／上下文／验收标准，并提供仅本轮生效的约束。它不能更改文件归属或扩大基础策略的范围。
+
+<a id="product-knowledge-and-decisions"></a>
+## 产品知识与决策
+
+`tandem_project_context` 发布不可变的产品快照，内容包括产品摘要、组件、规则、示例、来源和决策。系统不会根据仓库名称自动编造快照。
+
+以下发布示例使用的是**虚构的教学数据**，并不是你实际产品的规则：
+
+```json
+{
+  "action": "publish",
+  "context": {
+    "project_id": "example-product",
+    "product_summary": "A sample product with an automatic normal upload flow",
+    "components": ["upload"],
+    "rules": [{
+      "id": "UX-01",
+      "text": "Normal uploads do not require an extra manual confirmation",
+      "requirement": "required",
+      "applies_to": ["upload"],
+      "source": "Teaching example; replace with a confirmed source",
+      "positive_examples": ["The authorized flow completes automatically"],
+      "negative_examples": ["Every ordinary upload requires manual approval"]
+    }],
+    "decisions": [{
+      "id": "D-01",
+      "text": "Use a substring match as a path ownership boundary",
+      "status": "rejected",
+      "source": "Teaching example of a rejected proposal"
+    }]
+  }
+}
+```
+
+- 规则为 `required` 或 `advisory`；每条规则／决策都需要来源。
+- 决策状态：`accepted`、`rejected`、`deferred`、`superseded`。
+- `supersedes` 引用快照中的另一项决策；循环引用会被拒绝。
+- 规则／决策 ID 在快照内必须唯一。
+- 来源 URL 不会被自动抓取，也不能证明其旁边写出的断言。
+
+启动工作时，将返回的 `context_id` 作为 `project_context_id` 传入。更新已有 `project_id` 时，必须提供其当前的 `expected_revision`，以防止不同作者的修改悄悄冲突。
+
+发布快照不会更新正在运行的任务。后续轮次会继承完全相同的快照，除非显式改为同一产品的另一修订版。切换产品需要新建对话。
+
+OMP 会收到所选快照的全部内容，并可以提出修改建议，但不会获得用于发布快照的宿主工具。报告可通过 `rule_references` 引用已知规则，通过 `decision_references` 引用决策。未知 ID 会被拒绝；即使引用有效，也仍不代表结论已获证实。
+
+<a id="project-isolation"></a>
+## 项目隔离
+
+命名空间由规范化项目根目录的哈希确定，而不是插件安装路径、模型选择、Git 分支或产品名称。
+
+- 不同项目根目录拥有独立的任务、对话、产物、快照和事件队列。
+- 同一根目录中的多个协调者可以有意通过共享项目存储协作。
+- 新任务的 `cwd` 绝不会选择或切换历史记录的命名空间。
+- 外部命名空间的 ID 不能用于读取、回复、取消、继续或恢复另一命名空间的数据。
+- 同一个 `project_id` 可以在不同命名空间中独立存在。
+
+<a id="trusted-client-binding"></a>
+### 可信客户端绑定
+
+操作者显式指定的 `--project-root` 具有最终权威。否则：
+
+- **Claude Code：**使用其导出的 `CLAUDE_PROJECT_DIR`。
+- **Codex：**服务器声明支持 `codex/sandbox-state-meta`；它在首次工具请求时，根据客户端生成的 `sandboxCwd` 文件 URI 延迟完成绑定。后续请求的根目录缺失或发生变化时会被拒绝，而不是重新绑定现有连接。
+- **其他宿主：**支持一个无歧义的 `roots/list` 根目录。多个未标记根目录需要操作者显式指定根目录。非插件启动可以使用其原始 cwd。
+- **未知的插件工作区：**无法确定时拒绝访问。可移植插件进程通常从插件目录启动；服务器绝不会猜测该目录就是用户项目。
+
+`tools/list` 可以在不打开未知项目数据库的情况下提供服务。调用 `tandem_scope` 可检查 `project_root`、`scope_id` 和 `root_source`。
+
+Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` 重新读取。Codex 的沙箱元数据用于身份识别，并不会被重新实现为操作系统权限引擎。额外的文件系统授权不会开放另一项目的历史记录。如果客户端改变了已绑定连接的工作根目录，请为目标项目重新连接，或有意配置一个稳定的操作者根目录。
+
+如果希望嵌套仓库彼此隔离，不要从同一个宽泛的父目录启动两个窗口。不要将某个固定项目的 `--project-root` 放入供无关项目共用的全局注册中。
+
+默认数据布局：
+
+```text
+~/.local/state/omp-tandem/
+  projects/<scope_id>/
+    scope.json
+    tasks.sqlite3
+    sessions/
+    channels/
+  worker-slots/
+  transfers/
+```
+
+默认情况下，数据存放在当前主机／用户本地。Git 不会同步运行时历史。不同根路径／工作树具有不同命名空间；桥接服务不会猜测移动后的文件夹应继承另一命名空间。
+
+<a id="explicit-context-sharing"></a>
+## 显式共享上下文
+
+要将选定的产品知识从 A 共享到 B：
+
+1. 在 A 中，使用 B 的实际根目录调用 `tandem_export_context(context_id, target_project_root)`。
+2. 仅在用户确实有意共享时，将生成的 `transfer_id` 交给 B。
+3. 在 B 中调用 `tandem_import_context(transfer_id, expected_revision)`。
+4. 为 B 的任务使用新的本地 `context_id`。
+
+仅传递选定的快照及其直接引用的证据，不传递任务、对话、问题或事件。上下文／证据 ID 会重新生成，引用也会重新映射。导入的证据属于快照，而不是某个虚构任务。
+
+导出内容绑定到接收方。第三个项目不能代替 B 导入；来源 ID 仍不可访问。导入是原子操作，会考虑修订版本，且对同一传递 ID 具有幂等性。来源信息会保留，但导入**不代表批准**，也不会授予任何工具权限。
+
+此机制仅限于同一个状态基目录内的本地共享。传递包会一直保留到操作者删除，没有自动过期机制。应将包内容和传递 ID 视为敏感信息，而不是公开下载链接。
+
+<a id="mcp-tools"></a>
+## MCP 工具
+
+宿主前缀可能不同；以下是稳定的工具后缀。MCP `Context` 由系统注入，不是用户参数。
+
+| 工具 | 主要输入 | 用途 |
+|---|---|---|
+| `tandem_scope` | 无 | 检查不可变的项目边界和启动迁移结果 |
+| `tandem_start` | `cwd`、`prompt` 或 `contract`、`mode`、超时参数、`project_context_id` | 新建任务和对话 |
+| `tandem_continue` | `conversation_id`、`prompt` 或 `contract`、超时参数、`project_context_id` | 基于已有历史开启新轮次 |
+| `tandem_result` | `task_id`、`wait_seconds`、`details` | 读取回答、结果判定、问题、产物和诊断信息 |
+| `tandem_wait` | `task_ids`、`wait_seconds` | 等待任意选定结果／问题 |
+| `tandem_list` | `limit` | 列出本命名空间中的近期任务，不包含大段正文 |
+| `tandem_reply` | `task_id`、`question_id`、`answer` | 回答准确匹配的待处理问题 |
+| `tandem_cancel` | `task_id` | 请求取消；不会撤销编辑 |
+| `tandem_publish_artifact` | `conversation_id`、`name`、`content`、`media_type` | 发布不可变的材料版本 |
+| `tandem_read_artifact` | `artifact_id`、`offset`、`limit` | 分页读取材料 |
+| `tandem_project_context` | `action=publish/get/list`、快照／ID、`expected_revision`、`limit` | 管理有来源的产品快照 |
+| `tandem_export_context` | `context_id`、`target_project_root` | 向特定接收方提供快照 |
+| `tandem_import_context` | `transfer_id`、`expected_revision` | 接收定向发送的快照 |
+| `tandem_channel` | `action=status/probe/ack/pending/recover`、相关 ID／令牌、`include_previous`、`limit` | 管理可选投递机制 |
+
+OMP 自身会获得绑定到其任务的宿主工具：`tandem_ask`、`tandem_finish`、`tandem_publish_artifact` 和 `tandem_read_artifact`。即使只是纯文本回答，也必须调用 `tandem_finish`；它不是普通的协调者工具。
+
+<a id="results-questions-and-artifacts"></a>
+## 结果、问题与产物
+
+`task_id` 标识一个轮次；`conversation_id` 标识该轮次所属的持久 OMP 对话。`question_id`、`artifact_id` 和 `context_id` 分别标识具体问题、不可变材料版本和产品快照。
+
+| 状态 | 含义 |
+|---|---|
+| `starting` | 工作进程正在启动 |
+| `running` | 正在工作 |
+| `waiting_input` | 等待协调者回答 |
+| `cancelling` | 已请求取消 |
+| `completed` | 轮次已结束；需检查其结果判定 |
+| `failed` | 执行失败，或缺少必需的报告 |
+| `cancelled` | 工作已取消 |
+| `interrupted` | 恢复时发现工作已无存活的所属进程 |
+
+`completed` 不能证明 `success`。结果判定为 `success`、`partial` 或 `blocked`；历史上的非结构化回复可能没有经过评估的结果判定。
+
+请阅读 **`answer`**，而不只是 `summary`。默认响应较长时，会提供 `answer_truncated` 和 `answer_artifact_id`。`details=true` 包含完整回答／报告、契约、当前目标，以及 `diagnostics`，例如原生会话路径和实际生效的限制。
+
+缺少 `tandem_finish` 时，不会因为普通文本听起来很自信就被视为成功。保留的文本和 `provisional_artifacts` 仍可读取。重跑整个任务前，请先审阅这些内容。
+
+问题的截止时间由协调者控制。超时不等于同意。`tandem_reply` 会恢复等待中的工作进程；新的 `tandem_continue` 则用于完成后开启新轮次。内容完全相同的重复回复具有幂等性；冲突或过期的回复会被拒绝。
+
+`tandem_wait` 返回就绪信息，而非完整回答。请读取已就绪的结果，并从后续等待集合中移除已处理的终态 ID。推送确认后，应遵循 `await_event`，而不是反复轮询。
+
+产物是附带 SHA-256 的不可变文本／Markdown／JSON 版本。名称是逻辑标签，不是任意文件系统路径。使用 `next_offset` 分页读取；偏移量按 Unicode 字符计数，而不是字节。暂定产物不等于已认可的最终结果。
+
+<a id="polling-channels-and-webhooks"></a>
+## 轮询、Channels 与 Webhook
+
+轮询是每个受支持 MCP 客户端都可使用的常规、功能完整的路径。使用 `tandem_result` 或 `tandem_wait` 即可；协作者之间的协作不依赖 Channels。
+
+Claude Code 可以选择通过 Channels 投递任务／问题／Webhook 事件。启动标志或已连接的 MCP 服务器并不能证明投递正常：协调者必须确认从真实通道事件收到的探测令牌，之后才会确认 `delivery=push`。
+
+对于已安装的 Claude 插件：
+
+```sh
+uv run --no-project --python '>=3.12' python -I \
+  "$TANDEM_ROOT/scripts/launch.py" --approved-plugin omp-tandem@omp-tandem
+```
+
+对于独立的本地 MCP 注册，省略 `--approved-plugin`；启动器会请求本地开发通道。使用 `--delivery poll` 禁用探测，使用 `--no-webhook` 仅接收任务事件而不启用 HTTP，使用 `--check` 打印启动方案。Claude 参数放在 `--` 之后转发。
+
+启动器不会添加工具权限绕过机制，也不会修改受管设置。请保持客户端开启，以便接收事件。组织的 `channelsEnabled`／插件允许列表仍然生效；此前测试的一个 Team 账号曾被禁止使用 Channels，桥接服务没有绕过该限制。
+
+可选 Webhook 仅在确认后启动，绑定到 `127.0.0.1`，并要求 bearer 令牌。应从 `tandem_channel(status)` 中选择准确的会话描述符，绝不要选取所有窗口中最新的文件。HTTP 202 表示已持久存储，而不是已执行模型。Webhook 是数据输入，不是权限审批，也不是 HTTP MCP 端点。
+
+请求格式、接收方选择、确认、恢复和企业配置，请参阅 [Channels 与 Webhook（英文）](channels.md)。
+
+<a id="configuration-and-limits"></a>
+## 配置与限制
+
+<a id="runtime-arguments"></a>
+### 运行时参数
+
+| 参数 | 用途 |
+|---|---|
+| `--state-dir` | 共享状态基目录；默认为 `OMP_TANDEM_STATE_DIR` 或 `~/.local/state/omp-tandem` |
+| `--project-root` | 操作者显式覆盖工作区 |
+| `--scope-info` | 供操作者以 JSON 检查信息，不启动 MCP 或导入历史 |
+| `--omp` | OMP 可执行文件；默认在 `PATH` 中查找 |
+| `--model` | 覆盖 OMP 模型；否则使用 `OMP_TANDEM_MODEL` 或 OMP 配置 |
+| `--disable-channel` | 强制轮询，不启用探测／Webhook |
+| `--no-webhook` | 禁用 HTTP 监听器 |
+| `--webhook-port` | 回环端口；`0` 为每个会话选择一个空闲端口 |
+| `--no-legacy-import` | 禁用旧版数据自动复制 |
+| `--migrate-only` | 操作者显式执行迁移，输出 JSON，不开启 MCP 会话 |
+| `--legacy-cwd` | 显式指定旧 cwd／工作树的归属；可与 `--migrate-only` 一起重复使用 |
+| `--legacy-context` | 显式指定旧快照的归属；可与 `--migrate-only` 一起重复使用 |
+
+引导程序还会处理 `--doctor` 和 `--prepare`。运行时选项可以追加在标准启动器命令后。环境控制项包括 `OMP_TANDEM_STATE_DIR`、`OMP_TANDEM_MODEL`、`OMP_TANDEM_CHANNEL`、`OMP_TANDEM_WEBHOOK` 和 `OMP_TANDEM_WEBHOOK_PORT`。如果宿主会过滤环境变量，则需要在客户端侧显式转发或配置。
+
+<a id="effective-limits"></a>
+### 实际生效的限制
+
+| 限制 | 数值 |
+|---|---|
+| 并发 OMP 工作进程 | 共用一个状态基目录的所有项目命名空间合计 4 个 |
+| 每个对话的活动轮次 | 1 |
+| 单轮时限 | 默认 1800 秒；1–7200 |
+| 问题截止时间 | 默认 300 秒；1–1800，同时受该轮截止时间限制 |
+| 单次 MCP 等待 | 最多 25 秒 |
+| `tandem_wait` 选定任务 | 1–32 个 ID |
+| 诊断用 RPC 事件历史 | 200,000 个事件；并非无限内存，也不能取代原生历史 |
+| 解析后的任务输入 | 最多 200,000 UTF-8 字节，包含上下文 |
+| 产品快照 | 最多 64,000 UTF-8 字节、50 条规则、100 项决策 |
+| 产物 | 最多 4 MiB UTF-8；纯文本、Markdown 或 JSON |
+| 产物分页 | 默认 16,000 个字符，最多 50,000 |
+| 结构化回答 | 最多 60,000 个字符；默认内联结果最多 16,000 |
+| 上下文传递 | 最多 8 MiB UTF-8，不会静默截断 |
+| 自动复制旧版文件 | 每次启动最多 64 MiB |
+
+工作进程禁用自动记忆后端和 autolearn，以避免形成跨项目共享的知识库。用户配置的全局 OMP 指令和身份验证仍由用户掌控，并按用户配置共享。
+
+<a id="upgrades-and-legacy-history"></a>
+## 升级与旧版历史记录
+
+升级或切换安装方式之前，请先完成正在进行的工作。已运行的 MCP 进程会保留其加载的代码；插件宿主在更新期间可能保留旧代码目录。重新连接或启动新会话，才能使用新版本。
+
+插件安装请通过宿主的插件管理器刷新／更新。对于独立检出的仓库：
+
+```sh
+TANDEM_ROOT="$HOME/.local/share/omp-tandem"
+git -C "$TANDEM_ROOT" pull --ff-only &&
+uv run --no-project --python '>=3.12' python -I "$TANDEM_ROOT/server.py" --prepare
+```
+
+不要为了让更新成功而强制重置本地工作。根目录的 `server.py` 仍是对外提供的启动器；Python 实现模块现位于 `src/omp_tandem`，辅助脚本位于 `scripts`。旧 Python 导入路径不会以兼容模块的形式保留。
+
+迁移绝不会删除或改写旧的全局 `state-base/tasks.sqlite3` 和原生文件。符合条件的已完成对话会复制到正确的项目命名空间，并保留其 ID／结果／材料。
+
+- 自动归属判定要求旧 cwd 完全匹配；不会猜测嵌套项目和临时工作树的归属。
+- 活动中、归属混合、被锁定或包含跨项目引用的对话会暂缓迁移。
+- 保留原生标题／会话元数据，以及同名主干的附属文件。
+- 缺失原生历史时，结果仍可读取，但不能原生续接对话。
+- 复制文件时不会持续占用 SQLite 读／写事务而阻塞其他工作进程。
+- 已导入的对话不会被旧进程后续的修改覆盖。
+- 不导入旧的 Channels 令牌和队列。
+
+以下是操作者示例，请使用明确的真实路径：
+
+```sh
+uv run --no-project --python '>=3.12' python -I "$TANDEM_ROOT/server.py" \
+  --project-root /absolute/project --scope-info
+uv run --no-project --python '>=3.12' python -I "$TANDEM_ROOT/server.py" \
+  --project-root /absolute/project --migrate-only
+uv run --no-project --python '>=3.12' python -I "$TANDEM_ROOT/server.py" \
+  --project-root /absolute/project --migrate-only --legacy-cwd /absolute/old-worktree
+```
+
+显式使用 `--migrate-only` 会取消自动迁移的 64 MiB 文件复制额度。显式指定归属的已删除工作树会保留其原始 cwd：结果仍可读取，但继续对话需要一个实际存在的目录和当前有效的授权。请检查迁移计数和原因；暂缓迁移的工作仍保留在原始存储中。
+
+<a id="security-and-limitations"></a>
+## 安全性与局限
+
+- **不是操作系统沙箱：**带作用域的 MCP ID 无法阻止拥有你当前操作系统权限的进程直接读取文件。对于互不信任的客户端，请使用独立的操作系统账号／容器。
+- **不是审批代理：**产品规则、导入内容、产物和 Webhook 消息都不能扩大权限。OMP 工作模式下的工具不会自动受到宿主智能体 shell 沙箱的约束。
+- **不等于独立验收：**报告、检查和规则引用都是智能体提出的断言。重要行为需要验证。
+- **不是脱离宿主的作业服务：**关闭持有 MCP 的宿主会停止其工作。取消不会撤销编辑。
+- **不会隐式共享凭据：**提供商配置仍在 OMP 中；安装插件不会转移其他用户的访问权限。
+- **不是通用托管执行：**本地 stdio 需要本地执行环境，且相关工具和仓库必须可用。
+- **不会隐式进行 Git 同步：**不要提交状态数据库、原生会话、传递包、令牌、私有配置或运行环境。
+
+如果其他项目不应接收某个产品的机密规则，就不要将这些规则放入全局指令中。随包提供的提示词与具体产品无关。
+
+<a id="troubleshooting"></a>
+## 故障排查
+
+| 现象 | 处理方式 |
+|---|---|
+| 无法获取仓库／市场 | 检查访问权限和 Git 身份验证；私有开发阶段需要授权 |
+| 缺少 `uv` 或 `omp` | 安装前置工具；如果 `PATH` 发生变化，重新打开终端 |
+| 运行环境准备失败 | 检查 stderr；失败时不会发布就绪标记 |
+| MCP 首次启动超时 | 预热正确的缓存，或在下载完成后重新连接；检查宿主的超时控制 |
+| OMP 无法访问模型 | 直接在 OMP 中配置并验证提供商；doctor 不检查登录 |
+| 独立安装／插件工具重复 | 完成工作后，显式禁用或删除旧注册 |
+| Codex 已存在注册 | 辅助程序拒绝替换检测到的现有条目；请显式解决，并避免并发编辑配置 |
+| 无法推断插件工作区 | 使用受支持的客户端元数据／根目录机制，或显式按项目配置 `--project-root` |
+| Codex 工作区发生变化 | 为新根目录重新连接，而不是继续使用旧命名空间 |
+| 另一窗口的 ID 无法识别 | 比较 `tandem_scope`；不同根目录的数据按设计相互独立 |
+| 两个窗口显示相同任务 | 检查是否使用了同一个宽泛的启动根目录，或共享了固定的操作者覆盖配置 |
+| cwd 位于已授权根目录之外 | 打开正确项目，或使用受支持的客户端授权；任务文本不构成授权 |
+| 没有可用工作进程槽位 | 共享状态基目录的容量已被占用；其他命名空间的任务内容仍不可见 |
+| 问题已超时 | 不要视为批准；检查结果，并提供新的明确决策 |
+| 缺少最终报告 | 重跑工作前，检查错误、保留文本和暂定产物 |
+| 产品修订版本冲突 | 读取当前修订版本，并有意使用 `expected_revision` 发布 |
+| 传递内容不可用 | 检查目标接收方和共享状态基目录，而不是使用外部命名空间的来源 ID |
+| 已连接但仍为 `delivery=poll` | 探测／确认流程或组织策略尚未启用推送 |
+| 钩子不受信任／已禁用 | 核心 MCP 仍可工作；正常审查钩子，不要绕过信任机制 |
+
+<a id="repository-layout"></a>
+## 仓库结构
+
+```text
+omp-tandem/
+  plugin.json                 Portable Agent Plugins identity
+  mcp.json                    Portable MCP entry
+  .claude-plugin/             Claude manifest and marketplace
+  .agents/plugins/            OpenAI/Codex marketplace
+  config/                     Client-specific MCP/hook wiring
+  skills/tandem/              Collaboration workflow
+  skills/setup/               Setup/provider guidance
+  server.py                   Public dependency-preparing launcher
+  src/omp_tandem/
+    bootstrap.py              Frozen private runtime preparation
+    binding.py                Trusted client workspace binding
+    api.py                    MCP handlers
+    cli.py                    Operator/runtime CLI
+    bridge.py                 Composition facade
+    task_store.py             Scoped SQL, recovery, locks, and lifecycle commits
+    task_runtime.py           Task admission, threads, and worker leases
+    native_worker.py          OMP RPC execution and host tools
+    task_interaction.py       Questions and structured report validation
+    task_contracts.py         Persistent policy and per-turn messages
+    task_results.py           Result projection and readiness snapshots
+    runtime_models.py         Shared request/status types
+    prompts.py                Product-neutral peer instructions
+    models.py                 Contracts and reports
+    workspace.py              Namespace and worker-slot controls
+    project_context.py        Immutable product knowledge
+    context_transfer.py       Explicit recipient-bound sharing
+    artifacts.py              Immutable material store
+    migration.py              Copy-only old-history import
+    channel.py                Optional Claude delivery
+    events.py                 Durable event outbox
+    webhook.py                Protected loopback HTTP input
+    worker_turn.py            Event-driven turn completion
+    resources/worker.yml      Packaged worker overlay
+  scripts/                    Setup, launch, and maintenance commands
+  tests/                      Isolated regression suite and RPC fixtures
+  docs/                       Additional reference material
+  pyproject.toml              Package metadata and development tools
+  uv.lock                     Locked dependency resolution
+  SHA256SUMS                  Distribution file checksums
+```
+
+<a id="development-and-verification"></a>
+## 开发与验证
+
+在检出的仓库中：
+
+```sh
+uv sync --frozen
+uv run --frozen pytest -q
+uv run --frozen ruff check .
+uv run --frozen ruff format --check .
+claude plugin validate .claude-plugin/plugin.json
+claude plugin validate .claude-plugin/marketplace.json
+uv build --wheel
+```
+
+回归测试使用临时存储、本地故障模拟对端和 HTTP/MCP 客户端，而不是付费模型调用。重大的运行时变更还需要隔离的真实客户端冒烟检查：软件包安装、工作区绑定、原生 OMP 完成流程，以及受影响时的迁移流程。
+
+插件重构之前，版本 2.4.0 通过了 142 项测试，以及真实的双项目 Claude/OMP 隔离检查和原生历史迁移／续接检查；原始文件保持逐字节一致。当前发布版本的验证情况应记录在发布说明中；以往结果不代表新变更自动正确。
+
+请保留 MCP API 层立即求值的类型注解约定：固定版本的 FastMCP Context 包装器会在注册时解析这些类型。不要为了让测试通过而削弱隔离、从缺失报告中推断成功，或引入隐蔽的跨项目记忆。
+
+<a id="distribution-and-licensing"></a>
+## 分发与许可
+
+OMP Tandem 采用 [MIT 许可证](../LICENSE)，copyright (c) 2026 Flyozzzz。你可以使用、复制、修改、再分发、再许可及销售本软件，包括用于商业和闭源产品；分发副本或软件的重要部分时，必须保留版权声明和许可声明。本软件按“原样”提供，不附带任何担保。依赖项仍适用各自的许可证和条款。
+
+仓库可见性仍由所有者控制；MIT 许可证不会自动将私有仓库设为公开。发布前，请检查分发内容中是否存在密钥／内部数据，并验证发布产物。请遵循[贡献指南](../CONTRIBUTING.md)和[安全报告政策](../SECURITY.md)。安装和更新不得改写 Git 历史或更改仓库可见性。
+
+上游参考资料：[Oh My Pi](https://github.com/can1357/oh-my-pi)、[Claude 插件](https://code.claude.com/docs/en/plugins-reference)、[Codex 插件](https://developers.openai.com/plugins/build/plugins)、[Agent Plugins 规范](https://agent-plugins.org/specification)、[uv](https://docs.astral.sh/uv/)。

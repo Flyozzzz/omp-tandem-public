@@ -1,0 +1,32 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "omp-tandem",
+  "version": "3.0.1",
+  "description": "Reciprocal consultation, design, implementation, and review with Oh My Pi through project-scoped MCP tools.",
+  "author": {
+    "name": "Flyozzzz",
+    "url": "https://github.com/Flyozzzz"
+  },
+  "homepage": "https://github.com/Flyozzzz/omp-tandem-public",
+  "repository": "https://github.com/Flyozzzz/omp-tandem-public",
+  "license": "MIT",
+  "keywords": ["mcp", "collaboration", "oh-my-pi", "code-review"],
+  "extensions": {
+    "com.openai": {
+      "hooks": "./config/codex-hooks.json",
+      "interface": {
+        "displayName": "OMP Tandem",
+        "shortDescription": "Project-scoped collaboration with Oh My Pi",
+        "longDescription": "Consult, design, implement, and review with a reciprocal OMP peer. Shares scoped tasks and explicit context transfers through a local MCP server; provider setup and authentication remain under your control.",
+        "developerName": "Flyozzzz",
+        "category": "Developer Tools",
+        "capabilities": ["Read", "Write"],
+        "websiteURL": "https://github.com/Flyozzzz/omp-tandem-public",
+        "defaultPrompt": [
+          "Use OMP Tandem to discuss the design tradeoffs before changing code.",
+          "Use OMP Tandem to review this change against its acceptance criteria."
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "omp-tandem": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "--no-project", "--python", ">=3.12", "python", "-I", "${CLAUDE_PLUGIN_ROOT}/server.py"]
+    }
+  }
+}
