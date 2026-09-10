@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import difflib
+import fcntl
 import hashlib
 import json
 import os
@@ -11,8 +12,10 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
+import threading
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 from uuid import uuid4
@@ -26,6 +29,36 @@ _MAX_FILE = 4 * 1024 * 1024
 _MAX_TOTAL = 16 * 1024 * 1024
 _MAX_FILES = 256
 _GIT_OUTPUT = 8 * 1024 * 1024
+
+_PUBLICATION_LOCKS = threading.local()
+
+
+class PublicationBusy(RuntimeError):
+    """A controller operation must yield to an atomic snapshot publication."""
+
+
+@contextmanager
+def publication_lock(scope: ProjectScope, *, blocking=True):
+    """Serialize publication with controller writes, without waiting in its guard."""
+    path = scope.directory / "review-publication.lock"
+    held = getattr(_PUBLICATION_LOCKS, "held", None)
+    if held is None:
+        held = _PUBLICATION_LOCKS.held = {}
+    if path in held:
+        yield
+        return
+    with path.open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            raise PublicationBusy(
+                "Snapshot publication is busy; retry shortly"
+            ) from None
+        held[path] = handle
+        try:
+            yield
+        finally:
+            del held[path]
 
 
 class ReviewCheck(BaseModel):
@@ -47,6 +80,11 @@ class ReviewRequest(BaseModel):
         description="Select worktree bytes or Git index bytes compared with base. Staged capture never reads live files.",
     )
     paths: list[str] | None = Field(default=None, min_length=1, max_length=_MAX_FILES)
+    context_paths: list[str] = Field(
+        default_factory=list,
+        max_length=_MAX_FILES,
+        description="Explicit additional saved context; staged reviews use index bytes, never live files.",
+    )
     checks: list[ReviewCheck] = Field(default_factory=list, max_length=32)
     author_proposal: str = Field(default="", max_length=200000)
     author_rationale: str = Field(default="", max_length=200000)
@@ -65,6 +103,19 @@ class ReviewRequest(BaseModel):
         if not value.strip():
             raise ValueError("requirements must be nonblank")
         return value
+
+
+@dataclass(frozen=True)
+class CaptureReservation:
+    run_id: str
+    owner: str
+    review_id: str
+
+    def __post_init__(self):
+        for name in ("run_id", "owner", "review_id"):
+            value = getattr(self, name)
+            if _canonical_id(value, name) != value:
+                raise ValueError(f"{name} must be a canonical UUID string")
 
 
 class _Mutation(ValueError):
@@ -121,7 +172,12 @@ class ReviewStore:
         # ArtifactStore requires task/context ownership. Reviews intentionally own bytes
         # separately rather than pretending a review is a product context.
         self.artifacts = artifacts
-        with closing(self._connect()) as db, db:
+        with publication_lock(scope), closing(self._connect()) as db, db:
+            # Readers must remain available even while large snapshot inserts spill
+            # SQLite's page cache. All snapshot tables and the run mapping still
+            # commit in the same transaction.
+            if db.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+                db.execute("PRAGMA journal_mode=WAL")
             db.execute("BEGIN IMMEDIATE")
             db.execute("""CREATE TABLE IF NOT EXISTS reviews (
                 review_id TEXT PRIMARY KEY, scope_id TEXT NOT NULL,
@@ -351,7 +407,11 @@ class ReviewStore:
         identity = self._identity(request.base)
         index = self._index() if identity["kind"] == "git" else {}
         tree = self._tree(identity) if identity["kind"] == "git" else {}
-        paths = self._selection(request, identity, index, tree)
+        selected_paths = self._selection(request, identity, index, tree)
+        context_paths = {_path(path) for path in request.context_paths}
+        paths = sorted(set(selected_paths) | context_paths)
+        if len(paths) > _MAX_FILES:
+            raise ValueError("Review selects more than 256 files including context")
         files, contents, observed = [], [], {}
         total = 0
         diff = []
@@ -366,6 +426,11 @@ class ReviewStore:
             staged, staged_mode = self._blob(stages[0] if stages else None)
             if request.source == "staged":
                 selected, mode = staged, staged_mode
+            if path in context_paths and selected is None:
+                raise ValueError(
+                    f"Required context is missing from the {request.source} source: {path}; "
+                    "provide an explicit expanded capture before review"
+                )
             if selected is None and base is None and staged is None:
                 raise ValueError(
                     f"Selected file does not exist in the {request.source} source or base: {path}"
@@ -385,6 +450,19 @@ class ReviewStore:
                 if (selected, mode) == (base, base_mode)
                 else "modified"
             )
+            if (
+                identity["kind"] == "git"
+                and path not in selected_paths
+                and row["change"] != "unchanged"
+            ):
+                raise ValueError(
+                    f"Context path has changes: {path}; include it in paths to review those changes"
+                )
+            row["role"] = (
+                "change"
+                if path in selected_paths and row["change"] != "unchanged"
+                else "context"
+            )
             files.append(row)
             for section, data in (
                 ("selected", selected),
@@ -396,7 +474,7 @@ class ReviewStore:
                     if total > _MAX_TOTAL:
                         raise ValueError("Review content exceeds 16 MiB")
                     contents.append((section, path, data))
-            if (selected, mode) != (base, base_mode):
+            if row["role"] == "change":
                 diff.append(
                     f"File: {path}\nModes: {base_mode or 'absent'} -> {mode or 'absent'}\n"
                 )
@@ -428,7 +506,7 @@ class ReviewStore:
         current_index = self._index() if identity["kind"] == "git" else {}
         if (
             self._identity(request.base) != identity
-            or self._selection(request, identity, current_index, tree) != paths
+            or self._selection(request, identity, current_index, tree) != selected_paths
         ):
             raise _Mutation("Git identity or selected paths changed during capture")
         if any(current_index.get(path) != index.get(path) for path in paths):
@@ -468,6 +546,9 @@ class ReviewStore:
             "requested_base": request.base,
             "git": identity,
             "files": files,
+            "context_paths": sorted(context_paths),
+            "change_count": sum(row["role"] == "change" for row in files),
+            "context_count": sum(row["role"] == "context" for row in files),
             "code_fingerprint": fingerprint,
             "checks": [
                 {key: value for key, value in item.items() if key != "output"}
@@ -518,11 +599,79 @@ class ReviewStore:
             contents.append((section, "", encoded))
         return manifest, contents
 
-    def create(self, request: ReviewRequest) -> dict:
+    def _check_reservation(
+        self,
+        db: sqlite3.Connection,
+        reservation: CaptureReservation,
+        request: dict,
+        *,
+        published: bool = False,
+    ) -> None:
+        identity = db.execute(
+            "SELECT scope_id, project_root FROM bridge_scope WHERE singleton=1"
+        ).fetchone()
+        if identity is None or tuple(identity) != (
+            self.scope.key,
+            str(self.scope.root),
+        ):
+            raise ValueError("Capture database belongs to a different launch project")
+        row = db.execute(
+            "SELECT owner, capture_id, capture_started, phase, status, deadline, "
+            "review_id, payload_json FROM review_runs WHERE run_id=?",
+            (reservation.run_id,),
+        ).fetchone()
+        if (
+            row is None
+            or row["owner"] != reservation.owner
+            or row["capture_id"] != reservation.review_id
+            or row["capture_started"] != 1
+            or row["phase"] != "capture"
+            or row["status"] not in ("starting", "running", "waiting_input")
+            or not row["deadline"] > time.time()
+            or row["review_id"] != (reservation.review_id if published else None)
+            or json.loads(row["payload_json"])["request"] != request
+        ):
+            raise ValueError("Capture reservation is no longer publishable")
+        if (
+            not published
+            and db.execute(
+                "SELECT 1 FROM reviews WHERE review_id=?", (reservation.review_id,)
+            ).fetchone()
+        ):
+            raise ValueError("Capture reservation has already been published")
+        # An exclusive lifetime flock is held by the controller. Never create a
+        # missing lease: an absent or acquirable lock proves no live owner.
+        path = self.scope.directory / f"review-owner-{reservation.owner}.lock"
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            raise ValueError("Capture owner lease was lost") from None
+        with os.fdopen(descriptor, "rb") as lease:
+            if not stat.S_ISREG(os.fstat(lease.fileno()).st_mode):
+                raise ValueError("Capture owner lease is not a regular file")
+            try:
+                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            raise ValueError("Capture owner lease was lost")
+
+    def create(
+        self, request: ReviewRequest, *, reservation: CaptureReservation | None = None
+    ) -> dict:
         if not isinstance(request, ReviewRequest):
             request = ReviewRequest.model_validate(request)
         if len(request.model_dump_json().encode("utf-8")) > _MAX_TOTAL:
             raise ValueError("Review request exceeds 16 MiB")
+        normalized = None
+        if reservation is not None:
+            if not isinstance(reservation, CaptureReservation):
+                raise TypeError("reservation must be a CaptureReservation")
+            normalized = request.model_dump()
+            for key in ("paths", "context_paths"):
+                if normalized[key] is not None:
+                    normalized[key] = sorted(set(normalized[key]))
+            with closing(self._connect()) as db:
+                self._check_reservation(db, reservation, normalized)
         for attempt in range(3):
             try:
                 manifest, contents = self._capture(request)
@@ -532,10 +681,13 @@ class ReviewStore:
                     raise ValueError(
                         "Project changed during all three capture attempts; retry when selected files are stable"
                     ) from None
-        review_id, created = str(uuid4()), time.time()
+        review_id = reservation.review_id if reservation else str(uuid4())
+        created = time.time()
         manifest.update(review_id=review_id, created=created, scope_id=self.scope.key)
-        with closing(self._connect()) as db, db:
+        with publication_lock(self.scope), closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
+            if reservation is not None:
+                self._check_reservation(db, reservation, normalized)
             db.execute(
                 "INSERT INTO reviews VALUES (?, ?, ?, ?)",
                 (review_id, self.scope.key, created, _json(manifest)),
@@ -559,6 +711,14 @@ class ReviewStore:
                     ),
                 ),
             )
+            if reservation is not None:
+                db.execute(
+                    "UPDATE review_runs SET review_id=?, updated=? WHERE run_id=?",
+                    (review_id, time.time(), reservation.run_id),
+                )
+                # Recheck after inserting potentially large contents, immediately
+                # before commit. Any lost lease/deadline rolls back both tables.
+                self._check_reservation(db, reservation, normalized, published=True)
         return self._summary(manifest)
 
     def _manifest(self, review_id: str) -> dict:
@@ -582,6 +742,14 @@ class ReviewStore:
             "code_fingerprint": manifest["code_fingerprint"],
             "summary": f"Immutable {manifest.get('source', 'worktree')} review bundle of {len(manifest['files'])} selected paths",
             "file_count": len(manifest["files"]),
+            "change_count": manifest.get(
+                "change_count",
+                sum(row["change"] != "unchanged" for row in manifest["files"]),
+            ),
+            "context_count": manifest.get(
+                "context_count",
+                sum(row["change"] == "unchanged" for row in manifest["files"]),
+            ),
             "check_count": len(manifest["checks"]),
             "selection": manifest["selection"],
             "git": manifest["git"],

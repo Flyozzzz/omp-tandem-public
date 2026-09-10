@@ -1,0 +1,1816 @@
+{
+  "schema_version": 1,
+  "kind": "observed_development_case_not_benchmark",
+  "episodes": [
+    {
+      "kind": "observed_live_review_episode",
+      "status": "cancelled",
+      "outcome": null,
+      "run_id": "3a35588d-66db-4d8d-b9c1-348446174c5d",
+      "started_at": "2026-09-10T07:25:07.926030+00:00",
+      "finished_at": "2026-09-10T07:26:28.487349+00:00",
+      "wall_seconds": 80.558,
+      "budget_seconds": 300,
+      "versions": {
+        "claude": "2.1.267 (Claude Code)",
+        "omp": "omp/18.1.13",
+        "os": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+        "python": "3.13.5",
+        "tandem": "3.3.0",
+        "omp_rpc": "0.1.0",
+        "omp_rpc_revision": "daf07999c2fee9b22edc7bf8fea1fb6272e0df5e",
+        "claude_executable_sha256": "a681f3008f0050029aeebcab3af51bb6a55ddeb625a3af3141a4416d43cd2558",
+        "omp_executable_sha256": "a4c5c9cc5b8222184d0d7429b0bb6ac2a92bbe45dd11bf68e4b1360050791909"
+      },
+      "request": {
+        "requirements": "Review the new read-only review-run orchestration for correctness: owner-scoped idempotent starts, reserved task identity without replay, a total deadline spanning both phases and questions, comparison only after structured independent success, safe cancellation/shutdown, complete preserved answers, and no write or application permission escalation. Identify concrete bugs rather than stylistic preferences; state missing evidence explicitly.",
+        "criteria": [],
+        "base": "HEAD",
+        "source": "worktree",
+        "paths": [
+          "src/omp_tandem/review_runs.py",
+          "src/omp_tandem/task_runtime.py",
+          "src/omp_tandem/task_store.py",
+          "src/omp_tandem/api.py",
+          "src/omp_tandem/bridge.py",
+          "src/omp_tandem/binding.py",
+          "src/omp_tandem/task_interaction.py",
+          "src/omp_tandem/task_results.py",
+          "tests/test_review_runs.py"
+        ],
+        "context_paths": [
+          "src/omp_tandem/execution.py",
+          "src/omp_tandem/runtime_models.py",
+          "src/omp_tandem/models.py",
+          "src/omp_tandem/task_contracts.py"
+        ],
+        "checks": [],
+        "author_proposal": "The author intends a thin scenario above existing tasks: persist owner/key and reserved stage IDs, execute at most two think turns, keep full answers, and use lifetime locks plus cancellation checks to avoid replay or starting comparison after shutdown. The controller should remain honest when interrupted, blocked, or missing context.",
+        "author_rationale": "Move mechanical phase transitions and result assembly into code while leaving substantive review and all write/application decisions explicit. Independent assessment must precede this author explanation.",
+        "external_boundaries": [
+          "Static review of selected Tandem source; no claim of whole-project correctness or sandbox isolation.",
+          "This is a real development episode, not a controlled comparative benchmark."
+        ]
+      },
+      "input_manifest": {
+        "boundaries": {
+          "capture_consistency": "bounded double-read detection; not a filesystem transaction",
+          "external": [
+            "unselected files",
+            "runtime/environment/dependencies",
+            "external services",
+            "test execution",
+            "Static review of selected Tandem source; no claim of whole-project correctness or sandbox isolation.",
+            "This is a real development episode, not a controlled comparative benchmark."
+          ],
+          "observed": [
+            "Git HEAD/base identity",
+            "selected index entries",
+            "selected files stable across two reads"
+          ],
+          "renames": "represented as deletion/addition paths; no similarity inference",
+          "saved": [
+            "requirements",
+            "criteria",
+            "selected/base/staged file bytes and modes",
+            "derived diff",
+            "supplied check reports"
+          ],
+          "whole_environment_immutable": false
+        },
+        "change_count": 9,
+        "checks": [],
+        "code_fingerprint": "cab72c6c5fc8412573b905b08c1ccb9c0b93c70d6847f5e5cbc5ce1fbacf3934",
+        "context_count": 4,
+        "context_paths": [
+          "src/omp_tandem/execution.py",
+          "src/omp_tandem/models.py",
+          "src/omp_tandem/runtime_models.py",
+          "src/omp_tandem/task_contracts.py"
+        ],
+        "created": 1789025119.2938519,
+        "criteria": [],
+        "files": [
+          {
+            "base": {
+              "bytes": 26309,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "c90a83128d59796ce279df80bab210ed5926f4b623928f157382418689343459"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/api.py",
+            "role": "change",
+            "selected": {
+              "bytes": 31579,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "a483aa9b7f916e959e4fe9eaeb90b0649793202ab7862fa5f5f38fa7d33dd530"
+            },
+            "staged": {
+              "bytes": 26309,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "c90a83128d59796ce279df80bab210ed5926f4b623928f157382418689343459"
+            }
+          },
+          {
+            "base": {
+              "bytes": 7120,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "4171f7876830ebaccac0a7734112b634108d596b6f2d0a601e9aefffb9d7f0c4"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/binding.py",
+            "role": "change",
+            "selected": {
+              "bytes": 7174,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "03de23453a09a763057020e2d25c088be91ed4892793b2a273a44fcf32ce3f25"
+            },
+            "staged": {
+              "bytes": 7120,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "4171f7876830ebaccac0a7734112b634108d596b6f2d0a601e9aefffb9d7f0c4"
+            }
+          },
+          {
+            "base": {
+              "bytes": 7160,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "46adc722cc397edd338e9fd35953f269236bf36af23d3db2e205aa1a0db10553"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/bridge.py",
+            "role": "change",
+            "selected": {
+              "bytes": 7641,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "0e5e3bae3cc98c86189fe55dfef15dfad058f476f107add5c902416bf831d827"
+            },
+            "staged": {
+              "bytes": 7160,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "46adc722cc397edd338e9fd35953f269236bf36af23d3db2e205aa1a0db10553"
+            }
+          },
+          {
+            "base": {
+              "bytes": 10122,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d87081b664561e16b073f67b4824e1874a0d2b6ba9e8ca4c3935ecb52235a3e0"
+            },
+            "change": "unchanged",
+            "path": "src/omp_tandem/execution.py",
+            "role": "context",
+            "selected": {
+              "bytes": 10122,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d87081b664561e16b073f67b4824e1874a0d2b6ba9e8ca4c3935ecb52235a3e0"
+            },
+            "staged": {
+              "bytes": 10122,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d87081b664561e16b073f67b4824e1874a0d2b6ba9e8ca4c3935ecb52235a3e0"
+            }
+          },
+          {
+            "base": {
+              "bytes": 5560,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "da48a4a16ee19394791c55ecb4ae6b9650ae254fe40911ae4b18823322880e7c"
+            },
+            "change": "unchanged",
+            "path": "src/omp_tandem/models.py",
+            "role": "context",
+            "selected": {
+              "bytes": 5560,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "da48a4a16ee19394791c55ecb4ae6b9650ae254fe40911ae4b18823322880e7c"
+            },
+            "staged": {
+              "bytes": 5560,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "da48a4a16ee19394791c55ecb4ae6b9650ae254fe40911ae4b18823322880e7c"
+            }
+          },
+          {
+            "base": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            },
+            "change": "added",
+            "path": "src/omp_tandem/review_runs.py",
+            "role": "change",
+            "selected": {
+              "bytes": 24302,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "332631098aa8cac4396c9b44e931a700a91fe9de070d38678b4724b2bf084e1f"
+            },
+            "staged": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            }
+          },
+          {
+            "base": {
+              "bytes": 1949,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "88b648686d7e86466e171f7d3ad39b9e4c62936d1d592e321c9afa5d678935c2"
+            },
+            "change": "unchanged",
+            "path": "src/omp_tandem/runtime_models.py",
+            "role": "context",
+            "selected": {
+              "bytes": 1949,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "88b648686d7e86466e171f7d3ad39b9e4c62936d1d592e321c9afa5d678935c2"
+            },
+            "staged": {
+              "bytes": 1949,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "88b648686d7e86466e171f7d3ad39b9e4c62936d1d592e321c9afa5d678935c2"
+            }
+          },
+          {
+            "base": {
+              "bytes": 4046,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "da997ab61039a7d362659e894406debe20754c4bb018485e78c4faef569b49c4"
+            },
+            "change": "unchanged",
+            "path": "src/omp_tandem/task_contracts.py",
+            "role": "context",
+            "selected": {
+              "bytes": 4046,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "da997ab61039a7d362659e894406debe20754c4bb018485e78c4faef569b49c4"
+            },
+            "staged": {
+              "bytes": 4046,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "da997ab61039a7d362659e894406debe20754c4bb018485e78c4faef569b49c4"
+            }
+          },
+          {
+            "base": {
+              "bytes": 9423,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "62ff51c7c5f5aa0343e5212f7522e6e6d61573984502f0b76972bad7bccf8470"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/task_interaction.py",
+            "role": "change",
+            "selected": {
+              "bytes": 9690,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "56528623cc70eba16f04501116bb8ff9754e5ab047fcfb763e3fdab5bdeda6cb"
+            },
+            "staged": {
+              "bytes": 9423,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "62ff51c7c5f5aa0343e5212f7522e6e6d61573984502f0b76972bad7bccf8470"
+            }
+          },
+          {
+            "base": {
+              "bytes": 7757,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "8bf7e874754539ade22dadf8af0d6caa3c9ef0867381f025874369e4ff876bcb"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/task_results.py",
+            "role": "change",
+            "selected": {
+              "bytes": 7855,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "2a538d6e67e2a752bed4c5749a4a9b2b11231b2cca5e44f6381beb2693399656"
+            },
+            "staged": {
+              "bytes": 7757,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "8bf7e874754539ade22dadf8af0d6caa3c9ef0867381f025874369e4ff876bcb"
+            }
+          },
+          {
+            "base": {
+              "bytes": 9605,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "86bbb4a5c9f35aa7da8a7b1d4e230367ea063a2c6dfac13b8252ed64f36ed4e0"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/task_runtime.py",
+            "role": "change",
+            "selected": {
+              "bytes": 10439,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "f233679e78974872ef01530c0ba40c43a3625fab04dbe7769191ed8d7b6bae4f"
+            },
+            "staged": {
+              "bytes": 9605,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "86bbb4a5c9f35aa7da8a7b1d4e230367ea063a2c6dfac13b8252ed64f36ed4e0"
+            }
+          },
+          {
+            "base": {
+              "bytes": 13542,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d3d82a83596f41079b918d08a340847105c69b2a8595ae7b14001c21cd2295ea"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/task_store.py",
+            "role": "change",
+            "selected": {
+              "bytes": 16401,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "48e983636b6420870d07f368d6dfca3574864b6841e0e3cbc26d7e898fa5fb29"
+            },
+            "staged": {
+              "bytes": 13542,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d3d82a83596f41079b918d08a340847105c69b2a8595ae7b14001c21cd2295ea"
+            }
+          },
+          {
+            "base": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            },
+            "change": "added",
+            "path": "tests/test_review_runs.py",
+            "role": "change",
+            "selected": {
+              "bytes": 17817,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "df3df3419a81b578568af1f68e6a43ed59cac8ffb8812fb04c9603b02ec1a82d"
+            },
+            "staged": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            }
+          }
+        ],
+        "git": {
+          "base_commit": "9da1ec4e04043fa98a4ee0b94aab697c639cc917",
+          "head": "9da1ec4e04043fa98a4ee0b94aab697c639cc917",
+          "kind": "git",
+          "prefix": ""
+        },
+        "requested_base": "HEAD",
+        "requirements": "Review the new read-only review-run orchestration for correctness: owner-scoped idempotent starts, reserved task identity without replay, a total deadline spanning both phases and questions, comparison only after structured independent success, safe cancellation/shutdown, complete preserved answers, and no write or application permission escalation. Identify concrete bugs rather than stylistic preferences; state missing evidence explicitly.",
+        "review_id": "64e01758-9895-4606-808b-91db09a1c369",
+        "schema_version": 1,
+        "scope_id": "f7422a2e9a307231468ae591c6ddf9f8ed07d7ce1cb37418e081be9108c71dea",
+        "selection": "explicit_paths",
+        "source": "worktree"
+      },
+      "stages": {
+        "independent": {
+          "task_id": "508f8ae5-b537-4ed8-818f-9cf80bd7f947",
+          "status": "cancelled",
+          "reported_outcome": null,
+          "execution_outcome": null,
+          "answer": "",
+          "actual_model": "openai-codex/gpt-6-astra",
+          "actual_thinking": "low"
+        },
+        "comparison": null
+      },
+      "questions": [
+        {
+          "question_id": "f15e35cb-4755-4462-b30e-304156003bd0",
+          "task_id": "508f8ae5-b537-4ed8-818f-9cf80bd7f947",
+          "question": "Please expand the saved capture with src/omp_tandem/native_worker.py, src/omp_tandem/reviews.py, and the worker host-tool permission/dispatch implementation used by NativeWorker (plus tests/helpers.py and tests/test_review_integration.py if test evidence is desired). These are absent and needed to assess read-only enforcement, saved-author visibility, and actual deadline/cancellation behavior. Do not provide author proposal/rationale.",
+          "context": "Selected orchestration enforces think mode and clamps admitted task deadlines, but delegated enforcement is outside the 13 saved paths. I will report static findings in captured code independently; no live reads or execution.",
+          "state": "cancelled",
+          "answer": null
+        }
+      ],
+      "coordinator": {
+        "requested_model": "sonnet",
+        "model_usage": {
+          "claude-haiku-4-5-20251001": {
+            "inputTokens": 1556,
+            "outputTokens": 20,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.0016560000000000001,
+            "contextWindow": 200000,
+            "maxOutputTokens": 32000,
+            "thinkingTokens": 0,
+            "canonicalModel": "claude-haiku-4-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          },
+          "claude-sonnet-5": {
+            "inputTokens": 8,
+            "outputTokens": 1986,
+            "cacheReadInputTokens": 74628,
+            "cacheCreationInputTokens": 31374,
+            "webSearchRequests": 0,
+            "costUSD": 0.16029759999999998,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 64000,
+            "thinkingTokens": 329,
+            "canonicalModel": "claude-sonnet-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        },
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 31374,
+          "cache_read_input_tokens": 74628,
+          "output_tokens": 1986,
+          "output_tokens_details": {
+            "thinking_tokens": 329
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 31374,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": "not_available",
+          "iterations": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 528,
+              "cache_read_input_tokens": 27978,
+              "cache_creation_input_tokens": 3396,
+              "cache_creation": {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 3396
+              },
+              "type": "message"
+            }
+          ],
+          "speed": "standard"
+        },
+        "cost_usd": 0.1619536,
+        "answer": "I cancelled this review run — it's blocked, not completed.\n\n**What happened:** The independent reviewer paused with a clarification question, asking for the capture to be expanded with `src/omp_tandem/native_worker.py`, `src/omp_tandem/reviews.py`, the NativeWorker host-tool permission/dispatch implementation, and optionally `tests/helpers.py` / `tests/test_review_integration.py`. It stated these are required to properly assess read-only enforcement, saved-author visibility, and actual deadline/cancellation behavior — none of that is derivable from just the 13 paths that were bound to this run's requirements/paths list.\n\n**Why I stopped instead of proceeding:** I was instructed not to start another run, manually switch stages, or invent context if a clarification can't be answered from the supplied facts — and expanding the file capture wasn't something I could do within this run (it would require a new capture/run, which I was told not to start). So per instructions, I cancelled rather than guessing at the answer or letting it improvise.\n\n**Result:** No independent report, no comparison stage, no findings were produced. This is a blocker, not a review outcome — it says nothing about whether `review_runs.py` and related orchestration code have bugs, and it should not be read as either a pass or a fail on correctness.\n\n**Next step if you want a real result:** re-run with the file set expanded to include `native_worker.py`, `reviews.py`, the NativeWorker permission/dispatch code, and the two test files the reviewer flagged, so it can actually evaluate read-only enforcement and cancellation semantics end-to-end."
+      },
+      "peer_usage": {
+        "task_count": 1,
+        "response_count": {
+          "value": 11,
+          "known_subtotal": 11,
+          "status": "complete"
+        },
+        "models": [
+          "openai-codex/gpt-6-astra"
+        ],
+        "tokens": {
+          "input": {
+            "value": 47418,
+            "known_subtotal": 47418,
+            "status": "complete"
+          },
+          "output": {
+            "value": 644,
+            "known_subtotal": 644,
+            "status": "complete"
+          },
+          "cache_read": {
+            "value": 202880,
+            "known_subtotal": 202880,
+            "status": "complete"
+          },
+          "cache_write": {
+            "value": 0,
+            "known_subtotal": 0,
+            "status": "complete"
+          },
+          "total": {
+            "value": 250942,
+            "known_subtotal": 250942,
+            "status": "complete"
+          }
+        },
+        "cost": {
+          "value": 0.70926,
+          "known_subtotal": 0.70926,
+          "status": "complete"
+        },
+        "duration_seconds": {
+          "value": 59.926766166463494,
+          "known_subtotal": 59.926766166463494,
+          "status": "complete"
+        },
+        "coverage": "partial",
+        "provenance": "sum of disjoint task turns; no cumulative session counters"
+      },
+      "reported_total_cost_usd": 0.8712136,
+      "known_cost_subtotal_usd": 0.8712136,
+      "human_seconds": null,
+      "scope_notes": "Episode includes version inspection, client/MCP startup, capture, provider calls, waiting and client shutdown. Prior implementation/setup and human preparation were not timed. No interactive human input was supplied during this CLI episode.",
+      "collector_error": null,
+      "run_error": null,
+      "run_elapsed_seconds": 61.08828592300415,
+      "protocol_followed": true
+    },
+    {
+      "kind": "observed_live_review_episode",
+      "status": "failed",
+      "outcome": null,
+      "run_id": "9b79be3b-4540-4b7e-82b4-a62c0f39a431",
+      "started_at": "2026-09-10T07:30:53.761101+00:00",
+      "finished_at": "2026-09-10T07:36:25.492727+00:00",
+      "wall_seconds": 331.723,
+      "budget_seconds": 300,
+      "versions": {
+        "collector_sha256": "1fcf0d2b3d1e63a13217278f5445d3b0cf20206d53c75494e4ad23b73c4b4958",
+        "claude": "2.1.267 (Claude Code)",
+        "omp": "omp/18.1.13",
+        "os": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+        "python": "3.13.5",
+        "tandem": "3.3.0",
+        "omp_rpc": "0.1.0",
+        "omp_rpc_revision": "daf07999c2fee9b22edc7bf8fea1fb6272e0df5e",
+        "claude_executable_sha256": "a681f3008f0050029aeebcab3af51bb6a55ddeb625a3af3141a4416d43cd2558",
+        "omp_executable_sha256": "a4c5c9cc5b8222184d0d7429b0bb6ac2a92bbe45dd11bf68e4b1360050791909"
+      },
+      "request": {
+        "requirements": "Review the new read-only review-run orchestration for correctness: owner-scoped idempotent starts, reserved task identity without replay, a total deadline spanning both phases and questions, comparison only after structured independent success, safe cancellation/shutdown, complete preserved answers, and no write or application permission escalation. Identify concrete bugs rather than stylistic preferences; state missing evidence explicitly.",
+        "criteria": [],
+        "base": "HEAD",
+        "source": "worktree",
+        "paths": [
+          "src/omp_tandem/review_runs.py",
+          "src/omp_tandem/task_runtime.py",
+          "src/omp_tandem/task_store.py",
+          "src/omp_tandem/api.py",
+          "src/omp_tandem/bridge.py",
+          "src/omp_tandem/binding.py",
+          "src/omp_tandem/task_interaction.py",
+          "src/omp_tandem/task_results.py",
+          "tests/test_review_runs.py",
+          "src/omp_tandem/reviews.py"
+        ],
+        "context_paths": [
+          "src/omp_tandem/execution.py",
+          "src/omp_tandem/runtime_models.py",
+          "src/omp_tandem/models.py",
+          "src/omp_tandem/task_contracts.py",
+          "src/omp_tandem/native_worker.py",
+          "src/omp_tandem/worker_turn.py",
+          "tests/helpers.py",
+          "tests/test_review_integration.py"
+        ],
+        "checks": [],
+        "author_proposal": "The author intends a thin scenario above existing tasks: persist owner/key and reserved stage IDs, execute at most two think turns, keep full answers, and use lifetime locks plus cancellation checks to avoid replay or starting comparison after shutdown. The controller should remain honest when interrupted, blocked, or missing context.",
+        "author_rationale": "Move mechanical phase transitions and result assembly into code while leaving substantive review and all write/application decisions explicit. Independent assessment must precede this author explanation.",
+        "external_boundaries": [
+          "Static review of selected Tandem source; no claim of whole-project correctness or sandbox isolation.",
+          "This is a real development episode, not a controlled comparative benchmark."
+        ]
+      },
+      "input_manifest": {
+        "boundaries": {
+          "capture_consistency": "bounded double-read detection; not a filesystem transaction",
+          "external": [
+            "unselected files",
+            "runtime/environment/dependencies",
+            "external services",
+            "test execution",
+            "Static review of selected Tandem source; no claim of whole-project correctness or sandbox isolation.",
+            "This is a real development episode, not a controlled comparative benchmark."
+          ],
+          "observed": [
+            "Git HEAD/base identity",
+            "selected index entries",
+            "selected files stable across two reads"
+          ],
+          "renames": "represented as deletion/addition paths; no similarity inference",
+          "saved": [
+            "requirements",
+            "criteria",
+            "selected/base/staged file bytes and modes",
+            "derived diff",
+            "supplied check reports"
+          ],
+          "whole_environment_immutable": false
+        },
+        "change_count": 10,
+        "checks": [],
+        "code_fingerprint": "6e21af567f08d0b52635baaf114fb120b20c5a62f2f3e660c0cb995896b9dfe8",
+        "context_count": 8,
+        "context_paths": [
+          "src/omp_tandem/execution.py",
+          "src/omp_tandem/models.py",
+          "src/omp_tandem/native_worker.py",
+          "src/omp_tandem/runtime_models.py",
+          "src/omp_tandem/task_contracts.py",
+          "src/omp_tandem/worker_turn.py",
+          "tests/helpers.py",
+          "tests/test_review_integration.py"
+        ],
+        "created": 1789025467.684354,
+        "criteria": [],
+        "files": [
+          {
+            "base": {
+              "bytes": 26309,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "c90a83128d59796ce279df80bab210ed5926f4b623928f157382418689343459"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/api.py",
+            "role": "change",
+            "selected": {
+              "bytes": 31579,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "a483aa9b7f916e959e4fe9eaeb90b0649793202ab7862fa5f5f38fa7d33dd530"
+            },
+            "staged": {
+              "bytes": 26309,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "c90a83128d59796ce279df80bab210ed5926f4b623928f157382418689343459"
+            }
+          },
+          {
+            "base": {
+              "bytes": 7120,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "4171f7876830ebaccac0a7734112b634108d596b6f2d0a601e9aefffb9d7f0c4"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/binding.py",
+            "role": "change",
+            "selected": {
+              "bytes": 7174,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "03de23453a09a763057020e2d25c088be91ed4892793b2a273a44fcf32ce3f25"
+            },
+            "staged": {
+              "bytes": 7120,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "4171f7876830ebaccac0a7734112b634108d596b6f2d0a601e9aefffb9d7f0c4"
+            }
+          },
+          {
+            "base": {
+              "bytes": 7160,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "46adc722cc397edd338e9fd35953f269236bf36af23d3db2e205aa1a0db10553"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/bridge.py",
+            "role": "change",
+            "selected": {
+              "bytes": 7641,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "0e5e3bae3cc98c86189fe55dfef15dfad058f476f107add5c902416bf831d827"
+            },
+            "staged": {
+              "bytes": 7160,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "46adc722cc397edd338e9fd35953f269236bf36af23d3db2e205aa1a0db10553"
+            }
+          },
+          {
+            "base": {
+              "bytes": 10122,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d87081b664561e16b073f67b4824e1874a0d2b6ba9e8ca4c3935ecb52235a3e0"
+            },
+            "change": "unchanged",
+            "path": "src/omp_tandem/execution.py",
+            "role": "context",
+            "selected": {
+              "bytes": 10122,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d87081b664561e16b073f67b4824e1874a0d2b6ba9e8ca4c3935ecb52235a3e0"
+            },
+            "staged": {
+              "bytes": 10122,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d87081b664561e16b073f67b4824e1874a0d2b6ba9e8ca4c3935ecb52235a3e0"
+            }
+          },
+          {
+            "base": {
+              "bytes": 5560,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "da48a4a16ee19394791c55ecb4ae6b9650ae254fe40911ae4b18823322880e7c"
+            },
+            "change": "unchanged",
+            "path": "src/omp_tandem/models.py",
+            "role": "context",
+            "selected": {
+              "bytes": 5560,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "da48a4a16ee19394791c55ecb4ae6b9650ae254fe40911ae4b18823322880e7c"
+            },
+            "staged": {
+              "bytes": 5560,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "da48a4a16ee19394791c55ecb4ae6b9650ae254fe40911ae4b18823322880e7c"
+            }
+          },
+          {
+            "base": {
+              "bytes": 13918,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "14f780edd897d25978c33cdfeb25f9d82a1c011a13714e84f8ccb96be60093f4"
+            },
+            "change": "unchanged",
+            "path": "src/omp_tandem/native_worker.py",
+            "role": "context",
+            "selected": {
+              "bytes": 13918,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "14f780edd897d25978c33cdfeb25f9d82a1c011a13714e84f8ccb96be60093f4"
+            },
+            "staged": {
+              "bytes": 13918,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "14f780edd897d25978c33cdfeb25f9d82a1c011a13714e84f8ccb96be60093f4"
+            }
+          },
+          {
+            "base": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            },
+            "change": "added",
+            "path": "src/omp_tandem/review_runs.py",
+            "role": "change",
+            "selected": {
+              "bytes": 24302,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "332631098aa8cac4396c9b44e931a700a91fe9de070d38678b4724b2bf084e1f"
+            },
+            "staged": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            }
+          },
+          {
+            "base": {
+              "bytes": 30764,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "0e5b4e709c2c95ead9d4b8e29db912b70890126a491fa6d0ca7fffea1e5632de"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/reviews.py",
+            "role": "change",
+            "selected": {
+              "bytes": 32552,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "655e4ef5db3861bc01dcc3f180b8e3236998f53500434dc70d1af0192017d269"
+            },
+            "staged": {
+              "bytes": 30764,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "0e5b4e709c2c95ead9d4b8e29db912b70890126a491fa6d0ca7fffea1e5632de"
+            }
+          },
+          {
+            "base": {
+              "bytes": 1949,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "88b648686d7e86466e171f7d3ad39b9e4c62936d1d592e321c9afa5d678935c2"
+            },
+            "change": "unchanged",
+            "path": "src/omp_tandem/runtime_models.py",
+            "role": "context",
+            "selected": {
+              "bytes": 1949,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "88b648686d7e86466e171f7d3ad39b9e4c62936d1d592e321c9afa5d678935c2"
+            },
+            "staged": {
+              "bytes": 1949,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "88b648686d7e86466e171f7d3ad39b9e4c62936d1d592e321c9afa5d678935c2"
+            }
+          },
+          {
+            "base": {
+              "bytes": 4046,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "da997ab61039a7d362659e894406debe20754c4bb018485e78c4faef569b49c4"
+            },
+            "change": "unchanged",
+            "path": "src/omp_tandem/task_contracts.py",
+            "role": "context",
+            "selected": {
+              "bytes": 4046,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "da997ab61039a7d362659e894406debe20754c4bb018485e78c4faef569b49c4"
+            },
+            "staged": {
+              "bytes": 4046,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "da997ab61039a7d362659e894406debe20754c4bb018485e78c4faef569b49c4"
+            }
+          },
+          {
+            "base": {
+              "bytes": 9423,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "62ff51c7c5f5aa0343e5212f7522e6e6d61573984502f0b76972bad7bccf8470"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/task_interaction.py",
+            "role": "change",
+            "selected": {
+              "bytes": 9690,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "56528623cc70eba16f04501116bb8ff9754e5ab047fcfb763e3fdab5bdeda6cb"
+            },
+            "staged": {
+              "bytes": 9423,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "62ff51c7c5f5aa0343e5212f7522e6e6d61573984502f0b76972bad7bccf8470"
+            }
+          },
+          {
+            "base": {
+              "bytes": 7757,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "8bf7e874754539ade22dadf8af0d6caa3c9ef0867381f025874369e4ff876bcb"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/task_results.py",
+            "role": "change",
+            "selected": {
+              "bytes": 7855,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "2a538d6e67e2a752bed4c5749a4a9b2b11231b2cca5e44f6381beb2693399656"
+            },
+            "staged": {
+              "bytes": 7757,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "8bf7e874754539ade22dadf8af0d6caa3c9ef0867381f025874369e4ff876bcb"
+            }
+          },
+          {
+            "base": {
+              "bytes": 9605,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "86bbb4a5c9f35aa7da8a7b1d4e230367ea063a2c6dfac13b8252ed64f36ed4e0"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/task_runtime.py",
+            "role": "change",
+            "selected": {
+              "bytes": 10439,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "f233679e78974872ef01530c0ba40c43a3625fab04dbe7769191ed8d7b6bae4f"
+            },
+            "staged": {
+              "bytes": 9605,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "86bbb4a5c9f35aa7da8a7b1d4e230367ea063a2c6dfac13b8252ed64f36ed4e0"
+            }
+          },
+          {
+            "base": {
+              "bytes": 13542,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d3d82a83596f41079b918d08a340847105c69b2a8595ae7b14001c21cd2295ea"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/task_store.py",
+            "role": "change",
+            "selected": {
+              "bytes": 16401,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "48e983636b6420870d07f368d6dfca3574864b6841e0e3cbc26d7e898fa5fb29"
+            },
+            "staged": {
+              "bytes": 13542,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d3d82a83596f41079b918d08a340847105c69b2a8595ae7b14001c21cd2295ea"
+            }
+          },
+          {
+            "base": {
+              "bytes": 5463,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "c436ebcb3a69f2f311723d13f46397e658d87a23df488cb0c977eeb5adffb012"
+            },
+            "change": "unchanged",
+            "path": "src/omp_tandem/worker_turn.py",
+            "role": "context",
+            "selected": {
+              "bytes": 5463,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "c436ebcb3a69f2f311723d13f46397e658d87a23df488cb0c977eeb5adffb012"
+            },
+            "staged": {
+              "bytes": 5463,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "c436ebcb3a69f2f311723d13f46397e658d87a23df488cb0c977eeb5adffb012"
+            }
+          },
+          {
+            "base": {
+              "bytes": 6435,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "068ea4f7418c38f14fb0bcf1b0cd56fea298e4d2567c568e72d62d87575db4cf"
+            },
+            "change": "unchanged",
+            "path": "tests/helpers.py",
+            "role": "context",
+            "selected": {
+              "bytes": 6435,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "068ea4f7418c38f14fb0bcf1b0cd56fea298e4d2567c568e72d62d87575db4cf"
+            },
+            "staged": {
+              "bytes": 6435,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "068ea4f7418c38f14fb0bcf1b0cd56fea298e4d2567c568e72d62d87575db4cf"
+            }
+          },
+          {
+            "base": {
+              "bytes": 7382,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "c84e81160a1b682663fb9640ac88fdc35ec443fc356f8c53707efbdca07c683b"
+            },
+            "change": "unchanged",
+            "path": "tests/test_review_integration.py",
+            "role": "context",
+            "selected": {
+              "bytes": 7382,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "c84e81160a1b682663fb9640ac88fdc35ec443fc356f8c53707efbdca07c683b"
+            },
+            "staged": {
+              "bytes": 7382,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "c84e81160a1b682663fb9640ac88fdc35ec443fc356f8c53707efbdca07c683b"
+            }
+          },
+          {
+            "base": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            },
+            "change": "added",
+            "path": "tests/test_review_runs.py",
+            "role": "change",
+            "selected": {
+              "bytes": 17817,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "df3df3419a81b578568af1f68e6a43ed59cac8ffb8812fb04c9603b02ec1a82d"
+            },
+            "staged": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            }
+          }
+        ],
+        "git": {
+          "base_commit": "9da1ec4e04043fa98a4ee0b94aab697c639cc917",
+          "head": "9da1ec4e04043fa98a4ee0b94aab697c639cc917",
+          "kind": "git",
+          "prefix": ""
+        },
+        "requested_base": "HEAD",
+        "requirements": "Review the new read-only review-run orchestration for correctness: owner-scoped idempotent starts, reserved task identity without replay, a total deadline spanning both phases and questions, comparison only after structured independent success, safe cancellation/shutdown, complete preserved answers, and no write or application permission escalation. Identify concrete bugs rather than stylistic preferences; state missing evidence explicitly.",
+        "review_id": "05a6206e-37a2-490a-95fb-901a53d8db32",
+        "schema_version": 1,
+        "scope_id": "f7422a2e9a307231468ae591c6ddf9f8ed07d7ce1cb37418e081be9108c71dea",
+        "selection": "explicit_paths",
+        "source": "worktree"
+      },
+      "stages": {
+        "independent": {
+          "task_id": "c7e4c954-92c2-4681-bbd4-a52159f2bea4",
+          "status": "completed",
+          "reported_outcome": "success",
+          "execution_outcome": "success",
+          "answer": "## Assessment\n\n**One correctness finding: synchronous snapshot capture defeats the total deadline and blocks cancellation/shutdown.** Other reviewed paths substantiate reservation identity, structured-success gating, and complete answer preservation. Static assessment only; no runtime verification.\n\n### P1 — Capture holds the controller-wide guard without consuming a bounded deadline\n\n**Location:** `src/omp_tandem/review_runs.py`, `ReviewRuns.start`, lines 147–155, particularly `self.reviews.create(request)` inside `with self.guard`.\n\nThe deadline is recorded before capture, but capture receives neither that deadline nor a cancellation mechanism. The first driver starts only after capture finishes. For an existing driver, the same guard prevents `_drive`, `cancel`, `reply`, and `close` from advancing while a new capture executes.\n\n`ReviewStore.create` permits three complete capture attempts. Each performs multiple Git subprocesses with separate 15-second timeouts, file reads, and diff computation; there is no aggregate time check. A valid 10-second review budget therefore does not bound capture. A late capture with no changes even returns `no_changes` without checking the deadline.\n\n**Reproduction conditions:** Use a 10-second budget with capture taking 12 seconds—for example, a Git operation that succeeds within its individual 15-second timeout. Request cancellation or shutdown during capture: both wait for the guard. If another review run is already active, the slow new capture also blocks its controller from processing deadlines or phase completion. Child worker deadlines remain independently clamped, but run-level control stalls.\n\n**Correction:** Keep durable acceptance and reservation transitions serialized, but move capture I/O and diff computation outside the controller-wide guard. Make capture consume the remaining run budget. Recheck terminal state and deadline before accepting capture results or dispatching. Cancellation must win against late capture completion without recapture or dispatch replay.\n\n**Evidence status:** Confirmed from saved control flow, not executed. A distinguishing regression should hold capture past the budget, cancel concurrently, release capture, and verify no worker admission or overwrite of terminal state. Also exercise an active run while another captures slowly.\n\n## Requirement assessment\n\n| Requirement | Assessment from saved code |\n|---|---|\n| Owner-scoped idempotent starts | Unique `(owner, request_key)` plus normalized payload comparison prevents same-owner duplicate acceptance and rejects conflicts. Acceptance precedes capture. Lease-backed recovery interrupts rather than takes over. Channel-owner generation remains unverified. |\n| Reserved identity without replay | Stage UUID is saved before dispatch. Admission checks owner, phase, review, reserved UUID, deadline, and think mode, including validation inside the insert transaction. Unique stage/task constraints reject duplicates. Missing admission becomes terminal, not a retry. |\n| Total deadline across phases/questions | Child deadlines are clamped to the run deadline; questions are bounded by the child deadline; comparison receives remaining time. **Capture/control-lock defect remains.** |\n| Comparison only after structured success | `_advance` saves the complete independent result before changing phase and requires completed status, successful outcome, and report. Admission independently checks the matching independent task/conversation/review/run, successful report, and saved result. Partial, blocked, failed, and unstructured outcomes do not automatically compare. |\n| Cancellation/shutdown | Stop is committed before child cancellation; dispatch and cancellation serialize; cancellation failures are recorded. Bridge shutdown closes orchestration before task runtime. **Capture blocks timely control-lock acquisition.** Recovery does not replay stages. |\n| Complete answers | Stage reads use `details=True`, which returns the full answer. Detailed independent JSON is persisted before comparison; completed stage JSON is retained. Native finalization preserves report answers and reply artifacts. Captured tests cover long Unicode answers, but no passing execution evidence was supplied. |\n| No write/application escalation | Run dispatch is think-only and admission enforces it. Native launch uses `--no-tools`, `--no-lsp`, disables extensions/skills/rules, and gates saved-author access by comparison stage. No new project-edit or application operation appears in orchestration. Omitted boundary implementations are not certified; this is not a sandbox claim. |\n\n## Scope and verification limits\n\n- Reviewed saved requirements, manifest, diff, orchestration, relevant admission/recovery/result/question/worker paths, capture implementation, and captured review-run tests. Saved criteria are empty.\n- Author proposal/rationale were neither requested nor read. Source necessarily exposes the implementation under assessment.\n- No shell execution, live-file access, edits, or test execution. The snapshot has **zero supplied check reports**. Test source establishes intended coverage, not passing behavior.\n- Requested additional saved boundary context. The coordinator declined expansion and directed these implementations to remain **out of scope / unverified**: `src/omp_tandem/findings.py`, `src/omp_tandem/receipts.py`, `src/omp_tandem/channel.py`, `src/omp_tandem/workspace.py`, and `src/omp_tandem/resources/worker.yml`. Finding-state authorization, receipt internals, owner generation, slot behavior, and native configuration therefore remain unverified.\n- Runtime dependencies, native process behavior, and unselected files are outside this assessment.",
+          "actual_model": "openai-codex/gpt-6-astra",
+          "actual_thinking": "low"
+        },
+        "comparison": {
+          "task_id": "45896974-6d81-439a-8573-082f854a6b19",
+          "status": "failed",
+          "reported_outcome": "success",
+          "execution_outcome": null,
+          "answer": "## Comparison outcome\n\n**The author’s thin-orchestration design is substantially reflected in the saved implementation, but it does not resolve the independent finding about capture deadlines and blocked control operations.** No finding is withdrawn or claimed fixed. No additional defect is established by the author material.\n\nSnapshot: `05a6206e-37a2-490a-95fb-901a53d8db32`  \nCode fingerprint: `6e21af567f08d0b52635baaf114fb120b20c5a62f2f3e660c0cb995896b9dfe8`\n\n### Proposal versus independent assessment\n\n| Author position | Comparison with recorded evidence |\n|---|---|\n| Persist owner/key and reserved stage IDs. | Supported. Durable acceptance, owner/key uniqueness, persisted stage reservations, transactional admission validation, and uniqueness constraints support idempotency and prevent reserved-stage replay. Actual channel-owner generation remains outside the capture. |\n| Execute at most two think turns. | Supported for automatic review-run dispatch. The controller has independent and comparison phases; admission requires think mode. The comparison gate requires a completed successful structured independent result and matching task/conversation/review/run identity. This is not a claim that a coordinator cannot separately request additional ordinary tasks. |\n| Keep full answers. | Supported. Detailed stage reads preserve complete answers; independent JSON is saved before comparison becomes eligible. Captured Unicode-answer tests express this contract, but no test execution evidence was supplied. |\n| Use lifetime locks and cancellation checks to avoid replay or starting comparison after shutdown. | The saved ordering supports this narrower safety property: stop state precedes child cancellation, dispatch serializes with stop, and recovery interrupts rather than replays. **This does not establish responsive cancellation or shutdown while snapshot capture holds the same controller-wide lock.** |\n| Remain honest when interrupted, blocked, or missing context. | Supported in the reviewed paths: missing context fails capture explicitly; blocked/partial/unstructured independent results do not automatically compare; interrupted reservations are not restarted. Omitted downstream boundary implementations remain unverified. |\n| Move mechanical transitions and result assembly into code while leaving substantive review and write/application decisions explicit. | Consistent with the reviewed architecture. No new project-edit or application operation appears in orchestration. Think-mode launch and the saved-material reader constrain the exposed worker path. Finding-state authorization, receipt internals, and native configuration were not captured and are not certified. |\n| Independent assessment must precede author explanation. | Satisfied in this review sequence: the independent report was recorded before the saved author section was read. Source code had already exposed the implementation; this is not a claim of a blind implementation review. |\n\n## Retained finding — P1: Capture blocks total-deadline enforcement and cancellation\n\n**Location:** `src/omp_tandem/review_runs.py:147–155`, `ReviewRuns.start`.\n\nThe author rationale explains why phase transitions belong in code but supplies no evidence addressing synchronous capture under `self.guard`. The run deadline is recorded before `self.reviews.create(request)`, yet capture receives neither that deadline nor cancellation state. Initial driver startup follows capture; existing driver processing, cancellation, clarification, and shutdown need the same guard.\n\n`ReviewStore.create` permits repeated full captures, with multiple individually bounded Git calls, reads, and diff computation but no aggregate deadline. A 10-second review budget can therefore be exceeded by a successful 12-second Git operation. Cancellation or shutdown during that capture waits for the guard. A second slow capture also blocks another run’s controller processing. A late no-change capture returns `no_changes` without checking expiration.\n\n**Disagreement preserved:** The author’s anti-replay/shutdown ordering can be correct while the saved requirements’ total-budget and control-responsiveness guarantees remain unmet. These are different properties; lifetime locks do not settle the latter.\n\n**Recommendation unchanged:** Keep acceptance and reservation transitions serialized, move capture work outside the controller-wide guard, propagate the remaining budget into capture, and recheck deadline/terminal state before accepting its result or dispatching. Late capture completion must not overwrite cancellation or trigger replay.\n\n**Verification status:** Confirmed by saved control flow only. No runtime reproduction, test execution, or fix verification occurred.\n\n## Revisions and boundaries\n\n- **Assessment revisions:** None. The author material adds intent, not counterevidence to the retained finding.\n- **New findings:** None.\n- The coordinator previously declined capture expansion. `src/omp_tandem/findings.py`, `receipts.py`, `channel.py`, `workspace.py`, and `resources/worker.yml` remain out of scope / unverified.\n- The snapshot contains zero supplied check reports. Only saved material was used; no live files, commands, or edits.\n- “Success” records completion of this comparison, not approval of the implementation or verification of its runtime guarantees.",
+          "actual_model": "openai-codex/gpt-6-astra",
+          "actual_thinking": "low"
+        }
+      },
+      "questions": [
+        {
+          "question_id": "7b790b99-5033-4a8b-99ec-33598e560039",
+          "task_id": "c7e4c954-92c2-4681-bbd4-a52159f2bea4",
+          "question": "Please expand the saved review capture with src/omp_tandem/findings.py, src/omp_tandem/receipts.py, src/omp_tandem/channel.py, src/omp_tandem/workspace.py, and src/omp_tandem/resources/worker.yml (unchanged context), or confirm these boundary checks should remain explicitly unverified. The selected code delegates finding-state ingestion, application-receipt status, owner identity, slot admission, and native configuration to these files. Do not provide author material.",
+          "context": "Static review found a deadline/cancellation concern: ReviewRuns.start holds its global controller guard throughout synchronous ReviewStore.create; capture has no aggregate deadline and can block cancellation/shutdown and advancement of other runs. Remaining selected paths substantiate reservation and structured-success gates, but omitted boundary implementations prevent a complete permission/shutdown assessment.",
+          "state": "answered",
+          "answer": "Do not expand the capture. Proceed with the review using only the currently selected/context files, and explicitly mark src/omp_tandem/findings.py, receipts.py, channel.py, workspace.py, and resources/worker.yml as out of scope / unverified boundary implementations in your report."
+        }
+      ],
+      "coordinator": {
+        "requested_model": "sonnet",
+        "model_usage": {
+          "claude-haiku-4-5-20251001": {
+            "inputTokens": 1614,
+            "outputTokens": 21,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.001719,
+            "contextWindow": 200000,
+            "maxOutputTokens": 32000,
+            "thinkingTokens": 0,
+            "canonicalModel": "claude-haiku-4-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          },
+          "claude-sonnet-5": {
+            "inputTokens": 28,
+            "outputTokens": 4345,
+            "cacheReadInputTokens": 426833,
+            "cacheCreationInputTokens": 42291,
+            "webSearchRequests": 0,
+            "costUSD": 0.2980366,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 64000,
+            "thinkingTokens": 244,
+            "canonicalModel": "claude-sonnet-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        },
+        "usage": {
+          "input_tokens": 28,
+          "cache_creation_input_tokens": 42291,
+          "cache_read_input_tokens": 426833,
+          "output_tokens": 4345,
+          "output_tokens_details": {
+            "thinking_tokens": 244
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 42291,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": "not_available",
+          "iterations": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 1253,
+              "cache_read_input_tokens": 40877,
+              "cache_creation_input_tokens": 16167,
+              "cache_creation": {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 16167
+              },
+              "type": "message"
+            }
+          ],
+          "speed": "standard"
+        },
+        "cost_usd": 0.29975559999999996,
+        "answer": "The run reached a terminal state: the overall total budget (300s) was exhausted right as the comparison stage finished producing its report, so the run status is `failed` with error \"Total review budget exhausted, including startup and clarification time.\" However, both stage answers were actually captured in full before the timeout hit (comparison's `outcome` in the embedded report shows `\"success\"` with a complete answer), so I have both complete texts. I won't start another run per instructions.\n\n## Summary of the review\n\n**Independent review (Codex/gpt-6-astra, low thinking):** Found one confirmed P1 issue and otherwise substantiated most requirements.\n\n**P1 — Capture blocks total-deadline enforcement and cancellation** (`review_runs.py:147–155`, `ReviewRuns.start`)\n- The run deadline is recorded before `self.reviews.create(request)`, but that synchronous capture call runs *inside* the global `self.guard` lock and receives no deadline or cancellation signal.\n- `ReviewStore.create` allows up to three full capture attempts (each doing several Git subprocess calls with individual 15s timeouts, file reads, diffing) with no aggregate time cap — so a 10s run budget can be blown by a single legitimately-succeeding 12s Git call.\n- While capture runs, `cancel`, `reply`, `close`, and driver advancement for *any* run all block on the same guard — so cancellation/shutdown isn't responsive, and a slow capture on one run can stall control of others.\n- A late no-change capture result is accepted without even checking whether the deadline has already passed.\n- Everything else held up under review: owner+idempotency key uniqueness, reserved stage-ID persistence before dispatch with owner/phase/review/deadline/mode validation inside the insert transaction, comparison gated strictly on a completed+successful+report-bearing independent result, full-answer preservation via `details=True` reads, think-only dispatch with no tool/write escalation (`--no-tools`, `--no-lsp`, extensions/skills/rules disabled).\n\n**Comparison stage:** Compared this against the author's stated intent (thin orchestration, persisted IDs, lifetime locks against replay/shutdown-after-close). The reviewer found the author's proposal mostly consistent with what's implemented, but explicitly did **not** treat it as fixing or invalidating the P1 finding — noted these are different properties: anti-replay/shutdown-ordering safety is not the same as a bounded total capture budget or responsive cancellation. Finding retained unchanged, no new findings, no revisions.\n\n**Applicability:** Reviewed against current worktree HEAD (`9da1ec4e...`), no changes since capture — result is current.\n\n**Explicit limits stated by the reviewer(s), which I'm passing through as-is:**\n- Purely static analysis — no test execution, no runtime reproduction, no shell commands were run.\n- Zero supplied check reports; test file establishes intended coverage only, not passing behavior.\n- Per my instruction, `findings.py`, `receipts.py`, `channel.py`, `workspace.py`, and `resources/worker.yml` were explicitly left **unverified/out of scope** — so finding-state ingestion, receipt/application status, real owner identity generation, and native worker config were not certified either way.\n- This is one review episode against one snapshot, not proof the code is free of other bugs, and not a benchmark comparison.\n\n**Bottom line:** one credible, reproducible-on-paper concurrency/deadline bug in `ReviewRuns.start` (capture under a global lock, no deadline propagation), confirmed independently and retained after comparing against the author's own rationale, plus explicitly named unverified boundaries you'd want to check before trusting the full permission/shutdown story."
+      },
+      "peer_usage": {
+        "task_count": 2,
+        "response_count": {
+          "value": 27,
+          "known_subtotal": 27,
+          "status": "complete"
+        },
+        "models": [
+          "openai-codex/gpt-6-astra"
+        ],
+        "tokens": {
+          "input": {
+            "value": null,
+            "known_subtotal": 186399,
+            "status": "partial"
+          },
+          "output": {
+            "value": null,
+            "known_subtotal": 8217,
+            "status": "partial"
+          },
+          "cache_read": {
+            "value": null,
+            "known_subtotal": 898688,
+            "status": "partial"
+          },
+          "cache_write": {
+            "value": null,
+            "known_subtotal": 0,
+            "status": "partial"
+          },
+          "total": {
+            "value": null,
+            "known_subtotal": 1093304,
+            "status": "partial"
+          }
+        },
+        "cost": {
+          "value": null,
+          "known_subtotal": 3.173528,
+          "status": "partial"
+        },
+        "duration_seconds": {
+          "value": 297.23691341653466,
+          "known_subtotal": 297.23691341653466,
+          "status": "complete"
+        },
+        "coverage": "partial",
+        "provenance": "sum of disjoint task turns; no cumulative session counters"
+      },
+      "reported_total_cost_usd": null,
+      "known_cost_subtotal_usd": 3.4732836000000002,
+      "human_seconds": null,
+      "scope_notes": "Episode includes version inspection, client/MCP startup, capture, provider calls, waiting and client shutdown. Prior implementation/setup and human preparation were not timed. No interactive human input was supplied during this CLI episode.",
+      "collector_error": "Total review budget exhausted, including startup and clarification time.",
+      "run_error": "Total review budget exhausted, including startup and clarification time.",
+      "run_elapsed_seconds": 300.0584418773651,
+      "protocol_followed": true
+    },
+    {
+      "kind": "observed_live_review_episode",
+      "status": "completed",
+      "outcome": "success",
+      "run_id": "35388502-1987-437c-a39b-e972fe710e10",
+      "started_at": "2026-09-10T08:26:03.946984+00:00",
+      "finished_at": "2026-09-10T08:29:10.074684+00:00",
+      "wall_seconds": 186.127,
+      "budget_seconds": 600,
+      "versions": {
+        "collector_sha256": "d2782f69937a7e0d2386892ee09b7baf72f1a7e83968141d5694e71ee61f314b",
+        "claude": "2.1.267 (Claude Code)",
+        "omp": "omp/18.1.13",
+        "os": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+        "python": "3.13.5",
+        "tandem": "3.3.0",
+        "omp_rpc": "0.1.0",
+        "omp_rpc_revision": "daf07999c2fee9b22edc7bf8fea1fb6272e0df5e",
+        "claude_executable_sha256": "a681f3008f0050029aeebcab3af51bb6a55ddeb625a3af3141a4416d43cd2558",
+        "omp_executable_sha256": "a4c5c9cc5b8222184d0d7429b0bb6ac2a92bbe45dd11bf68e4b1360050791909"
+      },
+      "request": {
+        "requirements": "Recheck only the previously confirmed capture-lifecycle defect in the current saved implementation. Acceptance: total review budget bounds snapshot capture; slow capture does not hold the controller-wide guard or block cancellation/status of another run; cancel/shutdown terminate capture and prevent a later native phase; a late empty capture cannot become no_changes; reserved snapshot publication cannot occur after cancellation/deadline/owner loss. Focus on these corrected paths rather than repeating the whole prior audit. Report any remaining concrete bug, or state the fix is supported with explicit static-review limits.",
+        "criteria": [],
+        "base": "HEAD",
+        "source": "worktree",
+        "paths": [
+          "src/omp_tandem/review_runs.py",
+          "src/omp_tandem/reviews.py",
+          "src/omp_tandem/capture_worker.py",
+          "src/omp_tandem/task_store.py",
+          "src/omp_tandem/bridge.py",
+          "src/omp_tandem/binding.py",
+          "tests/test_review_runs.py",
+          "tests/test_capture_worker.py"
+        ],
+        "context_paths": [
+          "src/omp_tandem/workspace.py",
+          "src/omp_tandem/artifacts.py",
+          "src/omp_tandem/execution.py",
+          "src/omp_tandem/runtime_models.py"
+        ],
+        "checks": [],
+        "author_proposal": "",
+        "author_rationale": "",
+        "external_boundaries": [
+          "This is a focused independent recheck of one real finding, not a new whole-project audit.",
+          "The original defect was reproduced: a 1-second total budget returned no_changes after 2.745 seconds, and another run cancellation waited behind capture.",
+          "Do not run tests or edit files; runtime proof is collected separately by the coordinator."
+        ]
+      },
+      "input_manifest": {
+        "boundaries": {
+          "capture_consistency": "bounded double-read detection; not a filesystem transaction",
+          "external": [
+            "unselected files",
+            "runtime/environment/dependencies",
+            "external services",
+            "test execution",
+            "This is a focused independent recheck of one real finding, not a new whole-project audit.",
+            "The original defect was reproduced: a 1-second total budget returned no_changes after 2.745 seconds, and another run cancellation waited behind capture.",
+            "Do not run tests or edit files; runtime proof is collected separately by the coordinator."
+          ],
+          "observed": [
+            "Git HEAD/base identity",
+            "selected index entries",
+            "selected files stable across two reads"
+          ],
+          "renames": "represented as deletion/addition paths; no similarity inference",
+          "saved": [
+            "requirements",
+            "criteria",
+            "selected/base/staged file bytes and modes",
+            "derived diff",
+            "supplied check reports"
+          ],
+          "whole_environment_immutable": false
+        },
+        "change_count": 8,
+        "checks": [],
+        "code_fingerprint": "c3fc2d42a30a90c38e23ce7529a13f89737cf3b3a0acf1be8c00131f8a6d8792",
+        "context_count": 4,
+        "context_paths": [
+          "src/omp_tandem/artifacts.py",
+          "src/omp_tandem/execution.py",
+          "src/omp_tandem/runtime_models.py",
+          "src/omp_tandem/workspace.py"
+        ],
+        "created": 1789028774.012448,
+        "criteria": [],
+        "files": [
+          {
+            "base": {
+              "bytes": 9174,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d4d040e2c89a1b1914482a0d3b1cfa01356ec15b62efc6d92184b28e9bb4bf30"
+            },
+            "change": "unchanged",
+            "path": "src/omp_tandem/artifacts.py",
+            "role": "context",
+            "selected": {
+              "bytes": 9174,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d4d040e2c89a1b1914482a0d3b1cfa01356ec15b62efc6d92184b28e9bb4bf30"
+            },
+            "staged": {
+              "bytes": 9174,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d4d040e2c89a1b1914482a0d3b1cfa01356ec15b62efc6d92184b28e9bb4bf30"
+            }
+          },
+          {
+            "base": {
+              "bytes": 7120,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "4171f7876830ebaccac0a7734112b634108d596b6f2d0a601e9aefffb9d7f0c4"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/binding.py",
+            "role": "change",
+            "selected": {
+              "bytes": 7174,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "03de23453a09a763057020e2d25c088be91ed4892793b2a273a44fcf32ce3f25"
+            },
+            "staged": {
+              "bytes": 7120,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "4171f7876830ebaccac0a7734112b634108d596b6f2d0a601e9aefffb9d7f0c4"
+            }
+          },
+          {
+            "base": {
+              "bytes": 7160,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "46adc722cc397edd338e9fd35953f269236bf36af23d3db2e205aa1a0db10553"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/bridge.py",
+            "role": "change",
+            "selected": {
+              "bytes": 7641,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "0e5e3bae3cc98c86189fe55dfef15dfad058f476f107add5c902416bf831d827"
+            },
+            "staged": {
+              "bytes": 7160,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "46adc722cc397edd338e9fd35953f269236bf36af23d3db2e205aa1a0db10553"
+            }
+          },
+          {
+            "base": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            },
+            "change": "added",
+            "path": "src/omp_tandem/capture_worker.py",
+            "role": "change",
+            "selected": {
+              "bytes": 2501,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "17f3e5880557f5788b34a997990785e556361553ee693673b6261fa1a315d435"
+            },
+            "staged": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            }
+          },
+          {
+            "base": {
+              "bytes": 10122,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d87081b664561e16b073f67b4824e1874a0d2b6ba9e8ca4c3935ecb52235a3e0"
+            },
+            "change": "unchanged",
+            "path": "src/omp_tandem/execution.py",
+            "role": "context",
+            "selected": {
+              "bytes": 10122,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d87081b664561e16b073f67b4824e1874a0d2b6ba9e8ca4c3935ecb52235a3e0"
+            },
+            "staged": {
+              "bytes": 10122,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d87081b664561e16b073f67b4824e1874a0d2b6ba9e8ca4c3935ecb52235a3e0"
+            }
+          },
+          {
+            "base": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            },
+            "change": "added",
+            "path": "src/omp_tandem/review_runs.py",
+            "role": "change",
+            "selected": {
+              "bytes": 33049,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "10eb68afa93d750f9ecf82e04e8831471f03334c7c931366c1a879b4f7eaf84d"
+            },
+            "staged": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            }
+          },
+          {
+            "base": {
+              "bytes": 30764,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "0e5b4e709c2c95ead9d4b8e29db912b70890126a491fa6d0ca7fffea1e5632de"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/reviews.py",
+            "role": "change",
+            "selected": {
+              "bytes": 36655,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "b496a086e6dbc4e9698307e46578c59191419d99de3dc244dca0661b58401351"
+            },
+            "staged": {
+              "bytes": 30764,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "0e5b4e709c2c95ead9d4b8e29db912b70890126a491fa6d0ca7fffea1e5632de"
+            }
+          },
+          {
+            "base": {
+              "bytes": 1949,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "88b648686d7e86466e171f7d3ad39b9e4c62936d1d592e321c9afa5d678935c2"
+            },
+            "change": "unchanged",
+            "path": "src/omp_tandem/runtime_models.py",
+            "role": "context",
+            "selected": {
+              "bytes": 1949,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "88b648686d7e86466e171f7d3ad39b9e4c62936d1d592e321c9afa5d678935c2"
+            },
+            "staged": {
+              "bytes": 1949,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "88b648686d7e86466e171f7d3ad39b9e4c62936d1d592e321c9afa5d678935c2"
+            }
+          },
+          {
+            "base": {
+              "bytes": 13542,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d3d82a83596f41079b918d08a340847105c69b2a8595ae7b14001c21cd2295ea"
+            },
+            "change": "modified",
+            "path": "src/omp_tandem/task_store.py",
+            "role": "change",
+            "selected": {
+              "bytes": 16401,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "48e983636b6420870d07f368d6dfca3574864b6841e0e3cbc26d7e898fa5fb29"
+            },
+            "staged": {
+              "bytes": 13542,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "d3d82a83596f41079b918d08a340847105c69b2a8595ae7b14001c21cd2295ea"
+            }
+          },
+          {
+            "base": {
+              "bytes": 5987,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "846ddde3cf96fdc7d4d180eea730d68b967d4410d636d37ce1f3d0c36cd863e1"
+            },
+            "change": "unchanged",
+            "path": "src/omp_tandem/workspace.py",
+            "role": "context",
+            "selected": {
+              "bytes": 5987,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "846ddde3cf96fdc7d4d180eea730d68b967d4410d636d37ce1f3d0c36cd863e1"
+            },
+            "staged": {
+              "bytes": 5987,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "846ddde3cf96fdc7d4d180eea730d68b967d4410d636d37ce1f3d0c36cd863e1"
+            }
+          },
+          {
+            "base": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            },
+            "change": "added",
+            "path": "tests/test_capture_worker.py",
+            "role": "change",
+            "selected": {
+              "bytes": 13347,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "556aef1d71072ead5d0de4c5e6f95b95c3d82c91c0e0de62aa3376fc72b937de"
+            },
+            "staged": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            }
+          },
+          {
+            "base": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            },
+            "change": "added",
+            "path": "tests/test_review_runs.py",
+            "role": "change",
+            "selected": {
+              "bytes": 29283,
+              "exists": true,
+              "mode": "100644",
+              "sha256": "a0240b88a427f35fb2b6decb30502751863f0d7b9b8973fbf6c38490b7f0c5aa"
+            },
+            "staged": {
+              "bytes": 0,
+              "exists": false,
+              "mode": null,
+              "sha256": null
+            }
+          }
+        ],
+        "git": {
+          "base_commit": "9da1ec4e04043fa98a4ee0b94aab697c639cc917",
+          "head": "9da1ec4e04043fa98a4ee0b94aab697c639cc917",
+          "kind": "git",
+          "prefix": ""
+        },
+        "requested_base": "HEAD",
+        "requirements": "Recheck only the previously confirmed capture-lifecycle defect in the current saved implementation. Acceptance: total review budget bounds snapshot capture; slow capture does not hold the controller-wide guard or block cancellation/status of another run; cancel/shutdown terminate capture and prevent a later native phase; a late empty capture cannot become no_changes; reserved snapshot publication cannot occur after cancellation/deadline/owner loss. Focus on these corrected paths rather than repeating the whole prior audit. Report any remaining concrete bug, or state the fix is supported with explicit static-review limits.",
+        "review_id": "dd019812-8c10-4eff-bb5b-44baf284c589",
+        "schema_version": 1,
+        "scope_id": "f7422a2e9a307231468ae591c6ddf9f8ed07d7ce1cb37418e081be9108c71dea",
+        "selection": "explicit_paths",
+        "source": "worktree"
+      },
+      "stages": {
+        "independent": {
+          "task_id": "463e351d-2392-476d-9ced-fafb27d581f5",
+          "status": "completed",
+          "reported_outcome": "success",
+          "execution_outcome": "success",
+          "answer": "## Verdict\nThe fix addresses the original synchronous source-capture path, but one remaining SQLite lock interaction prevents accepting the full capture-lifecycle requirement.\n\nReview: `dd019812-8c10-4eff-bb5b-44baf284c589`; fingerprint: `c3fc2d42a30a90c38e23ce7529a13f89737cf3b3a0acf1be8c6d8792` (use the manifest’s full fingerprint as authoritative).\n\n## Finding\n### P1 — Capture publication can still block another run’s cancellation while holding the controller guard\n**Locations:** `src/omp_tandem/review_runs.py`, `cancel` → `_stop` → `_update`; `src/omp_tandem/reviews.py`, `ReviewStore.create`; `src/omp_tandem/task_store.py`, `_connect`.\n\n`ReviewStore.create` obtains `BEGIN IMMEDIATE` on the shared task database and retains the writer lock while inserting the manifest, saved contents, author material, and run mapping. Cancelling another run holds `ReviewRuns.guard` and calls `_update`, which writes to the same database using a ten-second SQLite busy timeout. `_stop` kills only the capture belonging to the cancelled run—not the different capture holding the writer lock.\n\nThus slow publication by run A makes cancellation of run B wait behind A’s capture while holding the controller-wide guard. The driver cannot acquire that guard to enforce A’s deadline or kill A. Additional guard-dependent operations also wait. If the lock survives the busy timeout, cancellation raises a database error without committing the requested stop.\n\n**Distinguishing reproduction, not executed:** admit runs A and B; pause A’s child after acquiring the publication transaction and before commit, while ordinary database reads remain possible; cancel B. Observe cancellation waiting for A’s writer lock and the driver unable to enforce A’s deadline. Release the barrier after the deadline to bound the experiment. A child-local publication trigger/barrier can make this deterministic.\n\n**Coverage gap:** `controlled_capture` in `tests/test_review_runs.py` pauses after `_capture` returns, before publication, or after `create` returns, after commit. The responsiveness tests avoid the writer-lock interval. Insertion-time invalidation tests in `tests/test_capture_worker.py` cover rollback, not concurrent controller cancellation.\n\n**Required correction:** prevent capture-publication lock waits from holding the controller guard or disabling deadline supervision. Moving source reads into a child does not isolate writes to shared SQLite storage.\n\n## Acceptance assessment\n- **Total budget bounds capture:** supported for ordinary slow source capture. `_remaining` combines wall-clock and monotonic deadlines; `_capture_step` checks before spawn and before accepting results. Not established across the publication-lock scenario above.\n- **Slow capture does not hold the guard or block another run’s cancellation/status:** source reads, process creation, and response collection are outside the guard. Shared-database publication still violates cancellation responsiveness.\n- **Cancel/shutdown terminate capture and prevent later native phases:** cancellation kills the capture process group before persisting the stop. Shutdown kills registered captures, interrupts active runs, joins the driver, and collects children. Post-spawn and post-collection checks prevent cancelled runs from advancing. Supported statically, subject to the lock interaction above.\n- **Late empty capture cannot become `no_changes`:** supported. Final handling re-reads the current run and checks its budget before testing `change_count`.\n- **Reserved publication cannot outlive cancellation/deadline/owner loss:** reservation checks validate database identity, request, capture attempt, status, deadline, mapping, and owner lease before capture, within publication, and after inserts. Snapshot contents and run mapping commit together. This supports rejection of invalidation observed at those checks; static review does not establish a hard real-time guarantee across the final check/commit interval or abnormal filesystem scheduling.\n\n## Evidence limits\nSaved material only; no live files, author proposal, edits, shell commands, or test execution. No supplied check results are present. The previously reproduced defect was accepted as given, not rerun. The remaining lock-order finding follows from saved code; its proposed timing reproduction remains unexecuted. This completes the focused static assessment, not runtime verification of a fix.",
+          "actual_model": "openai-codex/gpt-6-astra",
+          "actual_thinking": "low"
+        },
+        "comparison": null
+      },
+      "questions": [],
+      "coordinator": {
+        "requested_model": "sonnet",
+        "model_usage": {
+          "claude-haiku-4-5-20251001": {
+            "inputTokens": 1516,
+            "outputTokens": 16,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.001596,
+            "contextWindow": 200000,
+            "maxOutputTokens": 32000,
+            "thinkingTokens": 0,
+            "canonicalModel": "claude-haiku-4-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          },
+          "claude-sonnet-5": {
+            "inputTokens": 18,
+            "outputTokens": 2536,
+            "cacheReadInputTokens": 226301,
+            "cacheCreationInputTokens": 24214,
+            "webSearchRequests": 0,
+            "costUSD": 0.1675122,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 64000,
+            "thinkingTokens": 23,
+            "canonicalModel": "claude-sonnet-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        },
+        "usage": {
+          "input_tokens": 18,
+          "cache_creation_input_tokens": 24214,
+          "cache_read_input_tokens": 226301,
+          "output_tokens": 2536,
+          "output_tokens_details": {
+            "thinking_tokens": 23
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 24214,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": "not_available",
+          "iterations": [
+            {
+              "input_tokens": 2,
+              "output_tokens": 887,
+              "cache_read_input_tokens": 31067,
+              "cache_creation_input_tokens": 7900,
+              "cache_creation": {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 7900
+              },
+              "type": "message"
+            }
+          ],
+          "speed": "standard"
+        },
+        "cost_usd": 0.16910820000000001,
+        "answer": "The independent review stage completed with a terminal outcome. No comparison stage ran (no author proposal was supplied), so this is the final result.\n\n## Findings\n\nThe reviewer confirmed the originally-fixed defect (synchronous capture blocking the whole controller/budget) is genuinely resolved, but identified a **new, distinct P1 issue** in the \"corrected\" code:\n\n**Publication writer lock can still block cross-run cancellation while holding the controller guard**\n- `ReviewStore.create` (`reviews.py`) opens a `BEGIN IMMEDIATE` SQLite transaction and holds the writer lock across manifest/snapshot/run-mapping inserts.\n- Cancelling a *different* run holds `ReviewRuns.guard` and calls `_update`, which then blocks on that same writer lock (10s busy timeout in `task_store._connect`).\n- `_stop` only kills the capture process belonging to the run being cancelled — not another run's process that's mid-publication and holding the DB lock.\n- Net effect: a slow-to-publish run A can stall cancellation and deadline enforcement of an unrelated run B, for up to the busy-timeout window (or raise a DB error if it's exceeded).\n\nThis is a plausible reproduction path, not something the reviewer executed — it's marked as static/hypothesis-level but rated confirmed based on code-path tracing.\n\n## Acceptance-criteria assessment\n- Budget bounds ordinary capture: **supported**\n- Slow capture doesn't hold the guard / block another run: **violated** by the publication-lock path above\n- Cancel/shutdown terminate capture, block later native phase: **supported statically**, same caveat\n- Late empty capture can't become `no_changes`: **supported**\n- Reserved snapshot publication can't survive cancellation/deadline/owner loss: **supported** at the checks that exist; no hard real-time guarantee across the final check/commit interval (acknowledged as a review limit, not a bug)\n\n## Explicit limits stated by the reviewer\nStatic/saved-material review only — no live files, no test execution, no reproduction actually run. The originally reported defect was taken as given rather than re-verified at runtime. The new finding follows from tracing code paths, not from an executed race condition.\n\n**Bottom line:** the original capture-lifecycle fix looks solid for the reproduced scenario, but the reviewer surfaced a plausible new cross-run blocking issue via shared SQLite writer-lock contention during publication that isn't covered by current tests (`controlled_capture` barriers avoid this window). This should be treated as an open finding to verify at runtime, not as proof the fix is incomplete or complete."
+      },
+      "peer_usage": {
+        "task_count": 1,
+        "response_count": {
+          "value": 12,
+          "known_subtotal": 12,
+          "status": "complete"
+        },
+        "models": [
+          "openai-codex/gpt-6-astra"
+        ],
+        "tokens": {
+          "input": {
+            "value": 63095,
+            "known_subtotal": 63095,
+            "status": "complete"
+          },
+          "output": {
+            "value": 4626,
+            "known_subtotal": 4626,
+            "status": "complete"
+          },
+          "cache_read": {
+            "value": 307072,
+            "known_subtotal": 307072,
+            "status": "complete"
+          },
+          "cache_write": {
+            "value": 0,
+            "known_subtotal": 0,
+            "status": "complete"
+          },
+          "total": {
+            "value": 374793,
+            "known_subtotal": 374793,
+            "status": "complete"
+          }
+        },
+        "cost": {
+          "value": 1.1693219999999998,
+          "known_subtotal": 1.1693219999999998,
+          "status": "complete"
+        },
+        "duration_seconds": {
+          "value": 164.2836657082662,
+          "known_subtotal": 164.2836657082662,
+          "status": "complete"
+        },
+        "coverage": "complete",
+        "provenance": "sum of disjoint task turns; no cumulative session counters"
+      },
+      "reported_total_cost_usd": 1.3384301999999997,
+      "known_cost_subtotal_usd": 1.3384301999999997,
+      "human_seconds": null,
+      "scope_notes": "Episode includes version inspection, client/MCP startup, capture, provider calls, waiting and client shutdown. Prior implementation/setup and human preparation were not timed. No interactive human input was supplied during this CLI episode.",
+      "collector_error": null,
+      "run_error": null,
+      "run_elapsed_seconds": 166.47563123703003,
+      "protocol_followed": true
+    }
+  ],
+  "original_defect_reproduction": {
+    "before_fix": true,
+    "configured_total_budget_seconds": 1,
+    "capture_elapsed_seconds": 2.745,
+    "late_status": "no_changes",
+    "unrelated_cancel_blocked_by_capture": true,
+    "provider_calls": "deterministic local RPC fixture only"
+  },
+  "limitations": [
+    "Reported USD values are provider/client estimates, not billing receipts. Unknown totals remain null.",
+    "Episodes cover coordinator launch/version inspection, MCP startup, capture, model calls, waiting and shutdown; they exclude prior design, implementation and unmeasured human effort.",
+    "Saved worktree manifests identify the actual reviewed file versions. A later release is not the same snapshot.",
+    "The final recorded peer assessment is static and reports a distinct shared-SQLite publication-lock finding; runtime follow-up is documented separately.",
+    "Full reviewer/coordinator answers are preserved except local-path redaction; model-written abbreviated fingerprints are not authoritative.",
+    "This is a selected development case with all its recorded attempts retained, not a randomized comparison or evidence of superiority."
+  ],
+  "release_verification": {
+    "publication_lock_regression": {
+      "before": "Actual MCP cancellation exceeded the 0.5-second test bound while another real publication transaction remained held.",
+      "after": "Passed: cancellation and status return while publication is held; another deadline is enforced; healthy publisher survives; no cancelled comparison or expired-run dispatch.",
+      "test": "tests/test_review_runs.py::ReviewRunTests::test_publication_writer_defers_other_cancel_without_blocking_status_or_deadlines"
+    },
+    "publication_rollback_regression": {
+      "after": "Passed: cancellation during publication rolls back snapshot and preserves reservation identity.",
+      "test": "tests/test_review_runs.py::ReviewRunTests::test_cancel_during_publication_rolls_back_snapshot_and_keeps_reservation"
+    },
+    "initial_correction_failures": [
+      "Transient WAL connection-lifetime errors under zero-timeout controller reads.",
+      "Ordinary native writer contention after successful admission was incorrectly treated as startup failure."
+    ],
+    "native_mcp_smoke": {
+      "status": "passed",
+      "actual_omp": "18.1.13",
+      "provider": "deterministic localhost fixture, no paid calls",
+      "transport": "actual stdio MCP server and official OMP RPC",
+      "two_automatic_stages": true,
+      "idempotent_start": true,
+      "full_answer_lengths": [
+        25200,
+        24300
+      ],
+      "staged_ignores_unstaged": true,
+      "staged_mutation_becomes_stale": true,
+      "saved_answers_preserved": true,
+      "model_project_tools_absent": true,
+      "coordinator_cost_unknown": true,
+      "active_compact_response_observed": true,
+      "seconds": 4.939
+    },
+    "billing_scope": "Separate deterministic local checks; excluded from paid-episode timings/costs."
+  }
+}

@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "status": "passed",
+  "checks": [
+    {
+      "name": "official_binary_sha256",
+      "status": "passed",
+      "sha256": "a4c5c9cc5b8222184d0d7429b0bb6ac2a92bbe45dd11bf68e4b1360050791909",
+      "seconds": 0.056
+    },
+    {
+      "name": "sdk_pin",
+      "status": "passed",
+      "revision": "daf07999c2fee9b22edc7bf8fea1fb6272e0df5e",
+      "seconds": 0.002
+    },
+    {
+      "name": "actual_omp_version",
+      "status": "passed",
+      "version": "omp/18.1.13",
+      "seconds": 0.281
+    },
+    {
+      "name": "rpc_startup_get_state_essential_registration",
+      "status": "passed",
+      "tools": [
+        "compatibility_probe"
+      ],
+      "model": "tandem-compat/fixture",
+      "load_mode": "essential",
+      "seconds": 2.279
+    },
+    {
+      "name": "bridge_think_native_capabilities_and_finish",
+      "status": "passed",
+      "task_id": "602cdda0-b4d1-4bad-9db3-e27398749ad8",
+      "tools": [
+        "tandem_ask",
+        "tandem_finish",
+        "tandem_publish_artifact",
+        "tandem_read_artifact"
+      ],
+      "tool_results": {
+        "write": "Tool write not found",
+        "bash": "Tool bash not found",
+        "read": "Tool read not found",
+        "tandem_finish": "Final report recorded. End this turn now; do not perform more work."
+      },
+      "session_saved": true,
+      "seconds": 0.667
+    },
+    {
+      "name": "bridge_analyze_native_capabilities_and_finish",
+      "status": "passed",
+      "task_id": "d3bbb8ec-ad0e-4343-b2c8-9cb3802bfb96",
+      "tools": [
+        "glob",
+        "grep",
+        "read",
+        "tandem_ask",
+        "tandem_finish",
+        "tandem_publish_artifact",
+        "tandem_read_artifact",
+        "web_search"
+      ],
+      "tool_results": {
+        "write": "Tool write not found",
+        "bash": "Tool bash not found",
+        "read": "native-read-proof-803719",
+        "tandem_finish": "Final report recorded. End this turn now; do not perform more work."
+      },
+      "session_saved": true,
+      "seconds": 0.705
+    },
+    {
+      "name": "bridge_work_native_capabilities_and_finish",
+      "status": "passed",
+      "task_id": "c6a71b03-e87a-43ca-9f0b-33fc1799dc16",
+      "tools": [
+        "bash",
+        "edit",
+        "glob",
+        "grep",
+        "lsp",
+        "read",
+        "tandem_ask",
+        "tandem_finish",
+        "tandem_publish_artifact",
+        "tandem_read_artifact",
+        "todo",
+        "web_search",
+        "write"
+      ],
+      "tool_results": {
+        "write": "[<temporary-fixture>/project/work-write.txt#DB75]\nSuccessfully wrote 26 bytes to <temporary-fixture>/project/work-write.txt",
+        "bash": "(no output)\n\nWall time: 0.06 seconds",
+        "read": "[<temporary-fixture>/project/read-proof.txt#251A]\n1:native-read-proof-803719",
+        "tandem_finish": "Final report recorded. End this turn now; do not perform more work."
+      },
+      "session_saved": true,
+      "seconds": 0.764
+    },
+    {
+      "name": "bridge_saved_session_continue",
+      "status": "passed",
+      "conversation_id": "682c66b2-9c85-4089-862a-13a3eda444c1",
+      "task_id": "9a5d29a0-ec13-45c8-aba8-96032db241ef",
+      "history_restored": true,
+      "seconds": 0.659
+    },
+    {
+      "name": "bridge_cancel_inflight_model_stream",
+      "status": "passed",
+      "task_id": "02deb2e7-395e-41e2-9692-e8f56731ec7e",
+      "cancel_seconds": 0.059,
+      "seconds": 0.667
+    }
+  ],
+  "platform": {
+    "os": "Darwin",
+    "release": "25.5.0",
+    "arch": "arm64"
+  },
+  "python": "3.13.5",
+  "omp": {
+    "path": "<private-evidence>/omp-cache/18.1.13/omp-darwin-arm64",
+    "source": "official_release_cache",
+    "sha256": "a4c5c9cc5b8222184d0d7429b0bb6ac2a92bbe45dd11bf68e4b1360050791909",
+    "expected_sha256": "a4c5c9cc5b8222184d0d7429b0bb6ac2a92bbe45dd11bf68e4b1360050791909",
+    "asset": "omp-darwin-arm64",
+    "version_output": "omp/18.1.13"
+  },
+  "sdk": {
+    "version": "0.1.0",
+    "revision": "daf07999c2fee9b22edc7bf8fea1fb6272e0df5e",
+    "direct_url": {
+      "url": "https://github.com/can1357/oh-my-pi/archive/daf07999c2fee9b22edc7bf8fea1fb6272e0df5e.tar.gz",
+      "archive_info": {},
+      "subdirectory": "python/omp-rpc"
+    }
+  },
+  "tandem": {
+    "installed_version": "3.3.0",
+    "source_version": "3.3.0"
+  },
+  "provider": {
+    "transport": "localhost OpenAI-compatible HTTP/SSE",
+    "model": "tandem-compat/fixture",
+    "requests": 18,
+    "credentials": "none",
+    "usage": "synthetic fixture tokens; not a cost or performance benchmark"
+  },
+  "seconds": 6.891
+}

@@ -20,7 +20,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "^mcp__.*omp-tandem.*__tandem_(scope|start|continue|result|wait|reply|cancel|channel)$",
+        "matcher": "^mcp__.*omp-tandem.*__tandem_(scope|start|continue|result|wait|reply|cancel|channel|review_run)$",
         "hooks": [
           {
             "type": "command",

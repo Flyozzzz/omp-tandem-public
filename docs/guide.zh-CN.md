@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**版本：3.2.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**版本：3.3.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -26,6 +26,7 @@ OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Co
 - [前置要求](#requirements)
 - [安装 OMP 并配置提供商](#install-omp-and-configure-a-provider)
 - [安装插件](#install-the-plugin)
+- [首次使用：配置后审查暂存变更](#first-review)
 - [其他 MCP 客户端](#other-mcp-clients)
 - [自动准备运行环境](#automatic-runtime-preparation)
 - [钩子与技能](#hooks-and-skills)
@@ -33,6 +34,8 @@ OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Co
 - [任务与执行模式](#tasks-and-execution-modes)
 - [执行配置与用量](#execution-and-accounting)
 - [不可变快照审查](#snapshot-reviews)
+- [高层只读审查场景](#review-run)
+- [补充未变更的上下文](#review-context)
 - [问题生命周期](#finding-lifecycle)
 - [产品知识与决策](#product-knowledge-and-decisions)
 - [项目隔离](#project-isolation)
@@ -48,6 +51,8 @@ OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Co
 - [故障排查](#troubleshooting)
 - [仓库结构](#repository-layout)
 - [开发与验证](#development-and-verification)
+- [真实 OMP 兼容性证据](#real-omp-compatibility)
+- [比较基准准备与发布案例](#benchmark-and-case)
 - [分发与许可](#distribution-and-licensing)
 
 <a id="what-it-does"></a>
@@ -63,6 +68,7 @@ OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Co
 | 每轮目标 | 替换当前目标，而不是重复之前的整轮审计 |
 | 结构化契约 | 指定约束、文件归属、上下文和验收标准 |
 | 不可变审查包 | 固定需求、代码字节和证据，先独立判断，再比较作者方案 |
+| 有界审查场景 | 一次启动捕获快照，独立审查后按条件比较一次；统一读取、回复和取消 |
 | 问题生命周期 | 稳定编号与只追加历史，分开记录问题有效性和修复状态 |
 | 执行配置与用量 | 按轮选择计算强度，显示请求／生效／实际设置和未知费用 |
 | 带版本的产品快照 | 保存有来源的规则、示例，以及已接受或已否决的决策 |
@@ -175,7 +181,7 @@ OMP 支持多个托管提供商，以及本地／兼容 OpenAI 的后端。请�
 
 对于自定义后端，使用 OMP 的 `~/.omp/agent/models.yml` 配置，并通过 `omp setup` 或 `/model` 选择该提供商／模型。参阅[提供商参考文档](https://omp.sh/docs/providers)。除非显式覆盖，否则桥接服务继承 OMP 的模型选择。
 
-使用插件之前，请直接在 OMP 中发出一个无害请求。这可以验证真实的提供商访问能力；仅找到可执行文件并不能验证身份认证。配置 OMP 不会让你自动登录 Claude Code 或 Codex。
+配置完成后，先按[首次使用流程](#first-review)进行本地诊断；只有你明确同意时，才发出无害的在线请求验证提供商访问，可能产生费用。仅找到可执行文件不能验证身份认证。配置 OMP 不会让你自动登录 Claude Code 或 Codex。
 
 <a id="install-the-plugin"></a>
 ## 安装插件
@@ -192,9 +198,7 @@ claude plugin install omp-tandem@omp-tandem
 
 从目标项目目录启动一个新的 Claude 会话。如果客户端要求执行 `/reload-plugins`，请等正在进行的委派工作结束后再按要求操作。
 
-可以这样提出请求：
-
-> 使用 OMP Tandem。调用 `tandem_scope` 并报告绑定的项目，然后请 OMP 以 `think` 模式为我的提案提供独立意见。等待回答并加以评估，不要默认它一定正确。
+首次使用先运行 `/omp-tandem:setup`，再按[首次使用流程](#first-review)检查当前项目和本地运行时。无需先学习每个底层工具。
 
 共享工作流技能可通过 `/omp-tandem:tandem` 使用；配置技能为 `/omp-tandem:setup`。客户端显示的 MCP 工具名称包含插件前缀，但工具后缀始终为 `tandem_*`。
 
@@ -206,7 +210,7 @@ codex plugin marketplace add Flyozzzz/omp-tandem-public
 codex plugin add omp-tandem@omp-tandem --json
 ```
 
-在目标项目中启动一个新的 Codex 会话。使用 `/plugins` 检查安装情况。要求它使用 OMP Tandem，并在委派任务前调用 `tandem_scope`。
+在目标项目中启动一个新的 Codex 会话。使用 `/plugins` 检查安装情况，运行 `/omp-tandem:setup`（或要求客户端使用 setup 技能），再按[首次使用流程](#first-review)进行本地诊断。委派前确认 `tandem_scope` 绑定的项目。
 
 Codex 对非受管钩子要求显式信任审查；使用 `/hooks` 检查这些钩子。MCP 服务器无需可选的诊断钩子也能工作，因此不需要绕过钩子信任机制。
 
@@ -222,6 +226,20 @@ codex plugin marketplace add "$TANDEM_ROOT"
 添加本地市场后，通过相应客户端安装插件。两个市场目录都指向自包含的仓库根目录。不要引用插件目录之外的文件：宿主可能会将插件复制到带版本的缓存中。
 
 **避免重复注册。** 如果已经安装独立 MCP，请先完成其任务，并在切换到插件前显式删除或禁用旧注册。配置辅助程序不会静默覆盖现有条目。在 Codex 中，手动注册的服务器可能优先于插件服务器。
+
+<a id="first-review"></a>
+## 首次使用：配置后审查暂存变更
+
+推荐顺序：**安装插件 → `/omp-tandem:setup` → 本地诊断 → 自愿在线检查 → 只读审查暂存变更**。不需要先了解所有 MCP 工具：
+
+1. 在目标项目中打开已加载插件的新会话，运行 `/omp-tandem:setup`。它指导你检查前置工具、准备依赖和配置自己的 OMP 提供商，不静默安装 OMP 或复制凭据。
+2. 要求智能体确认绑定项目，并调用 `tandem_diagnose`，例如 `{"expected_project":"/absolute/project"}`。这是默认的本地检查，不调用模型；路径应换成实际项目。
+3. **只有明确同意可能付费的在线检查时**，才要求 `tandem_diagnose(live=true)`。它验证当前客户端的实际提供商请求；继续等待同一 `task_id`，不要重复启动。参数与边界见[在线诊断](#live-diagnostics)。
+4. 暂存你真正希望审查的变更，然后可以直接说：
+
+   > 用 OMP Tandem 只读审查当前已暂存的变更。原始需求是：〈填写需求〉。使用 `tandem_review_run`，先独立判断；若我提供了作者方案，独立成功后只比较一次。必要的未改动调用方和测试通过 `context_paths` 从索引捕获。不要编辑、运行 shell／测试或自动应用建议；阅读完整回答，说明发现、未决问题、快照适用性和仅 OMP 工作轮次的用量。
+
+没有已选变更时，场景返回 `no_changes`，不会为上下文文件单独调用模型。审查并不隐含修复授权；下一步由协调者依据原始需求和实际证据决定。可复制的 API 参数见[高层审查场景](#review-run)，首次使用不必手动编排独立与比较任务。
 
 <a id="other-mcp-clients"></a>
 ## 其他 MCP 客户端
@@ -310,14 +328,16 @@ Claude 插件提供轻量前置工具诊断，以及可选的独立看门狗：
 <a id="working-with-a-peer"></a>
 ## 与协作者共同工作
 
-对涉及行为或设计决策的开发，技能要求 **理解需求 → 独立判断 → 比较方案 → 明确计划 → 实现 → 交叉检查**。规划完成前，不应开始实现修改或派发 `work` 实现任务。
+对涉及行为或设计决策的开发，技能要求 **理解需求 → 独立判断 → 比较方案 → 明确计划 → 实现 → 交叉检查**。非平凡修改之前仍需独立判断，但规划深度应与不确定性和风险相称，而不是每次都展开完整架构讨论。
 
-1. 明确真实需求、约束、用户已确认的事实和可观察的验收标准。
-2. 先形成自己的初步判断，并让 OMP 独立定义问题；暂不提供协调者的诊断和论据。
-3. 比较方案与证据，解决重要分歧，记录所选方法、文件归属、修改顺序及验证方式。
-4. 执行计划，随后依据原始标准交叉检查实现与验证证据。重要前提变化时返回规划，而不是暗中扩大范围。
+1. 明确真实需求、约束、用户已确认的事实和可观察的验收标准；不要再运行实验来确认用户已经报告的事实。
+2. 先形成自己的初步判断，并让 OMP 从原始需求、事实和相关代码独立判断；暂不提供协调者的诊断和论据。
+3. **局部、原因和修复方向已明确的工作：**简短的首次评估，随后一次简短比较与具体检查即可。**存在歧义或高风险的工作：**完整比较替代方案、取舍和证据。局部范围不等于省略独立判断。
+4. 默认只做**首次独立判断 + 一次比较**，然后作出决定、执行能区分假设的实验，或向用户提出必要问题。不要为了达成一致自动增加轮次。记录所选方法、文件归属、修改顺序及验证方式，再实现并交叉检查。
 
-只有不涉及实质设计／行为选择的机械修改，或范围和前提未变且用户已明确批准的计划，才可走简化流程；需说明例外及检查方式。目标明确或 diff 很小本身不是例外。不要强求一致，也不要让用户逐项批准普通技术细节。只读规划会话不能通过继续对话获得写权限：另开获准的 `work` 会话并传递已确定的计划。仅分析的请求不授权实现。
+只有不涉及实质设计／行为选择的机械修改，或范围和前提未变且用户已明确批准的计划，才可走简化流程；需说明例外及检查方式。目标明确或 diff 很小本身不是例外。不要让用户逐项批准普通技术细节。只读规划会话不能通过继续对话获得写权限：另开获准的 `work` 会话并传递已确定的计划。仅分析的请求不授权实现。
+
+这些规划与停止规则是**技能／提示词中的协调策略，不是运行时的“计划批准”权限门**。它们不能自动证明宿主已完成规划，也不能批准写入。相比之下，快照阶段的访问限制和高层场景的最多两轮编排由代码执行，详见下文。
 
 好的请求会拆分互补的工作，而不是重复劳动：
 
@@ -331,7 +351,7 @@ Claude 插件提供轻量前置工具诊断，以及可选的独立看门狗：
 
 用户已确认的观察结果与协作者的假设不同。不要仅仅为了再次确认用户的观察而重跑已确认的实验；应调查新的断言或发生变化的代码。任何一方都不应只负责无条件认可另一方。
 
-规划及重要分析／审查使用 `tandem_start` 获取独立判断，再通过 `tandem_continue` 公开并比较协调者方案。保留用户已确认的事实；若代码、历史或共享上下文已经暴露方案，应承认其影响，而不是声称盲审。是否可省略新的开发规划，只由上述明确例外决定。
+一般规划可使用 `tandem_start` 获取独立判断，再通过 `tandem_continue` 比较协调者方案；已有变更的只读快照审查优先使用[高层场景](#review-run)，无需手动串联工具。保留用户已确认的事实；若代码、历史或共享上下文已经暴露方案，应承认其影响，而不是声称盲审。重要前提变化时有意重新规划，不暗中扩大任务或开启循环审计。
 
 <a id="tasks-and-execution-modes"></a>
 ## 任务与执行模式
@@ -417,10 +437,117 @@ OMP 会核对实际模型及其支持的思考等级。模型不支持所请求�
 
 `partial` 的已知小计不是完整总数；缺失数据保持 `unknown`／`null`，不能当作零。`coverage` 描述事件覆盖情况，不保证每项指标完整。费用来自 OMP 原生报告，不是账单，也不会根据模型名称虚构价格；缺失或零价目录不能证明免费。时间与模型来源也应按结果实际报告解释。
 
+这些用量只覆盖 OMP 工作轮次，**不包含外部协调者**的推理、最终整合或全部工作流费用。高层审查场景另以 `usage.peer` 汇总本次阶段，并明确返回 `coordinator=null`、`total_cost=null`；不能把原生阶段费用冒充整个协作过程的总价。整个工作流的耗时、人力和协调者费用需在宿主侧另行记录，见[比较基准准备](#benchmark-and-case)。
+
 <a id="snapshot-reviews"></a>
 ## 不可变快照审查
 
-先用 `tandem_review(action=create)` 固定审查材料，再启动只读取快照的独立任务。以下调用中的路径、检查输出和论据为教学数据，请换成真实材料；后续 `<...>` ID 必须替换为前一次响应中的实际值。
+首次审查优先使用下列高层场景。它复用 `ReviewRequest`，由代码完成捕获、独立判断和可选的一次比较。需要逐轮控制时，后面的 `tandem_review`／`tandem_start`／`tandem_continue` 底层流程仍然可用。
+
+<a id="review-run"></a>
+### 高层只读审查场景
+
+四个操作都调用 **`tandem_review_run`**。以下路径、需求与作者材料是教学输入，不是已验证的案例；替换为自己的实际项目材料。启动示例审查全部暂存变更，并显式补充两份未改动的索引文件：
+
+```json
+{
+  "action": "start",
+  "request_key": "upload-staged-review-001",
+  "request": {
+    "requirements": "相同上传请求重试不得生成第二份记录；正常上传仍可自动完成。",
+    "criteria": ["核对幂等键范围与调用方约定", "将证据、假设和缺失上下文分开"],
+    "source": "staged",
+    "base": "HEAD",
+    "context_paths": ["src/upload_client.py", "tests/test_upload_contract.py"],
+    "author_proposal": "在请求边界增加幂等键。",
+    "author_rationale": "避免重试生成重复记录，同时保留正常自动流程。",
+    "external_boundaries": ["不包含生产数据库与外部存储服务的运行状态"]
+  },
+  "execution": {"profile": "quick"},
+  "budget_seconds": 600,
+  "compare": true,
+  "wait_seconds": 25
+}
+```
+
+`request` 与底层捕获 API 使用相同的 `ReviewRequest`。路径相对绑定的项目根目录；省略 `paths` 表示所选来源的全部变更，也可显式限定变更路径。无需传入 `cwd`、`mode`、`review_stage` 或自己创建 `review_id`。
+
+- **总预算：**公开参数名为 `budget_seconds`，默认 600 秒，MCP 接口允许 10–7200 秒；覆盖本次受理后的捕获／启动、两个阶段和等待澄清时间，不是每阶段各给一份预算。
+- **每阶段配置：**`execution` 仍有自己的 profile／显式超时上限，每次派发按该上限和总预算剩余时间中的较小值限制。增加总预算不会自动提高 `quick` 的每阶段时限；`deep` 也不能越过总预算。`wait_seconds` 为 0–25，默认 25，只控制一次调用等待多久，不延长运行期限。
+- **轮数：**默认 `compare=true`，但只有保存了非空作者方案或论据，且独立阶段为 `completed`、结构化报告为 `success`，才进入**一次**比较。无作者材料或 `compare=false` 时只有独立一轮；最多两轮，不做第三轮共识整合。`partial`／`blocked` 不会触发比较。
+- **无变更：**捕获中没有已选变更时，返回 `status=no_changes`、`phase=capture`，不调用模型；仅补充上下文也不能启动空审查。
+- **权限：**两个阶段均为 `think`，只读保存的材料。场景不派发 `work`、不执行 shell／测试、不自动应用建议，也不将模型结论自动视为有效缺陷。`checks[].command` 只是已提供证据的标签，不会执行。
+
+捕获由独立受控进程执行，不持有控制器全局锁。取消或截止时间会停止其进程组；发布事务再次验证所属实例、保留 ID 和期限。迟到的捕获不能成为 `no_changes` 或启动下一阶段。每个 MCP 所属实例最多四个捕获槽位，满额明确拒绝，不建立隐藏队列。这是生命周期控制，**不是操作系统沙箱**；底层捕获仍使用自身的逐操作限制，而非场景总预算。
+
+若快照发布暂时占用共享写入门控，取消可能返回仍活动的持久状态，以及 `stop_pending` 和 `next_action="wait"`。继续轮询同一 `run_id`：待持久化的停止请求会阻止下一阶段，但尚不等于已保存的终态取消。状态读取与捕获期限监督仍可运行。通知确认也不等待发布锁，后续观察可以再次确认相同事件。
+
+保存返回的 `run_id`。等待时反复调用 **`status`，不要再次 `start`**：
+
+```json
+{
+  "action": "status",
+  "run_id": "<start 返回的 run_id>",
+  "wait_seconds": 25
+}
+```
+
+`request_key` 是同一所属 MCP 实例（owner）内一个逻辑请求的稳定键，非空且最长 200 字符。同一键和同一规范化请求／配置／预算／比较开关返回同一 `run_id`；不同载荷冲突，不能当作悄悄更新快照。它不是跨重启的全局去重键。旧 owner 失效后，未完成运行变为 `interrupted`，不会重放捕获或已保留的阶段；先读取旧 `run_id`，有意重开工作时使用新的逻辑请求。MCP 宿主关闭后不会成为脱离宿主继续运行的后台作业。
+
+若返回 `status=waiting_input` 和 `question`，使用该运行**当前问题**的实际 ID 回答：
+
+```json
+{
+  "action": "reply",
+  "run_id": "<同一 run_id>",
+  "question_id": "<当前 question 中的 question_id>",
+  "answer": "<针对该问题的真实回答；不要编造缺失的源文件或测试结果>",
+  "wait_seconds": 25
+}
+```
+
+相同的已回答问题和完全相同的答案可幂等重试；不同、过期或不属于当前问题的回复会被拒绝。澄清不重置总预算，也不授权读取快照之外的实时文件。发现必要文件缺失时，应明确提问／报告阻塞，并用扩大后的 `context_paths` 创建新快照和新逻辑请求，而不是将旧审查暗中变成实时调查。
+
+停止当前运行：
+
+```json
+{
+  "action": "cancel",
+  "run_id": "<同一 run_id>",
+  "wait_seconds": 0
+}
+```
+
+取消先阻止后续阶段，再请求取消当前子任务，已生成的阶段回答仍可读取；它不是撤销操作。`status`／`reply`／`cancel` 不接收 `request`、`request_key`、`execution`、`budget_seconds` 或 `compare` 等创建参数。
+
+**如何阅读响应：**
+
+| 字段 | 解释 |
+|---|---|
+| `run_id`、`review_id`、`task_id` | 场景、不可变快照、当前／最后阶段任务的 ID；捕获阶段可能没有任务 ID |
+| `status`、`phase`、`outcome`、`error` | 运行状态、`capture`／`independent`／`comparison` 阶段、结构化判定和错误；`completed` 本身不证明 `success`，更不证明代码正确 |
+| `independent`、`comparison` | 完整阶段结果或 `null`；读取各自的 **`answer`** 与报告，不只读 `summary`。场景返回完整阶段回答，无需把摘要当成答案或重新发起审查来获取全文 |
+| `question`、`findings` | 当前待答问题，以及按 `independent`／`comparison` 分组的发现；仍需协调者判断证据与有效性 |
+| `applicability` | 所选来源及观察时刻的快照适用性，不是整个环境、后续工作区或生产系统的正确性保证 |
+| `created`、`deadline`、`elapsed_seconds` | 受理时间、总截止时间和**本次受理运行**的耗时；不包括受理前协调者的准备，也不是整个用户工作流时钟 |
+| `usage` | `scope="OMP worker turns only; excludes coordinator usage"`，`peer` 汇总阶段用量，`coordinator=null`、`total_cost=null`；未知不是零 |
+
+运行中的 `starting`／`running` 响应只返回紧凑的 `stage_statuses` 和 `full_result_pending`，避免重复发送长答案。终态结果才包含完整 `independent`／`comparison`；`waiting_input` 会提供问题及相关已完成阶段，便于回答。
+
+代码负责保存首次完整回答、执行阶段门槛和轮数／预算限制、汇总结果并观察适用性；协调者负责阅读原文、保留分歧、选择方案或有区分力的检查。场景不会代替协调者整合，也不会把双方一致当作真相。后续实际实现仍需独立授权。
+
+<a id="review-context"></a>
+### 补充未变更的上下文
+
+`context_paths` 可为高层 `request` 或底层 `tandem_review(action=create)` 显式加入未变更的调用方、接口和测试文件。这些文件与变更一起保存，不是“允许模型以后随时读取”的路径清单：
+
+- `source="staged"` 从 **Git 索引**读取上下文；`source="worktree"` 从**工作区**读取。不能用工作区版本悄悄补足 staged 审查。
+- 清单标记 `role=change` 或 `role=context`，并返回 `change_count`、`context_count`、`context_paths`。上下文参与保存的字节／指纹和适用性观察，但不会伪装成被审查的变更或增加 diff。
+- 在所选来源中不存在的必要上下文会明确报错。Git 项目中已变化但没有被选为变更的 context 路径也会被拒绝；如需审查它的变化，应将其显式纳入 `paths`，或有意选择包括它的变更集合。
+- 文件总数和字节限制合并计算，仍为最多 256 个文件、每文件 4 MiB、保存内容总计 16 MiB，不是另给上下文一份额度。
+- 捕获后才发现缺失上下文，应保留阻塞／问题，明确扩大材料并重新捕获；新 `review_id` 必须重新独立判断，不能借旧快照的成功直接进入比较。
+
+以下保留逐步底层 API，供需要手动编排的协调者使用。示例中的路径、检查输出和论据为教学数据，请换成真实材料；后续 `<...>` ID 必须替换为前一次响应中的实际值。
 
 ### 1. 捕获需求、代码与证据
 
@@ -495,7 +622,7 @@ Staged 模式的 `selected`、文件模式、变更类型及 diff 均来自索�
 
 ### 3. 完成后比较作者方案
 
-等待并读取第一轮答案，保留原文。只有同一对话已完成**同一 `review_id`** 的独立评估后，才可调用 `tandem_continue` 进入比较：
+等待并读取第一轮完整答案，保留原文。只有同一对话已完成**同一 `review_id`** 的独立评估，且返回结构化 `success` 后，才可调用 `tandem_continue` 进入比较：
 
 ```json
 {
@@ -740,7 +867,7 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 <a id="mcp-tools"></a>
 ## MCP 工具
 
-共 18 个 MCP 工具。宿主前缀可能不同；以下是稳定的工具后缀。MCP `Context` 由系统注入，不是用户参数。
+共 19 个 MCP 工具。首次只读审查优先使用 `tandem_review_run`；原有单任务与逐阶段工具仍然保留。宿主前缀可能不同；以下是稳定的工具后缀。MCP `Context` 由系统注入，不是用户参数。
 
 | 工具 | 主要输入 | 用途 |
 |---|---|---|
@@ -759,6 +886,7 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 | `tandem_import_context` | `transfer_id`、`expected_revision` | 接收定向发送的快照 |
 | `tandem_channel` | `action=status/probe/ack/pending/recover`、相关 ID／令牌、`include_previous`、`limit` | 管理可选投递机制 |
 | `tandem_review` | `action=create/read/assess`、`request` 或 `review_id`、`section`、`path`、`offset`、`limit`、`reveal_author` | 保存／分页读取审查包，观察快照适用性 |
+| `tandem_review_run` | `action=start/status/reply/cancel`、`request_key`、`request`、`run_id`、`execution`、`budget_seconds`、`compare`、`wait_seconds`、`question_id`、`answer` | 一次捕获，独立审查后按条件比较一次；完整结果、澄清与取消 |
 | `tandem_findings` | `action=create/update/get/list`、对话／审查／问题 ID、`finding`、`change`、`expected_revision`、`number`、`task_id`、分页 | 管理只追加的问题历史 |
 | `tandem_diagnose` | `live`、`task_id`、`expected_project`、`wait_seconds`、`timeout_seconds` | 当前客户端本地或显式在线检查 |
 | `tandem_receipt` | `task_id`、`action=status/claim/complete`、`token` | 单独领取并确认终态结果处理 |
@@ -769,6 +897,8 @@ OMP 自身会获得绑定到其任务的宿主工具：`tandem_ask`、`tandem_fi
 ## 结果、问题与产物
 
 `task_id` 标识一个轮次；`conversation_id` 标识该轮次所属的持久 OMP 对话。`question_id`、`artifact_id` 和 `context_id` 分别标识具体问题、不可变材料版本和产品快照。
+
+高层场景另用 `run_id` 标识一次最多两轮的编排；通过 `tandem_review_run(action=status)` 获取完整阶段结果。下面 `details` 与回答截断说明针对底层 `tandem_result`，不要误套到已经返回完整阶段答案的场景 API。
 
 | 状态 | 含义 |
 |---|---|
@@ -1046,6 +1176,10 @@ uv run --no-project --python '>=3.12' python -I "$TANDEM_ROOT/server.py" \
 | 钩子不受信任／已禁用 | 核心 MCP 仍可工作，但必须有界轮询；正常审查钩子，不要绕过信任机制 |
 | 已有推送确认但仍要求等待 | 检查看门狗是否有真实唤醒证明且当前已就绪；通道确认不等于独立唤醒 |
 | 审查为 `stale`／`previous_version`／`unknown` | 阅读具体范围，必要时捕获新快照并重新独立审查；不要改写旧答案 |
+| 场景返回 `no_changes` | 所选来源没有变更；补充的上下文不会触发模型。检查是否确实已暂存／选择目标变更，不要循环重启 |
+| `request_key` 冲突 | 同一逻辑键载荷不同；先读原 `run_id`，确认新范围后使用新键，不能靠重复 `start` 等待 |
+| 场景为 `interrupted`／预算耗尽 | 读取保留阶段与错误；不会自动重放旧 owner 的工作。必要时有意建立新运行，不假设后台仍在继续 |
+| 必要上下文缺失／context 路径有变化 | 从同一来源明确补充 `context_paths`；变更路径纳入 `paths`，重新捕获并从独立阶段开始 |
 | 问题修订冲突 | 先读取最新 `revision`，理解并发历史后再提交更新 |
 | 处理凭据为 `uncertain` | 先核对外部操作是否已执行；不要自动释放、重新领取或重放副作用 |
 
@@ -1074,6 +1208,8 @@ omp-tandem/
     task_interaction.py       Questions and structured report validation
     task_contracts.py         Persistent policy and per-turn messages
     task_results.py           Result projection and readiness snapshots
+    review_runs.py            Owner-scoped bounded review scenarios
+    reviews.py                Immutable source/context capture and applicability
     runtime_models.py         Shared request/status types
     prompts.py                Product-neutral peer instructions
     models.py                 Contracts and reports
@@ -1101,7 +1237,7 @@ omp-tandem/
 在检出的仓库中：
 
 ```sh
-uv sync --frozen
+uv sync --frozen --group dev
 uv run --frozen pytest -q
 uv run --frozen ruff check .
 uv run --frozen ruff format --check .
@@ -1115,6 +1251,32 @@ uv build --wheel
 插件重构之前，版本 2.4.0 通过了 142 项测试，以及真实的双项目 Claude/OMP 隔离检查和原生历史迁移／续接检查；原始文件保持逐字节一致。当前发布版本的验证情况应记录在发布说明中；以往结果不代表新变更自动正确。
 
 请保留 MCP API 层立即求值的类型注解约定：固定版本的 FastMCP Context 包装器会在注册时解析这些类型。不要为了让测试通过而削弱隔离、从缺失报告中推断成功，或引入隐蔽的跨项目记忆。
+
+<a id="real-omp-compatibility"></a>
+### 真实 OMP 兼容性证据
+
+3.3.0 的精确验证组合为**官方 OMP 18.1.13** 和 Python RPC SDK 提交 **`daf07999c2fee9b22edc7bf8fea1fb6272e0df5e`**，不宣称未测试的版本范围兼容。安装好上述开发依赖后，在仓库根目录复现：
+
+```sh
+uv run --frozen python scripts/verify_omp.py --cache-dir /tmp/tandem-omp-cache --report /tmp/tandem-omp-compatibility.json
+```
+
+该命令下载指定平台的官方二进制并在执行前验证固定 SHA-256，不替换全局 `omp`。可用 `--omp /absolute/path/to/omp` 指定本地二进制，但仍须匹配固定官方摘要。配置支持 macOS arm64／x64 和 Linux x64 glibc；一次命令最多 480 秒，启动、请求、取消和清理还有更短的限制。
+
+验证使用隔离的临时 HOME、OMP 配置、项目与状态目录，以及绑定 `127.0.0.1` 的确定性模型 HTTP/SSE 服务，不使用真实提供商密钥，也不产生付费模型请求。**仅模型响应是脚本化的**：真实官方 OMP 与固定 SDK 执行 RPC 启动、essential 宿主工具注册、`tandem_finish` 完整结构化回答、保存会话的续接，以及等待模型响应时的取消。
+
+它还通过真实调用检查模式边界：`think`／`analyze` 拒绝写入和 shell 副作用，`think` 不读取实时输入，`analyze` 读取指定内容；`work` 的 native write／bash 确实生成预期的临时文件。这是工具可用性验证，**不是操作系统文件沙箱认证**，也不覆盖每个工具、提供商或任意网络行为。
+
+发布准备期间已在本地运行真实官方二进制，上述启动、宿主工具、完成、续接、取消及模式边界检查通过。Linux／macOS CI 已配置同一验证命令，**不表示新提交的 GitHub Actions 已运行或已经通过**；以该机器的 JSON 报告和实际 CI 日志为证据。报告记录二进制摘要／版本、SDK 来源、平台和每项检查结果。完整隔离方法、摘要来源及证据解释见[真实 OMP 兼容性验证（英文）](compatibility.md)。本地模拟 RPC 回归测试仍有用途，但不能代替真实二进制证据；本地模型的合成 token／时间也不是性能或费用基准。
+
+<a id="benchmark-and-case"></a>
+### 比较基准准备与发布案例
+
+[比较基准协议（英文）](benchmark.md)、[结果 JSON Schema](../config/benchmark-result.schema.json) 和[离线分析器](../scripts/benchmark.py) 是**独立的准备工作**，不是已测得的比较结果，也不会安排模型调用或默认批准付费执行。
+
+协议比较四组：单智能体、同一智能体自审、先看作者方案的普通交接、先独立再比较的 Tandem。自然预算与等计算预算分开分析；后者必须计入协调者与协作者，而非只对齐 OMP 用量。记录整个流程墙钟时间、主动人力时间、双方费用／token、误报、回归、失败和未知数据；缺失不能记为零。实际执行需另行批准任务集、隐私和资源／费用预算。
+
+[3.3.0 发布案例（英文）](case-study.md) 单独记录真实案例及其证据边界。一个案例、一次真实兼容性检查或准备好分析器，都不能证明四组比较已经完成，更不能据此声称 Tandem 普遍更快、更便宜或更准确。案例与后续基准应在宿主侧额外记录协调者用量和完整工作流时钟，不能把场景的 `elapsed_seconds` 或 native 阶段费用替代为全过程指标。
 
 <a id="distribution-and-licensing"></a>
 ## 分发与许可

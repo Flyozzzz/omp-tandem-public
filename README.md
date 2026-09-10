@@ -17,7 +17,7 @@ Consult, design, implement, and review together through [Oh My Pi](https://githu
 A second agent should do more than approve the first agent's work. OMP Tandem lets your coordinator ask for independent reasoning, explore alternatives, delegate a separate implementation slice, and compare findings against evidence.
 
 - **Real OMP, your provider.** Uses the official `omp_rpc` client and `omp --mode rpc`, not a substitute direct-API wrapper.
-- **Plan before nontrivial development.** Independent peer framing, a concrete shared plan, implementation and cross-checking; narrow exceptions for mechanical edits or unchanged user-approved plans.
+- **Proportional planning.** Independent assessment, one comparison, a concrete plan, then implementation and cross-checking—not a fresh whole-project audit for every local fix.
 - **Persistent conversations.** Continue a discussion while replacing the current goal and preserving its base constraints.
 - **Scoped knowledge.** Separate project histories, optional versioned product rules, and explicit cross-project sharing.
 - **Honest results.** Structured outcomes, questions with deadlines, and recoverable intermediate artifacts.
@@ -59,15 +59,25 @@ codex plugin marketplace add Flyozzzz/omp-tandem-public
 codex plugin add omp-tandem@omp-tandem --json
 ```
 
-Start a new session from your project's directory. Do not keep an old standalone registration enabled alongside the plugin. While this repository is private, access is required; the commands do not bypass GitHub permissions.
+Start a new session from your project's directory. Do not keep an old standalone registration enabled alongside the plugin. This repository is public; no invitation is required.
 
 Python dependencies are prepared automatically in a private cache. OMP installation and provider authentication remain explicit user setup. Other clients can use the [standard MCP configuration](docs/guide.md#other-mcp-clients).
 
-### 3. Start collaborating
+### 3. Check this project's setup
 
-> Use OMP Tandem. First check `tandem_scope`. Ask OMP to independently challenge this design while you inspect the API constraints. Wait for the answer, compare the evidence, and explain the remaining disagreements.
+In Claude, run `/omp-tandem:setup` and ask for **local diagnosis only**. Confirm that Tandem is bound to your project, not the plugin/cache directory, and inspect runtime and delivery prerequisites. This does not call a model or prove provider authentication; a separate live diagnostic is optional and needs your approval.
 
-Claude provides `/omp-tandem:tandem` and `/omp-tandem:setup`. Client prefixes vary; the MCP tool suffixes remain `tandem_*`.
+### 4. Review your prepared commit
+
+Stage the intended changes, then use `/omp-tandem:tandem` or ask in natural language:
+
+> Use OMP Tandem to review my prepared commit, using staged changes only. Use this task's requirements and acceptance criteria; ask me if they are missing. Do not edit files. Report correctness risks with evidence and identify missing context.
+
+The agent uses **`tandem_review_run`**, not a manual sequence of low-level tools: one independent read-only assessment, then at most one comparison with separately supplied author proposal/rationale. Without author material there is only one stage. Progress stays compact; the terminal result includes the **full stage answers**. The default **600-second total budget** covers capture, startup, stages, and questions—not 600 seconds per stage. The scenario neither edits files nor runs supplied test commands.
+
+The review uses a saved **staged/index snapshot**, not unstaged working files. Include requirements, criteria, and explicitly needed unchanged callers/tests in that capture. Missing source context requires a **fresh expanded snapshot and review**, never silently joining live files to an old review. You do not need to learn the low-level tool catalog. Client command prefixes vary; natural-language instructions work with connected Tandem tools.
+
+For development, scale planning to uncertainty: a known local fix needs a brief risk/criteria check and a small plan, not a new audit of the whole project or a re-proof of user-confirmed facts. After one independent assessment and one comparison, choose an approach, run a distinguishing experiment, or state the unresolved question for the user. Do not loop until the agents agree.
 
 ## How it works
 
@@ -86,6 +96,14 @@ flowchart LR
 | `work` | Explicitly authorized implementation | Edit/write/shell and related tools; **not a sandbox** |
 
 New tasks create independent conversations. Follow-ups retain native OMP history but replace the current objective. Questions and intermediate artifacts keep uncertainty visible instead of turning missing information into assumed success.
+
+## Evidence, not a promise
+
+In our [real review case](docs/case-study.md), the first attempt was blocked by missing context (**80.558 s wall time**). An expanded review found a real deadline/cancellation bug, but its **300 s total budget** ended in a timeout after **331.723 s wall time**. A focused recheck completed in **186.127 s wall time** and identified a distinct **shared-SQLite publication-lock risk**, not yet runtime-verified in that episode. Completion is not proof of bug-free code; the case preserves failures and remaining uncertainty.
+
+The publication-lock risk was then reproduced and fixed before release; the case separates that passing runtime follow-up from the original static report.
+
+[Compatibility checks](docs/compatibility.md) use an actual pinned OMP binary and RPC SDK with a deterministic **localhost provider** in CI—no paid account is needed. Evidence applies to the exact tested combination, not a broad version range or every provider. The [benchmark document](docs/benchmark.md) is a comparative protocol only: **no comparative results or superiority claim**.
 
 ## Boundaries that matter
 

@@ -18,7 +18,7 @@ from .findings import FindingChange, FindingDraft
 from .models import ArtifactInfo, TaskContract, TurnContract
 from .project_context import ProjectContext
 from .prompts import coordinator_instructions
-from .reviews import ReviewRequest
+from .reviews import PublicationBusy, ReviewRequest, publication_lock
 from .runtime_models import ACTIVE, Mode, TaskSummary
 from .workspace import client_root_paths
 
@@ -30,6 +30,17 @@ async def granted_roots(ctx: Context):
     # Re-read grants on each new turn, including after a client revokes a root.
     async with asyncio.timeout(5):
         return client_root_paths(await ctx.list_roots())
+
+
+def _review_seen(bridge, observations):
+    # Notification acknowledgements must not turn a responsive status/cancel
+    # into a wait behind snapshot publication. Later observations can ack again.
+    try:
+        with publication_lock(bridge.reviews.scope, blocking=False):
+            for task_id, status, question_id in observations:
+                bridge.channel.seen(task_id, status, question_id)
+    except PublicationBusy:
+        pass
 
 
 def build_server(configuration: Bridge | RuntimeOptions):
@@ -486,6 +497,124 @@ def build_server(configuration: Bridge | RuntimeOptions):
             limit=limit,
             reveal_author=reveal_author,
         )
+
+    @mcp.tool()
+    async def tandem_review_run(
+        ctx: Context,
+        action: Literal["start", "status", "reply", "cancel"],
+        request_key: Annotated[
+            str | None, Field(min_length=1, max_length=200, pattern=r"\S")
+        ] = None,
+        request: ReviewRequest | None = None,
+        run_id: str | None = None,
+        execution: ExecutionOptions | None = None,
+        budget_seconds: Annotated[int | None, Field(ge=10, le=7200)] = None,
+        compare: bool | None = None,
+        wait_seconds: Annotated[int, Field(ge=0, le=25)] = 25,
+        question_id: str | None = None,
+        answer: Annotated[str | None, Field(min_length=1, max_length=60000)] = None,
+    ) -> dict:
+        """Run one read-only review scenario without manually coordinating its native turns.
+
+        start: supply ReviewRequest and a stable request_key for this logical request. Reusing
+        the key returns the same run; a different payload conflicts. Code captures the snapshot,
+        runs independent think review, then at most one comparison if author material was supplied
+        and the independent report succeeded. Total budget defaults to 600 seconds, including
+        startup, both stages and questions. It never edits files or runs supplied test commands.
+        status/reply/cancel: use the returned run_id, never start again to wait. Replies require
+        the current question_id. Full stage answers, findings, applicability and peer-only usage
+        are assembled by code. Claims are not automatically accepted or applied. Missing context
+        needs an explicit new capture (context_paths), not hidden live reads.
+        """
+        bridge = await runtime.get(ctx)
+        await bridge.channel.bind(ctx)
+        if action == "start":
+            if request is None or request_key is None or run_id is not None:
+                raise ValueError(
+                    "start requires request_key and request, without run_id"
+                )
+            if question_id is not None or answer is not None:
+                raise ValueError("Question fields are only valid for reply")
+            result = await asyncio.to_thread(
+                bridge.review_runs.start,
+                request_key,
+                request,
+                execution=execution,
+                budget_seconds=600 if budget_seconds is None else budget_seconds,
+                compare=True if compare is None else compare,
+            )
+            run_id = result["run_id"]
+        else:
+            if run_id is None:
+                raise ValueError("status/reply/cancel require run_id")
+            if any(
+                value is not None
+                for value in (
+                    request_key,
+                    request,
+                    execution,
+                    budget_seconds,
+                    compare,
+                )
+            ):
+                raise ValueError("Creation options are only valid for start")
+            if action == "reply":
+                if question_id is None or answer is None:
+                    raise ValueError("reply requires question_id and answer")
+                result = await asyncio.to_thread(
+                    bridge.review_runs.reply,
+                    run_id,
+                    question_id,
+                    answer,
+                )
+                await asyncio.to_thread(
+                    _review_seen,
+                    bridge,
+                    [(result["replied_task_id"], "waiting_input", question_id)],
+                )
+            elif question_id is not None or answer is not None:
+                raise ValueError("Question fields are only valid for reply")
+            elif action == "cancel":
+                await asyncio.to_thread(bridge.review_runs.cancel, run_id)
+        deadline = time.monotonic() + wait_seconds
+        while action != "cancel":
+            status = await asyncio.to_thread(bridge.review_runs.state, run_id)
+            if (
+                status == "waiting_input"
+                or status not in ACTIVE
+                or time.monotonic() >= deadline
+            ):
+                break
+            await asyncio.sleep(0.15)
+        result = await asyncio.to_thread(bridge.review_runs.view, run_id)
+        await asyncio.to_thread(
+            _review_seen,
+            bridge,
+            [
+                (
+                    observed["task_id"],
+                    observed["status"],
+                    observed.get("question", {}).get("question_id"),
+                )
+                for stage in ("independent", "comparison")
+                if (observed := result.get(stage))
+            ],
+        )
+        if result["status"] in ("starting", "running"):
+            result["stage_statuses"] = {
+                stage: {
+                    key: value
+                    for key, value in result[stage].items()
+                    if key in ("task_id", "status", "outcome")
+                }
+                if result.get(stage)
+                else None
+                for stage in ("independent", "comparison")
+            }
+            for field in ("independent", "comparison", "findings"):
+                result.pop(field, None)
+            result["full_result_pending"] = True
+        return bridge.channel.decorate(result)
 
     @mcp.tool()
     async def tandem_findings(

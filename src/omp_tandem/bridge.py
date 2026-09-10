@@ -13,6 +13,7 @@ from .findings import FindingStore
 from .native_worker import NativeWorker
 from .project_context import ProjectContextStore
 from .receipts import ReceiptStore
+from .review_runs import ReviewRuns
 from .reviews import ReviewStore
 from .runtime_models import ACTIVE
 from .task_contracts import TaskMessages
@@ -79,6 +80,15 @@ class Bridge:
             model,
         )
         self.diagnostics = Diagnostics(self)
+        self.review_runs = ReviewRuns(
+            self.tasks,
+            self.reviews,
+            self.start,
+            self.view,
+            self.reply,
+            self.cancel,
+            self.channel.owner,
+        )
 
     def start(
         self,
@@ -94,6 +104,8 @@ class Bridge:
         execution=None,
         review_id=None,
         review_stage=None,
+        reserved_task_id=None,
+        review_run_id=None,
     ):
         previous = (
             self.tasks.latest(conversation_id) if conversation_id is not None else None
@@ -149,10 +161,12 @@ class Bridge:
             execution=execution,
             review_id=effective_review,
             review_stage=effective_stage,
+            reserved_task_id=reserved_task_id,
+            review_run_id=review_run_id,
         )
 
-    def view(self, task_id, details=False):
-        result = self.results.view(task_id, details)
+    def view(self, task_id, details=False, *, refresh=True):
+        result = self.results.view(task_id, details, refresh=refresh)
         if result.get("review") and result["status"] not in ACTIVE:
             result["review"]["applicability"] = self.reviews.assess(
                 result["review"]["review_id"]
@@ -188,4 +202,7 @@ class Bridge:
         )
 
     def shutdown(self):
-        self.runtime.shutdown()
+        try:
+            self.review_runs.close()
+        finally:
+            self.runtime.shutdown()

@@ -51,6 +51,7 @@ def initialize_database(scope: ProjectScope) -> Path:
                 "context_imports",
                 "reviews",
                 "review_contents",
+                "review_runs",
                 "review_authors",
                 "findings",
                 "finding_history",
@@ -93,6 +94,7 @@ def initialize_database(scope: ProjectScope) -> Path:
             "workspace_roots": "TEXT",
             "review_id": "TEXT",
             "review_stage": "TEXT",
+            "review_run_id": "TEXT",
             "execution_json": "TEXT",
             "actual_model": "TEXT",
             "actual_thinking": "TEXT",
@@ -105,6 +107,10 @@ def initialize_database(scope: ProjectScope) -> Path:
                 db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
         db.execute(
             "CREATE INDEX IF NOT EXISTS conversation_tasks ON tasks(conversation_id, created)"
+        )
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS review_run_stage ON tasks(review_run_id, review_stage) "
+            "WHERE review_run_id IS NOT NULL"
         )
         db.execute("DROP INDEX IF EXISTS one_active_turn")
         db.execute(
@@ -160,7 +166,8 @@ class TaskStore:
 
     def _terminal_event(self, db, task_id, status):
         task = db.execute(
-            "SELECT conversation_id, report_json FROM tasks WHERE task_id=?", (task_id,)
+            "SELECT conversation_id, report_json, review_run_id FROM tasks WHERE task_id=?",
+            (task_id,),
         ).fetchone()
         report = json.loads(task["report_json"]) if task["report_json"] else None
         self.channel.emit(
@@ -168,6 +175,11 @@ class TaskStore:
             {
                 "task_id": task_id,
                 "conversation_id": task["conversation_id"],
+                **(
+                    {"review_run_id": task["review_run_id"]}
+                    if task["review_run_id"]
+                    else {}
+                ),
                 "status": status,
                 "outcome": report["outcome"]
                 if report and status == "completed"
@@ -221,13 +233,14 @@ class TaskStore:
             if changed.rowcount:
                 self.channel.signal()
 
-    def get(self, task_id):
-        self.recover()
+    def get(self, task_id, *, refresh=True):
+        if refresh:
+            self.recover()
         with closing(self.connect()) as db:
             row = db.execute(
                 "SELECT * FROM tasks WHERE task_id=?", (task_id,)
             ).fetchone()
-            if row is not None and row["status"] == "waiting_input":
+            if refresh and row is not None and row["status"] == "waiting_input":
                 # Readers must not offer an already-expired question while its
                 # host-tool thread is between wakeups.
                 db.execute("BEGIN IMMEDIATE")
@@ -254,6 +267,8 @@ class TaskStore:
         mode = record["mode"]
         with closing(self.connect()) as db:
             db.execute("BEGIN IMMEDIATE")
+            if record.get("review_run_id"):
+                self.validate_review_reservation(record, db)
             active = db.execute(
                 f"SELECT cwd, mode, contract_json, policy_json FROM tasks WHERE status IN {ACTIVE_SQL}"
             ).fetchall()
@@ -272,6 +287,56 @@ class TaskStore:
                 list(record.values()),
             )
             db.commit()
+
+    def validate_review_reservation(self, record, db=None):
+        """Private dispatch capability: only the live owner may consume its reservation."""
+        if db is None:
+            with closing(self.connect()) as connection:
+                return self.validate_review_reservation(record, connection)
+        stage = record.get("review_stage")
+        if stage not in ("independent", "comparison") or record.get("mode") != "think":
+            raise ValueError("Review run reservations require a think review stage")
+        run = db.execute(
+            "SELECT * FROM review_runs WHERE run_id=?", (record["review_run_id"],)
+        ).fetchone()
+        if (
+            run is None
+            or run["owner"] != self.channel.owner
+            or run["status"] != "starting"
+            or run["phase"] != stage
+            or run["review_id"] != record.get("review_id")
+            or run[stage + "_task_id"] != record["task_id"]
+            or run["deadline"] <= time.time()
+        ):
+            raise ValueError("Invalid, expired, or foreign review run reservation")
+        if db.execute(
+            "SELECT 1 FROM tasks WHERE task_id=?", (record["task_id"],)
+        ).fetchone():
+            raise ValueError("Review run reservation already dispatched")
+        if stage == "comparison":
+            first = db.execute(
+                "SELECT * FROM tasks WHERE task_id=?", (run["independent_task_id"],)
+            ).fetchone()
+            report = (
+                json.loads(first["report_json"])
+                if first and first["report_json"]
+                else None
+            )
+            if (
+                first is None
+                or first["review_run_id"] != run["run_id"]
+                or first["review_id"] != run["review_id"]
+                or first["review_stage"] != "independent"
+                or first["conversation_id"] != record["conversation_id"]
+                or first["status"] != "completed"
+                or not report
+                or report.get("outcome") != "success"
+                or not run["independent_json"]
+            ):
+                raise ValueError(
+                    "Comparison requires the saved successful independent result"
+                )
+        record["deadline"] = min(record["deadline"], run["deadline"])
 
     def finish(self, task_id, status, answer, error, artifact_ids):
         """Settle questions, task state, and its durable event atomically."""

@@ -40,6 +40,12 @@ jobs:
         run: uv sync --frozen --group dev
       - name: Run isolated tests
         run: uv run --frozen pytest -q
+      - name: Verify real pinned OMP with localhost model
+        timeout-minutes: 10
+        run: >-
+          uv run --frozen python scripts/verify_omp.py
+          --cache-dir "${{ runner.temp }}/omp-compatibility-cache"
+          --report "${{ runner.temp }}/omp-compatibility-${{ matrix.os }}.json"
       - name: Check lint
         run: uv run --frozen ruff check .
       - name: Check formatting

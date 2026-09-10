@@ -1,6 +1,7 @@
 """Consumer-facing task summaries, detailed results, and wait projections."""
 
 import json
+import time
 from contextlib import closing
 
 from .artifacts import ArtifactStore
@@ -19,8 +20,8 @@ class TaskResults:
         self.artifacts = artifacts
         self.projects = projects
 
-    def view(self, task_id, details=False):
-        task = self.tasks.get(task_id)
+    def view(self, task_id, details=False, *, refresh=True):
+        task = self.tasks.get(task_id, refresh=refresh)
         report = json.loads(task["report_json"]) if task["report_json"] else None
         status = task["status"]
         action = (
@@ -42,6 +43,8 @@ class TaskResults:
             else "",
             "next_action": action,
         }
+        if task.get("review_run_id"):
+            result["review_run_id"] = task["review_run_id"]
         if task.get("review_id"):
             result["review"] = {
                 "review_id": task["review_id"],
@@ -81,8 +84,8 @@ class TaskResults:
         if status == "waiting_input":
             with closing(self.tasks.connect()) as db:
                 question = db.execute(
-                    "SELECT * FROM questions WHERE task_id=? AND state='pending'",
-                    (task_id,),
+                    "SELECT * FROM questions WHERE task_id=? AND state='pending' AND deadline>?",
+                    (task_id, time.time()),
                 ).fetchone()
             if question:
                 result["question"] = {
@@ -90,6 +93,8 @@ class TaskResults:
                     for key in ("question_id", "question", "context", "deadline")
                 }
                 result["question"]["options"] = json.loads(question["options_json"])
+            else:
+                result["next_action"] = "wait"
         artifact_ids = json.loads(task["result_artifacts"])
         if artifact_ids:
             result["artifacts"] = [

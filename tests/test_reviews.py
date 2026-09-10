@@ -637,3 +637,82 @@ class ReviewTests(unittest.TestCase):
                 ).fetchone()[0],
                 legacy,
             )
+
+    def test_explicit_unchanged_context_is_saved_and_affects_applicability(self):
+        self.initialize()
+        (self.root / "tracked.txt").write_text("changed")
+        review = self.create(paths=["tracked.txt"], context_paths=["deleted.txt"])
+        manifest = self.manifest(review["review_id"])
+        self.assertEqual(
+            {row["path"]: row["role"] for row in manifest["files"]},
+            {"tracked.txt": "change", "deleted.txt": "context"},
+        )
+        self.assertEqual((review["change_count"], review["context_count"]), (1, 1))
+        self.assertNotIn(
+            "deleted.txt", self.store.read(review["review_id"], "diff")["content"]
+        )
+        (self.root / "deleted.txt").write_text("context changed later")
+        self.assertEqual(
+            self.store.assess(review["review_id"])["changed_paths"], ["deleted.txt"]
+        )
+        self.assertEqual(
+            self.store.read(review["review_id"], "selected", "deleted.txt")["content"],
+            "deleted base\n",
+        )
+
+    def test_staged_context_uses_index_even_when_live_context_is_unsafe(self):
+        self.initialize()
+        (self.root / "tracked.txt").write_text("staged")
+        self.git("add", "tracked.txt")
+        (self.root / "deleted.txt").unlink()
+        (self.root / "deleted.txt").symlink_to(self.home / "outside")
+        with patch.object(
+            self.store, "_working", side_effect=AssertionError("live context read")
+        ):
+            review = self.create(source="staged", context_paths=["deleted.txt"])
+            self.assertEqual(
+                self.store.read(review["review_id"], "selected", "deleted.txt")[
+                    "content"
+                ],
+                "deleted base\n",
+            )
+            self.assertEqual(
+                self.store.assess(review["review_id"])["status"],
+                "current_selected_state",
+            )
+
+    def test_context_only_clean_selection_is_not_a_change(self):
+        self.initialize()
+        review = self.create(source="staged", context_paths=["tracked.txt"])
+        self.assertEqual((review["change_count"], review["context_count"]), (0, 1))
+        self.assertEqual(self.store.read(review["review_id"], "diff")["content"], "")
+
+    def test_missing_changed_and_unsafe_context_are_not_hidden_live_reads(self):
+        self.initialize()
+        (self.root / "tracked.txt").write_text("selected")
+        (self.root / "deleted.txt").write_text("also changed")
+        with self.assertRaisesRegex(ValueError, "Context path has changes"):
+            self.create(paths=["tracked.txt"], context_paths=["deleted.txt"])
+        with self.assertRaisesRegex(ValueError, "Required context is missing"):
+            self.create(paths=["tracked.txt"], context_paths=["missing.txt"])
+        with self.assertRaises(ValueError):
+            self.create(paths=["tracked.txt"], context_paths=["../outside"])
+        included = self.create(
+            paths=["tracked.txt", "deleted.txt"], context_paths=["deleted.txt"]
+        )
+        self.assertEqual(included["change_count"], 2)
+
+    def test_non_git_context_is_explicit_saved_material_not_a_second_change(self):
+        (self.root / "file.txt").write_text("selected code")
+        (self.root / "context.txt").write_text("explicit context")
+        with self.assertRaisesRegex(ValueError, "explicit file paths"):
+            self.create(context_paths=["context.txt"])
+        review = self.create(paths=["file.txt"], context_paths=["context.txt"])
+        self.assertEqual((review["change_count"], review["context_count"]), (1, 1))
+        self.assertNotIn(
+            "explicit context", self.store.read(review["review_id"], "diff")["content"]
+        )
+        self.assertEqual(
+            self.store.read(review["review_id"], "selected", "context.txt")["content"],
+            "explicit context",
+        )

@@ -31,7 +31,7 @@ TREES = {
     "scripts": {".py", ".sh"},
     "skills": {".md"},
     "config": {".json"},
-    "docs": {".md"},
+    "docs": {".md", ".json"},
     ".claude-plugin": {".json"},
     ".agents/plugins": {".json"},
     ".github": {".yml", ".md"},

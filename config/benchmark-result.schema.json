@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Flyozzzz/omp-tandem-public/config/benchmark-result.schema.json",
+  "title": "Actual comparative benchmark measurement (not a template or benchmark result)",
+  "$ref": "#/$defs/record",
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "text": {"type": "string", "minLength": 1},
+    "arm": {"enum": ["one_agent", "self_review", "naive_handoff", "tandem_independent"]},
+    "stratum": {"enum": ["bug", "small_feature", "architectural_ambiguity", "review"]},
+    "metric": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "value"],
+      "properties": {
+        "status": {"enum": ["complete", "partial", "missing", "not_applicable"]},
+        "value": {"type": ["number", "null"], "minimum": 0}
+      },
+      "allOf": [{"if": {"properties": {"status": {"enum": ["complete", "partial"]}}},
+        "then": {"properties": {"value": {"type": "number"}}},
+        "else": {"properties": {"value": {"type": "null"}}}}]
+    },
+    "artifact": {
+      "type": "object", "additionalProperties": false, "required": ["uri", "sha256"],
+      "properties": {"uri": {"$ref": "#/$defs/text"}, "sha256": {"$ref": "#/$defs/digest"}}
+    },
+    "usage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cost_usd", "input_tokens", "output_tokens", "evidence", "note"],
+      "properties": {
+        "cost_usd": {"$ref": "#/$defs/metric"},
+        "input_tokens": {"$ref": "#/$defs/metric"},
+        "output_tokens": {"$ref": "#/$defs/metric"},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/artifact"}},
+        "note": {"$ref": "#/$defs/text"}
+      }
+    },
+    "versions": {
+      "type": "object", "additionalProperties": false,
+      "required": ["python", "tandem", "omp", "omp_rpc", "coordinator_model", "peer_model", "environment_digest"],
+      "properties": {
+        "python": {"$ref": "#/$defs/text"}, "tandem": {"$ref": "#/$defs/text"},
+        "omp": {"$ref": "#/$defs/text"}, "omp_rpc": {"$ref": "#/$defs/text"},
+        "coordinator_model": {"$ref": "#/$defs/text"}, "peer_model": {"$ref": "#/$defs/text"},
+        "environment_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "budget": {
+      "type": "object", "additionalProperties": false,
+      "required": ["regime", "policy_digest", "wall_limit_seconds", "compute_limit_usd"],
+      "properties": {
+        "regime": {"enum": ["natural", "equal_compute"]},
+        "policy_digest": {"$ref": "#/$defs/digest"},
+        "wall_limit_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "compute_limit_usd": {"type": ["number", "null"], "exclusiveMinimum": 0}
+      },
+      "allOf": [{"if": {"properties": {"regime": {"const": "natural"}}},
+        "then": {"properties": {"compute_limit_usd": {"type": "null"}}},
+        "else": {"properties": {"compute_limit_usd": {"type": "number"}}}}]
+    },
+    "task": {
+      "type": "object", "additionalProperties": false,
+      "required": ["task_id", "stratum", "input_digest"],
+      "properties": {
+        "task_id": {"$ref": "#/$defs/text"}, "stratum": {"$ref": "#/$defs/stratum"},
+        "input_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "plan": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "experiment_id", "protocol_digest", "dataset_digest", "experiment_digest", "rubric_digest", "versions", "arm_config_digests", "tasks", "repetitions", "budgets", "randomization_seed", "approval"],
+      "properties": {
+        "schema_version": {"const": 1}, "kind": {"const": "benchmark_plan"},
+        "experiment_id": {"$ref": "#/$defs/text"},
+        "protocol_digest": {"$ref": "#/$defs/digest"}, "dataset_digest": {"$ref": "#/$defs/digest"},
+        "experiment_digest": {"$ref": "#/$defs/digest"}, "versions": {"$ref": "#/$defs/versions"},
+        "rubric_digest": {"$ref": "#/$defs/digest"},
+        "arm_config_digests": {
+          "type": "object", "additionalProperties": false,
+          "required": ["one_agent", "self_review", "naive_handoff", "tandem_independent"],
+          "properties": {
+            "one_agent": {"$ref": "#/$defs/digest"}, "self_review": {"$ref": "#/$defs/digest"},
+            "naive_handoff": {"$ref": "#/$defs/digest"}, "tandem_independent": {"$ref": "#/$defs/digest"}
+          }
+        },
+        "tasks": {"type": "array", "minItems": 20, "maxItems": 30, "items": {"$ref": "#/$defs/task"}},
+        "repetitions": {"type": "integer", "minimum": 1},
+        "budgets": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/budget"}},
+        "randomization_seed": {"type": "integer", "minimum": 0},
+        "approval": {"$ref": "#/$defs/artifact"}
+      }
+    },
+    "judgment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["blind", "rubric_digest", "evidence", "quality_score", "false_positives", "new_regressions", "disagreements", "adjudication"],
+      "properties": {
+        "blind": {"const": true}, "rubric_digest": {"$ref": "#/$defs/digest"},
+        "evidence": {"$ref": "#/$defs/artifact"},
+        "quality_score": {"type": "number", "minimum": 0, "maximum": 100},
+        "false_positives": {"type": "integer", "minimum": 0},
+        "new_regressions": {"type": "integer", "minimum": 0},
+        "disagreements": {"type": "integer", "minimum": 0},
+        "adjudication": {"enum": ["agreed", "resolved", "unresolved"]}
+      }
+    },
+    "record": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "record_id", "experiment_id", "protocol_digest", "dataset_digest", "experiment_digest", "versions", "task_id", "stratum", "input_digest", "arm", "arm_config_digest", "repetition", "order", "budget", "provenance", "outcome", "wall_time_seconds", "human_seconds", "usage", "judgment"],
+      "properties": {
+        "schema_version": {"const": 1}, "kind": {"const": "measurement"},
+        "record_id": {"$ref": "#/$defs/text"}, "experiment_id": {"$ref": "#/$defs/text"},
+        "protocol_digest": {"$ref": "#/$defs/digest"}, "dataset_digest": {"$ref": "#/$defs/digest"},
+        "experiment_digest": {"$ref": "#/$defs/digest"}, "versions": {"$ref": "#/$defs/versions"},
+        "task_id": {"$ref": "#/$defs/text"}, "stratum": {"$ref": "#/$defs/stratum"},
+        "input_digest": {"$ref": "#/$defs/digest"}, "arm": {"$ref": "#/$defs/arm"},
+        "arm_config_digest": {"$ref": "#/$defs/digest"},
+        "repetition": {"type": "integer", "minimum": 1}, "order": {"type": "integer", "minimum": 1, "maximum": 4},
+        "budget": {"$ref": "#/$defs/budget"},
+        "provenance": {
+          "type": "object", "additionalProperties": false,
+          "required": ["collector", "started_at", "finished_at", "clock", "artifacts", "notes"],
+          "properties": {
+            "collector": {"$ref": "#/$defs/text"},
+            "started_at": {"type": "string", "format": "date-time"},
+            "finished_at": {"type": "string", "format": "date-time"},
+            "clock": {"const": "monotonic_whole_process"},
+            "artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact"}},
+            "notes": {"$ref": "#/$defs/text"}
+          }
+        },
+        "outcome": {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "reason", "budget_compliance", "peer_disagreements"],
+          "properties": {
+            "status": {"enum": ["completed", "unfinished", "refused", "timeout", "failed", "cancelled"]},
+            "reason": {"$ref": "#/$defs/text"},
+            "budget_compliance": {"enum": ["within", "exceeded", "unknown"]},
+            "peer_disagreements": {"type": ["integer", "null"], "minimum": 0}
+          }
+        },
+        "wall_time_seconds": {"type": "number", "minimum": 0},
+        "human_seconds": {"$ref": "#/$defs/metric"},
+        "usage": {
+          "type": "object", "additionalProperties": false, "required": ["coordinator", "peer"],
+          "properties": {"coordinator": {"$ref": "#/$defs/usage"}, "peer": {"$ref": "#/$defs/usage"}}
+        },
+        "judgment": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/judgment"}]}
+      }
+    }
+  }
+}

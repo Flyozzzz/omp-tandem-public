@@ -86,7 +86,7 @@ class TaskInteraction:
         with closing(self.tasks.connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             task = db.execute(
-                "SELECT status, deadline, cancel_requested, report_json, question_timeout_seconds FROM tasks WHERE task_id=?",
+                "SELECT status, deadline, cancel_requested, report_json, question_timeout_seconds, review_run_id FROM tasks WHERE task_id=?",
                 (task_id,),
             ).fetchone()
             if (
@@ -124,7 +124,15 @@ class TaskInteraction:
             )
             self.tasks.channel.emit(
                 "question_waiting",
-                {"task_id": task_id, "question_id": question_id},
+                {
+                    "task_id": task_id,
+                    "question_id": question_id,
+                    **(
+                        {"review_run_id": task["review_run_id"]}
+                        if task["review_run_id"]
+                        else {}
+                    ),
+                },
                 task_id=task_id,
                 dedupe_key=f"question:{question_id}",
                 connection=db,

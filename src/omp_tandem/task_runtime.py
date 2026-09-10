@@ -56,8 +56,22 @@ class TaskRuntime:
         execution=None,
         review_id=None,
         review_stage=None,
+        reserved_task_id=None,
+        review_run_id=None,
     ):
         resuming = conversation_id is not None
+        if (reserved_task_id is None) != (review_run_id is None):
+            raise ValueError(
+                "Review run dispatch requires both private reservation arguments"
+            )
+        if review_run_id is not None:
+            review_run_id = str(UUID(review_run_id))
+            if (review_stage == "independent" and resuming) or (
+                review_stage == "comparison" and not resuming
+            ):
+                raise ValueError(
+                    "Review run stages must start independently then resume for comparison"
+                )
         if (prompt is None) == (contract is None):
             raise ValueError("Supply exactly one of prompt or contract")
         if prompt is not None and (not isinstance(prompt, str) or not prompt.strip()):
@@ -75,8 +89,8 @@ class TaskRuntime:
             )
         self.tasks.recover()
         conversation_id = str(UUID(conversation_id)) if resuming else str(uuid4())
+        task_id = str(UUID(reserved_task_id)) if reserved_task_id else str(uuid4())
         handle = self.tasks.lock(conversation_id)
-        task_id = str(uuid4())
         slot = None
         try:
             session_file, model = None, self.model
@@ -168,6 +182,7 @@ class TaskRuntime:
                 "execution_json": json.dumps(settings),
                 "review_id": review_id,
                 "review_stage": review_stage,
+                "review_run_id": review_run_id,
                 "project_context_id": project_context_id,
                 "previous_project_context_id": changed_from,
                 "question_timeout_seconds": question_timeout_seconds,
@@ -179,6 +194,8 @@ class TaskRuntime:
                     ]
                 ),
             }
+            if review_run_id is not None:
+                self.tasks.validate_review_reservation(record)
             if len(self.messages.build(record, snapshot).encode("utf-8")) > 200_000:
                 raise ValueError(
                     "Resolved task and product context exceed 200000 UTF8 bytes; move details into artifacts"

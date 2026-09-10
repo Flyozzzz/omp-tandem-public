@@ -1,6 +1,6 @@
 ---
 name: tandem
-description: Plan nontrivial development with an independent Oh My Pi peer before implementation, then execute and cross-check. Also use for consultation, scoped delegation, reciprocal clarification, review, and explicit project-context transfer.
+description: Review changes through one read-only Tandem scenario, or plan nontrivial development with an independent Oh My Pi peer before implementation. Keep planning proportional and bounded, then execute and cross-check.
 ---
 
 # Work with a peer
@@ -14,6 +14,21 @@ OMP Tandem connects the current MCP client and Oh My Pi (OMP). Either participan
 3. Read the relevant local instructions and necessary source. For nontrivial development, plan with the peer before implementation. Keep assignments complementary rather than duplicating execution. Do not invent company rules, product requirements, or provider/model defaults.
 4. Agree on the goal, relevant context, constraints, owned files, acceptance criteria, and output format. File ownership is coordination, not an OS sandbox. Work mode can edit files and run shell commands with the runtime's permissions. Do not authorize destructive or external actions beyond the user's request.
 
+## First useful review: use one scenario
+
+Prefer `tandem_review_run` for reviewing changes. Keep the low-level task/review tools for consultation, implementation, or deliberate manual control; do not rebuild scenario bookkeeping in the model.
+
+1. Use the user's real requirements, choose `request.source="staged"` for the prepared commit or `"worktree"` for working changes, and put the author's proposal/rationale in separate request fields. Add explicitly needed unchanged callers/tests through `context_paths`; do not capture the whole project by habit.
+2. Start once with a fresh `request_key` for this logical review. Retain its `run_id`. Reusing the same owner/key and request returns the same run; changing the request under that key is a conflict, not a fresh review.
+3. Repeat `action="status", run_id=..., wait_seconds=25` while running, or follow a verified event/watchdog wake. Use run status for its child-task notifications. Code owns independent review, optional single comparison, waiting and full-answer assembly. Active responses are compact progress; terminal responses include the complete stage answers.
+4. For `waiting_input`, use `action="reply"` with the exact run/question IDs and known answer. Never invent facts or permissions. Missing source context requires an explicitly expanded new capture/run; never let a saved review read live files silently. `action="cancel"` prevents the next stage without undoing earlier work.
+5. Read `independent.answer`, optional `comparison.answer`, findings, and current `applicability`. Partial/blocked/failed independent work does not automatically proceed to comparison. No author material means one stage; no selected changes means no model request.
+
+The default total `budget_seconds=600` includes capture/startup, both stages and questions; per-stage execution limits are also respected. A 25-second status wait is not a new task budget or a cancellation. A closed owner leaves interrupted work, not a detached service or permission to replay stages. The scenario never grants write access, executes supplied test commands, or applies results. Only claim a receipt when a separately authorized action will actually consume a result.
+
+`usage.peer` aggregates the run's own OMP stages once. Coordinator usage and total cost remain unknown unless measured separately; `elapsed_seconds` covers the accepted run, not the entire outer coordinator process. Never present these as complete end-to-end cost/time.
+
+
 ## Plan before nontrivial development
 
 For a feature, behavioral fix, architectural change, or other nontrivial development, the default sequence is **understand → independently assess → compare → plan → implement → cross-check**. Do not begin implementation edits or send a `work` implementation task before the planning phase is complete.
@@ -24,6 +39,10 @@ For a feature, behavioral fix, architectural change, or other nontrivial develop
 4. Record the chosen approach, exact owned files, implementation order, and checks in the conversation or task contract. Distinguish settled decisions from remaining blockers. A goal alone is not an implementation plan.
 5. Execute that plan. Either participant may implement; both need not edit. Revisit planning if new evidence changes an important assumption or scope, instead of silently expanding the work.
 6. Cross-check the implementation and actual verification evidence with the peer against the original criteria. A successful worker report is not independent acceptance.
+
+Scale discussion to uncertainty, not diff size. For a local behavioral fix with user-confirmed reproduction/cause, keep the independent assessment and comparison brief: check new risks and criteria, record a small concrete plan, and proceed. Do not re-prove the user's observations. For ambiguous architecture or high-impact changes, compare alternatives in detail.
+
+The normal limit is one independent assessment plus one comparison round. End with a chosen approach, a specific distinguishing experiment, or an explicit question/remaining disagreement. Do not automatically add rounds just to achieve consensus. New evidence may justify revisiting a premise, but name what changed and bound the new investigation rather than restarting the whole audit.
 
 A shortened path is allowed for a clearly mechanical edit with no substantive design/behavior decision, or an explicitly user-approved plan whose scope and assumptions still hold. State which exception applies and what will be checked. An established goal, a small diff, or the coordinator's confidence alone is not an exception. Analysis-only requests do not authorize implementation or require inventing an implementation phase.
 
@@ -38,13 +57,15 @@ Do not conceal established facts to manufacture independence. If the proposal is
 
 ### Capture review material before starting
 
-For "review current changes", call `tandem_review(action="create", request=...)` with original requirements/criteria, selected paths/base, supplied checks, and external boundaries. Choose `source="worktree"` for current working content or `source="staged"` for the prepared commit/index only; use staged when the user asks to review staged changes. Omitted paths select changes from that source; non-Git projects support only worktree with explicit paths. Keep the author's proposal/rationale in their separate fields, not the independent prompt. If the selected set is empty, report that rather than starting an empty review.
+For manually controlled review, call `tandem_review(action="create", request=...)` with original requirements/criteria, selected paths/base, supplied checks, and external boundaries. Choose `source="worktree"` for working content or `"staged"` for the prepared commit/index only. Omitted paths select changes from that source; `context_paths` adds explicitly chosen unchanged callers/tests from the same source. Non-Git projects support only worktree with explicit paths. Keep author proposal/rationale separate. An empty change selection, even with context, does not warrant an empty review.
 
 Start with `mode="think"` and the returned `review_id`. This grants the task its snapshot-bound `tandem_review_read` host reader, not live filesystem tools. The saved manifest, selected/base/staged bytes and diff define the reviewed version. Read original requirements/criteria and necessary code pages; metadata alone is not a review.
 
 After reading the completed independent answer, continue the same conversation with `review_stage="comparison"`. Only that stage exposes author material to the worker. A different `review_id` needs its own independent assessment. Use a separate work conversation for live edits.
 
 Read terminal `review.applicability` or call `tandem_review(action="assess")`. State the selected source and when a conclusion concerns a previous snapshot, changed selected material, or unknown applicability. Unstaged edits do not stale a staged-only snapshot; index changes can. New paths outside a captured bundle are not implicitly reviewed, so recapture to cover a changed commit candidate. Preserve saved/observed/external boundaries: stable selected bytes do not certify dependencies, unselected files or services. Supplied check output is a claim; capture neither runs tests nor silently proves version association.
+
+If the reviewer lacks a caller, dependency or test, have it identify the exact missing path and why it matters. Expand through a new capture with fresh version observations and review identity; do not splice current live files into an old snapshot or claim the enlarged material was already reviewed. Context paths do not grant access outside the bound project.
 
 ## Start a scoped task
 

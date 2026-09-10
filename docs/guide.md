@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Version: 3.2.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Version: 3.3.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -29,6 +29,7 @@ This repository starts from a reviewed snapshot of earlier private development; 
 - [Automatic runtime preparation](#automatic-runtime-preparation)
 - [Hooks and skills](#hooks-and-skills)
 - [Working with a peer](#working-with-a-peer)
+- [One read-only review scenario](#one-read-only-review-scenario)
 - [Tasks and execution modes](#tasks-and-execution-modes)
 - [Immutable review bundles](#immutable-review-bundles)
 - [Live diagnostics](#live-diagnostics)
@@ -46,6 +47,9 @@ This repository starts from a reviewed snapshot of earlier private development; 
 - [Troubleshooting](#troubleshooting)
 - [Repository layout](#repository-layout)
 - [Development and verification](#development-and-verification)
+- [Real OMP compatibility](compatibility.md)
+- [Measured development case](case-study.md)
+- [Comparative benchmark preparation](benchmark.md)
 - [Distribution and licensing](#distribution-and-licensing)
 
 ## What it does
@@ -181,9 +185,13 @@ claude plugin install omp-tandem@omp-tandem
 
 Start a new Claude session from the intended project directory. If the client requests `/reload-plugins`, follow that instruction after active delegated work has finished.
 
-Ask:
+Start with `/omp-tandem:setup`. It separates prerequisite installation, your OMP provider login, the correct project binding, and a local diagnostic. A live diagnostic is a separate, explicitly approved provider request; it is not required just to inspect configuration.
 
-> Use OMP Tandem. Call `tandem_scope` and report the bound project, then ask OMP for an independent `think`-mode perspective on my proposal. Wait for the answer and assess it rather than treating it as automatically correct.
+Then ask for one useful task:
+
+> Review only the staged changes against this requirement: a retried request must not create a duplicate. Do not edit files. Give an independent assessment before comparing the author's rationale, then show findings, the reviewed version and the known cost.
+
+The skill uses the compact scenario below; you do not need to manually orchestrate its two stages or answer pagination. Keep the client open until it finishes: saved history is not a detached running job.
 
 The shared workflow skill is available as `/omp-tandem:tandem`; the setup skill as `/omp-tandem:setup`. Client-visible MCP tool names include a plugin prefix, but the tool suffixes remain `tandem_*`.
 
@@ -301,6 +309,8 @@ For nontrivial development, the skill requires **understand → independently as
 3. Compare approaches and evidence, resolve material disagreements, and record the chosen approach, file ownership, implementation order and checks.
 4. Execute that plan, then cross-check the implementation and verification evidence against the original criteria. Revisit planning when a material premise changes.
 
+Discussion depth follows uncertainty and consequences. A local fix with a user-confirmed reproduction/cause gets a brief independent check of new risks, one short comparison and concrete checks; do not repeat the user's experiment just to reconfirm it. Ambiguous architecture or high-impact changes justify fuller alternatives. The normal round limit is **one independent assessment plus one comparison**. Then decide, name a distinguishing experiment or ask a concrete question; never keep spending rounds merely to reach consensus.
+
 Only a mechanical edit without substantive design/behavior choices, or an explicitly user-approved plan with unchanged scope/assumptions, permits a shortened path. State the exception and checks. An established goal or a small diff alone does not qualify. Do not force consensus or ask the user to approve every ordinary technical detail. Read-only planning does not become writable through continuation: start a new authorized `work` conversation and pass the agreed plan. Analysis-only requests do not authorize implementation.
 
 Good requests split complementary work rather than duplicating it:
@@ -316,6 +326,63 @@ Good requests split complementary work rather than duplicating it:
 User-confirmed observations are distinct from peer hypotheses. Do not rerun an already confirmed experiment merely to reconfirm the user; investigate new claims or changed code. Neither participant is a rubber stamp.
 
 For planning and consequential analysis/review, use `tandem_start` for the independent assessment and `tandem_continue` to reveal and compare the proposal. Preserve user-confirmed facts and acknowledge prior exposure from code, history or shared context instead of claiming a blind review. The explicit shortened-path exceptions above govern when fresh development planning may be skipped.
+
+## One read-only review scenario
+
+Use `tandem_review_run` when the goal is reviewing changes, rather than manually combining the low-level tools. Example creation arguments (replace the teaching requirement and context path with actual material):
+
+```json
+{
+  "action": "start",
+  "request_key": "prepared-commit-review-1",
+  "request": {
+    "requirements": "A retried upload must return the existing object, not create another.",
+    "source": "staged",
+    "context_paths": ["src/upload_caller.py"],
+    "author_proposal": "Retain the result under a stable request key.",
+    "author_rationale": "Retries should observe the earlier result."
+  },
+  "execution": {"profile": "quick"},
+  "budget_seconds": 600,
+  "wait_seconds": 25
+}
+```
+
+`request_key` identifies this logical request within the owning MCP instance. Repeating the same normalized request returns the same `run_id`; changing its payload under that key conflicts. Use a new key for a genuinely new review, not as an automatic retry after a failure.
+
+Code captures the snapshot, launches only `think`, preserves the independent answer, and starts at most one comparison if author material exists and the independent task completed with a successful structured report. Empty selected changes produce `no_changes` without a model request. No author material means one stage. `partial`, `blocked`, failed or unstructured independent results stop the scenario rather than silently moving on.
+
+While running, use only the returned `run_id`:
+
+```json
+{"action":"status","run_id":"<run_id>","wait_seconds":25}
+```
+
+Running responses contain compact `stage_statuses` and `full_result_pending`, not repeated long answers. Terminal responses contain complete `independent.answer` and optional `comparison.answer`, findings, current applicability and stage IDs. Questions include their context and any relevant completed stage. Code assembles full answers; the coordinator still judges their substance, disagreements and uncertainty.
+
+For an actual pending question:
+
+```json
+{"action":"reply","run_id":"<run_id>","question_id":"<question_id>","answer":"<known answer>"}
+```
+
+Only the owning instance may reply/cancel. Identical replies already recorded remain idempotent even after the phase advances; unknown/expired/conflicting questions do not authorize invented answers. Stop unwanted work explicitly:
+
+```json
+{"action":"cancel","run_id":"<run_id>"}
+```
+
+The default total `budget_seconds=600` covers capture, startup, both stages and question waiting; the public range is 10–7200. A stage also respects its execution timeout/profile cap and receives no more than the remaining total budget. A 25-second status wait is neither a new budget nor a cancellation.
+
+Snapshot capture runs in a separately supervised process, outside the controller's global guard. Cancellation/deadline stops that process group; publication checks the live owner, reservation and deadline transactionally. A late capture cannot become `no_changes` or dispatch a native stage. There are four capture slots per MCP owner, with explicit rejection rather than a hidden queue. This is lifecycle control, **not an OS sandbox**; ordinary low-level capture has its existing per-operation bounds, not a scenario budget.
+
+The owner controls a bounded driver, not a detached service. Cancellation and shutdown prevent a subsequent stage. Dead owners/controllers produce `interrupted` with preserved material; accepted reservations are never automatically dispatched again. Start a new deliberate review after resolving the cause. Low-level APIs remain available for explicit advanced workflows.
+
+If snapshot publication temporarily owns the shared write gate, cancellation can return an active durable status with `stop_pending` and `next_action="wait"`. Continue polling the same `run_id`; a pending stop prevents another phase but is not yet a persisted terminal cancellation. Status reads and capture-deadline supervision remain available. Notification acknowledgements also avoid waiting behind publication; a later observation can acknowledge the same event.
+
+`usage.peer` aggregates the run's own native turns once. `usage.coordinator` and `usage.total_cost` remain unknown because the server cannot observe its caller's model bill. `elapsed_seconds` covers the accepted run, not coordinator startup or prior human preparation. The [measured case](case-study.md) instruments the caller separately; it is not a benchmark.
+
+The scenario never edits files, executes supplied test commands, approves permissions or applies results. A later result-driven action still needs its existing authorization and receipt protocol. `completed` is not proof that the reviewed code is correct.
 
 ## Tasks and execution modes
 
@@ -368,6 +435,10 @@ Prepare all review materials with one `tandem_review(action="create")` call. Exa
 ```
 
 Choose `request.source`: **`worktree`** (default) reviews working content against `base`, while **`staged`** reviews the Git index against `base`. Without `paths`, worktree selects current nonignored changes, including unstaged/new files; staged selects only index/base differences. Explicit paths select material from that same source. Non-Git projects support only worktree with explicit paths.
+
+`context_paths` adds explicitly requested **unchanged** callers, dependencies or tests to the selected change set, using the same source. Staged context is read from the index, never the working directory. Context and changes have separate manifest roles/counts and share the existing size/path limits and applicability checks. A context path that is itself changed must be included as a selected change rather than silently disguised as unchanged context. Context alone does not turn an empty change set into a review request.
+
+If relevant material is missing, the reviewer should state the exact paths and why they matter. Expand through a new capture and new scenario key, after explicitly choosing that material. Do not splice live files into the old snapshot or claim an enlarged scope was already reviewed.
 
 To review only the prepared commit:
 
@@ -566,11 +637,11 @@ This mechanism is local to the same state-base. Transfer packages persist until 
 
 ## MCP tools
 
-Host prefixes vary; these are the stable tool suffixes. MCP `Context` is injected and is not a user argument.
+There are 19 MCP tools. The compact review scenario is the default entry for changes review; the others remain explicit low-level controls. Host prefixes vary; `Context` is injected, not a user argument.
 
 | Tool | Main inputs | Purpose |
 |---|---|---|
-| `tandem_scope` | None | Inspect the immutable project boundary and startup migration result |
+| `tandem_scope` | None | Inspect project binding, migration and computation-profile defaults |
 | `tandem_start` | `cwd`, `prompt` or `contract`, `mode`, timeouts, `execution`, `review_id`, `review_stage`, `project_context_id` | New task and conversation |
 | `tandem_continue` | `conversation_id`, `prompt` or `contract`, timeouts, `execution`, review binding, `project_context_id` | New turn with existing history |
 | `tandem_result` | `task_id`, `wait_seconds`, `details` | Read answer, outcome, question, artifacts, and diagnostics |
@@ -585,6 +656,7 @@ Host prefixes vary; these are the stable tool suffixes. MCP `Context` is injecte
 | `tandem_import_context` | `transfer_id`, `expected_revision` | Accept an addressed snapshot |
 | `tandem_channel` | `action=status/probe/ack/pending/recover`, relevant IDs/token, `include_previous`, `limit` | Manage optional delivery |
 | `tandem_review` | `action=create/read/assess`, request or review ID, section/path, paging | Immutable review materials and current applicability |
+| `tandem_review_run` | `action=start/status/reply/cancel`, request/key or run ID, total budget, execution, bounded wait | Capture and orchestrate a complete read-only review |
 | `tandem_findings` | `action=create/update/get/list`, IDs, draft/change, revision, paging | Snapshot-bound findings and append-only history |
 | `tandem_diagnose` | `live`, existing diagnostic `task_id`, expected project, bounded wait | Explicit current-client connectivity check |
 | `tandem_receipt` | `task_id`, `action=status/claim/complete`, claim token | Gate result application separately from notification acknowledgment |
@@ -623,6 +695,8 @@ Artifacts are immutable text/Markdown/JSON versions with SHA-256. Names are logi
 ## Polling, Channels, and webhooks
 
 Polling is the normal, fully functional path for every supported MCP client. Use `tandem_result` or `tandem_wait`; Channels are not required for peer collaboration.
+
+For scenario tasks use `tandem_review_run(action="status", run_id=...)` rather than interpreting child-task notifications as a complete review. Events carry `review_run_id`; an intermediate completed task may still be followed by comparison. Repeated status never restarts the scenario.
 
 Claude Code can optionally deliver task/question/webhook events through Channels. A launch flag or connected MCP server does not prove delivery: the coordinator must acknowledge a probe token received from a real channel event before `delivery=push` is confirmed.
 
@@ -725,6 +799,8 @@ The bootstrap additionally handles `--doctor` and `--prepare`. Runtime options c
 | Artifact | Up to 4 MiB UTF-8; plain text, Markdown, or JSON |
 | Artifact page | Default 16,000 characters, maximum 50,000 |
 | Review capture | 256 selected paths; 4 MiB per file; 16 MiB saved material |
+| Review scenario | At most 2 native stages; default total 600 seconds, public range 10–7200 |
+| Concurrent scenario captures | 4 per owning MCP instance; no automatic queue |
 | Review page | Default 16,000 characters, maximum 50,000; binary encoded as base64 |
 | Finding list/history page | Default 50, maximum 200 entries |
 | Claude watchdog | 12-second timer; 30-second hook timeout |
@@ -872,7 +948,19 @@ claude plugin validate .claude-plugin/marketplace.json
 uv build --wheel
 ```
 
-Regression tests use temporary stores, local fault peers, and HTTP/MCP clients rather than paid model calls. Significant runtime changes also need isolated real-client smoke checks: package installation, workspace binding, native OMP completion, and migration where affected.
+Regression tests retain deterministic RPC fault peers for state/race/error coverage. CI additionally downloads a checksum-pinned **real OMP 18.1.13 binary** and drives it through a deterministic localhost HTTP model provider, with isolated HOME and no paid credentials. It exercises actual host-tool registration/execution, completion, continuation, cancellation and access-mode refusals. The exact SDK revision and tested platform evidence are described in [compatibility](compatibility.md); do not infer an untested version range.
+
+Reproduce the compatibility check:
+
+```sh
+uv run --frozen python scripts/verify_omp.py \
+  --cache-dir /tmp/tandem-omp-cache \
+  --report /tmp/tandem-omp-compatibility.json
+```
+
+Real paid-provider episodes remain separate and require explicit authorization. `scripts/record_review_case.py --allow-paid` records one Claude+OMP review with caller/peer accounting and private raw evidence; see the [case study](case-study.md). Neither a compatibility fixture nor one successful episode proves added value over a single agent.
+
+The separate [benchmark protocol](benchmark.md), measurement schema and offline analyzer cover four arms, both natural and equal-compute budgets, total caller+peer cost, wall/human time, false positives and failures. They prepare a reproducible experiment; no comparative results or superiority claims are supplied.
 
 Before the plugin refactor, version 2.4.0 passed 142 tests plus real two-project Claude/OMP isolation and a native-history migration/continuation check with byte-identical originals. Current-release verification belongs in the release notes; prior results are not a claim that new changes are automatically correct.
 

@@ -36,6 +36,7 @@ _TOOLS = {
     "tandem_reply",
     "tandem_cancel",
     "tandem_channel",
+    "tandem_review_run",
 }
 
 

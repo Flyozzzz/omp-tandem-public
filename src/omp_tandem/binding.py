@@ -175,5 +175,7 @@ class BridgeBinding:
         async with self.lock:
             self.closed = True
             if self.bridge is not None:
-                await self.bridge.channel.close()
-                await asyncio.to_thread(self.bridge.shutdown)
+                try:
+                    await asyncio.to_thread(self.bridge.shutdown)
+                finally:
+                    await self.bridge.channel.close()

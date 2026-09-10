@@ -9,6 +9,8 @@ Separate three concerns: install the external executables once, let the MCP laun
 
 OMP Tandem is MIT-licensed in the public `Flyozzzz/omp-tandem-public` repository. Local plugins require a host that can run local stdio MCP subprocesses on macOS/Linux or WSL. Installing this package in a web-only client does not deploy a server there. Optional hooks use a POSIX shell; Claude watchdog hooks also use the existing `uv` prerequisite with an offline cached Python interpreter.
 
+The first-run goal is one useful task, not learning every MCP tool. Guide the user through **installation/provider setup → correct project and local diagnosis → first read-only review**. A separate paid live check is optional and requires explicit approval; do not force it before an already requested useful provider task.
+
 ## 1. Inspect without changing state
 
 Determine the actual package directory from this skill's installed location: it is two directories above `skills/setup/`. Do not confuse a cached installation with the user's working project. In the examples, replace the path with that package directory:
@@ -161,6 +163,10 @@ For a user who wants the webhook without retyping environment variables and chan
 After reconnecting, discover the actual namespaced `tandem_scope` tool and check its project identity from the intended workspace. It must not refer to a plugin cache or an unrelated project. Data isolation is not an OS sandbox; additional work directories do not grant access to another project's MCP history. Keep legacy migration copy-only and use explicit export/import for authorized context sharing.
 
 Use `tandem_diagnose()` for current-client local diagnostics. If the user requests a live check, call `tandem_diagnose(live=true, expected_project=...)`; explain that it starts one short provider request and may incur a charge. Continue inspecting its returned task ID if still running. Do not rerun paid diagnostics just to confirm a channel probe. Actual model/authentication, channel receipt and independently armed watchdog are separate observations.
+
+Once setup is ready, ask for a concrete review requirement and whether the material is staged or working content. Use `tandem_review_run` for the first read-only review, with a stable request key and explicitly needed context paths. Follow run status until terminal, report complete answers and current applicability, and explain known peer cost versus unmeasured coordinator cost. Do not silently grant `work`, execute test commands or apply changes. Remind the user that closing the owning MCP session stops active work.
+
+For binary/protocol compatibility, use the separately documented `scripts/verify_omp.py` check in `docs/compatibility.md`: a real checksum-pinned OMP binary with an isolated localhost test provider, not the user's paid account. This verifies the recorded binary/SDK combination, not arbitrary models or a claimed version range.
 
 The Claude plugin includes a bounded `PostToolUse` `asyncRewake` watchdog plus session lifecycle handlers. Review/enable these through ordinary client controls. Confirm only a watchdog token delivered by a real hook wake, separately from the real channel probe. `delivery=push` without live watchdog coverage still requires bounded polling. The hook uses offline `uv` and cached Python; unavailable hooks/interpreter leave polling available. Do not interpret its control exit `2` as a failed OMP task or substitute ordinary `async=true`.
 
