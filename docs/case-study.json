@@ -1811,6 +1811,20 @@
       "active_compact_response_observed": true,
       "seconds": 4.939
     },
-    "billing_scope": "Separate deterministic local checks; excluded from paid-episode timings/costs."
+    "billing_scope": "Separate deterministic local checks; excluded from paid-episode timings/costs.",
+    "ci_followup": {
+      "first_run": "https://github.com/Flyozzzz/omp-tandem-public/actions/runs/34458133511",
+      "first_run_result": "failed on Linux and macOS; not treated as a compatibility pass",
+      "corrections": [
+        "Deadline regressions synchronize on capture/question state before triggering expiry; no production timeout increase.",
+        "Foreign-owner reply rejection precedes publication-gate admission.",
+        "Concurrent close callers join capture cleanup; a dedicated regression failed pre-fix and passed after."
+      ],
+      "local_followup": {
+        "tests_passed": 64,
+        "subtests_passed": 23,
+        "final_barrier_checks_passed": 3
+      }
+    }
   }
 }

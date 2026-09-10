@@ -62,6 +62,8 @@ uv run --frozen pytest -q \
 
 A separate throwaway smoke also exercised the **actual stdio MCP server and official OMP 18.1.13**, with only model HTTP replies supplied by a deterministic localhost fixture: two automatic stages, repeated-start identity, complete 25,200/24,300-character answers, staged-only applicability despite unstaged edits, stale detection after an index change, and no native project/shell tools exposed to the review model. It passed in 4.939 seconds. This verifies orchestration and boundaries, not the quality of the scripted answers. The machine-readable case includes this release follow-up separately from the historical peer reports.
 
+The first cross-platform CI run also exposed timing-dependent regressions and a concurrent-close race. Deadline tests now trigger expiry after the relevant capture/question barrier instead of assuming Python imports finish within one second; production timeouts were not enlarged. Foreign-owner rejection now precedes publication admission. A new close regression failed before synchronization because a second close returned while capture cleanup was still running; it passes after both callers join the same cleanup.
+
 ## Actual models, versions and cost
 
 Recorded environment: OMP **18.1.13**, Claude Code **2.1.267**, Python **3.13.5**, macOS arm64, Tandem development version **3.3.0**, official Python SDK revision **`daf07999c2fee9b22edc7bf8fea1fb6272e0df5e`**. The peer used `openai-codex/gpt-6-astra` with low thinking. Claude was requested through the `sonnet` alias; its reported model-usage map includes the actual Sonnet model and ancillary Haiku usage. Exact executable digests, per-episode model usage and collector identity where recorded are in the evidence.

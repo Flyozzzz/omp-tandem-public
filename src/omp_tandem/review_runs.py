@@ -36,6 +36,7 @@ class ReviewRuns:
         self.reply_task, self.cancel_task = reply_task, cancel_task
         self.owner = str(UUID(owner))
         self.guard = threading.RLock()
+        self.close_guard = threading.Lock()
         self.wake = threading.Event()
         self.closing = False
         self.captures = {}
@@ -398,7 +399,7 @@ class ReviewRuns:
         return run
 
     def reply(self, run_id, question_id, answer):
-        with self.guard, self._writing():
+        with self.guard:
             run = self._owned(run_id)
             with closing(self.tasks.connect()) as db:
                 replied = db.execute(
@@ -426,7 +427,8 @@ class ReviewRuns:
             )
             if not task_id:
                 raise ValueError("Review run has no dispatched question")
-            self.reply_task(task_id, question_id, answer)
+            with self._writing():
+                self.reply_task(task_id, question_id, answer)
             self.wake.set()
         return {**self.view(run_id), "replied_task_id": task_id}
 
@@ -872,38 +874,40 @@ class ReviewRuns:
                 self._collect_capture(run_id, capture)
 
     def close(self):
-        with self.guard:
-            if self.closing:
-                return
-            self.closing = True
-            for capture in self.captures.values():
-                self._kill_capture(capture[0])
-            with closing(self.tasks.connect()) as db:
-                runs = [
-                    dict(row)
-                    for row in db.execute(
-                        "SELECT * FROM review_runs WHERE owner=? AND status IN ('starting','running','waiting_input')",
-                        (self.owner,),
-                    )
-                ]
-            for run in runs:
-                self._stop(
-                    run,
-                    "interrupted",
-                    "Owning MCP server shut down; stages will not restart.",
-                )
-            self.wake.set()
-        try:
-            if self.driver is not None:
-                self.driver.join()
-            for run_id, capture in list(self.captures.items()):
-                self._kill_capture(capture[0])
-                self._collect_capture(run_id, capture)
+        # A concurrent close must join cleanup, not merely observe stop intent.
+        with self.close_guard:
             with self.guard:
-                for run_id in list(self.pending_stops):
-                    self._flush_stop(self._get(run_id))
-        finally:
-            # If another owner is publishing, durable interruption is deferred to
-            # lease recovery. Never wait for or kill that owner's healthy work.
-            self.lease.close()
-            self.database_anchor.close()
+                if self.closing:
+                    return
+                self.closing = True
+                for capture in self.captures.values():
+                    self._kill_capture(capture[0])
+                with closing(self.tasks.connect()) as db:
+                    runs = [
+                        dict(row)
+                        for row in db.execute(
+                            "SELECT * FROM review_runs WHERE owner=? AND status IN ('starting','running','waiting_input')",
+                            (self.owner,),
+                        )
+                    ]
+                for run in runs:
+                    self._stop(
+                        run,
+                        "interrupted",
+                        "Owning MCP server shut down; stages will not restart.",
+                    )
+                self.wake.set()
+            try:
+                if self.driver is not None:
+                    self.driver.join()
+                for run_id, capture in list(self.captures.items()):
+                    self._kill_capture(capture[0])
+                    self._collect_capture(run_id, capture)
+                with self.guard:
+                    for run_id in list(self.pending_stops):
+                        self._flush_stop(self._get(run_id))
+            finally:
+                # If another owner is publishing, durable interruption is deferred to
+                # lease recovery. Never wait for or kill that owner's healthy work.
+                self.lease.close()
+                self.database_anchor.close()
