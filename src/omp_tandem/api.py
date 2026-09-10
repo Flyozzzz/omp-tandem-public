@@ -13,7 +13,7 @@ from pydantic import Field
 from .binding import BridgeBinding, RuntimeOptions
 from .bridge import Bridge
 from .channel import ChannelFastMCP
-from .execution import ExecutionOptions
+from .execution import ExecutionOptions, profile_catalog
 from .findings import FindingChange, FindingDraft
 from .models import ArtifactInfo, TaskContract, TurnContract
 from .project_context import ProjectContext
@@ -58,15 +58,20 @@ def build_server(configuration: Bridge | RuntimeOptions):
 
     @mcp.tool()
     async def tandem_scope(ctx: Context) -> dict:
-        """Inspect this MCP instance's immutable launch-project boundary and legacy import status.
+        """Inspect the immutable project boundary and available computation profile defaults.
 
         Separate launch folders have separate data even with one user-wide MCP registration.
         Additional client-granted directories permit working there, not reading their MCP history.
-        This is data isolation, not an OS filesystem sandbox.
+        This is data isolation, not an OS filesystem sandbox. execution_profiles describes defaults,
+        not effective/actual settings after overrides; deep means more time, not higher thinking.
         """
         bridge = await runtime.get(ctx)
         return bridge.channel.decorate(
-            {**bridge.scope.info(), "migration": bridge.migration}
+            {
+                **bridge.scope.info(),
+                "migration": bridge.migration,
+                "execution_profiles": profile_catalog(),
+            }
         )
 
     @mcp.tool()
@@ -456,8 +461,9 @@ def build_server(configuration: Bridge | RuntimeOptions):
     ) -> dict:
         """Capture or read an immutable review bundle, or compare it with current selected files.
 
-        create collects the bound project's selected Git/working-tree bytes, diff, requirements,
-        supplied checks and explicit boundaries; it never executes test commands. Bind review_id
+        request.source selects base-to-worktree (default) or base-to-staged Git index material.
+        Staged captures exclude unstaged/untracked content; source also governs applicability checks.
+        Capture includes requirements, supplied checks and boundaries without executing tests. Bind review_id
         to a think task for snapshot-only review. Author rationale is withheld unless explicitly
         revealed in a comparison turn. Read pages by next_offset, not the live working directory.
         assess reports applicability at observation time, not whole-system correctness.

@@ -14,6 +14,7 @@ import tempfile
 import time
 from contextlib import closing
 from pathlib import Path, PurePosixPath
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -41,6 +42,10 @@ class ReviewRequest(BaseModel):
     requirements: str = Field(min_length=1, max_length=200000)
     criteria: list[str] = Field(default_factory=list, max_length=100)
     base: str = Field(default="HEAD", min_length=1, max_length=200)
+    source: Literal["worktree", "staged"] = Field(
+        default="worktree",
+        description="Select worktree bytes or Git index bytes compared with base. Staged capture never reads live files.",
+    )
     paths: list[str] | None = Field(default=None, min_length=1, max_length=_MAX_FILES)
     checks: list[ReviewCheck] = Field(default_factory=list, max_length=32)
     author_proposal: str = Field(default="", max_length=200000)
@@ -295,26 +300,33 @@ class ReviewStore:
             entries[path[len(prefix) :]] = (mode, oid, kind)
         return entries
 
-    def _selection(self, request: ReviewRequest, identity: dict) -> list[str]:
+    def _selection(
+        self, request: ReviewRequest, identity: dict, index: dict, tree: dict
+    ) -> list[str]:
+        if request.source == "staged" and identity["kind"] != "git":
+            raise ValueError("Staged reviews require a Git repository")
         if request.paths is not None:
             return sorted({_path(path) for path in request.paths})
         if identity["kind"] != "git":
             raise ValueError("Non-Git reviews require explicit file paths")
-        # Avoid git diff entirely: hashing its worktree inputs may execute local
-        # clean filters even with --no-ext-diff/--no-textconv. ls-files uses stat.
-        index, tree = self._index(), self._tree(identity)
+        # Compare object IDs and modes without invoking diff or content filters.
         paths = {
             path
             for path in index.keys() | tree.keys()
             if [(mode, oid) for mode, oid, _ in index.get(path, [])]
             != ([(tree[path][0], tree[path][1])] if path in tree else [])
+            or any(stage != "0" for _, _, stage in index.get(path, []))
         }
-        for args in (("--modified", "--deleted"), ("--others", "--exclude-standard")):
-            paths.update(
-                path.decode("utf-8")
-                for path in self._git("ls-files", *args, "-z").split(b"\0")
-                if path
-            )
+        if request.source == "worktree":
+            for args in (
+                ("--modified", "--deleted"),
+                ("--others", "--exclude-standard"),
+            ):
+                paths.update(
+                    path.decode("utf-8")
+                    for path in self._git("ls-files", *args, "-z").split(b"\0")
+                    if path
+                )
         selected = sorted({_path(path) for path in paths})
         if len(selected) > _MAX_FILES:
             raise ValueError("Review selects more than 256 files; specify paths")
@@ -337,27 +349,30 @@ class ReviewStore:
         self, request: ReviewRequest
     ) -> tuple[dict, list[tuple[str, str, bytes]]]:
         identity = self._identity(request.base)
-        paths = self._selection(request, identity)
         index = self._index() if identity["kind"] == "git" else {}
         tree = self._tree(identity) if identity["kind"] == "git" else {}
+        paths = self._selection(request, identity, index, tree)
         files, contents, observed = [], [], {}
         total = 0
         diff = []
         for path in paths:
-            working, mode, signature = self._working(path)
-            observed[path] = (working, mode, signature)
+            if request.source == "worktree":
+                selected, mode, signature = self._working(path)
+                observed[path] = (selected, mode, signature)
             base, base_mode = self._blob(tree.get(path))
             stages = index.get(path, [])
             if len(stages) > 1 or (stages and stages[0][2] != "0"):
                 raise ValueError(f"Unmerged index entry cannot be certified: {path}")
             staged, staged_mode = self._blob(stages[0] if stages else None)
-            if working is None and base is None and staged is None:
+            if request.source == "staged":
+                selected, mode = staged, staged_mode
+            if selected is None and base is None and staged is None:
                 raise ValueError(
-                    f"Selected file does not exist in the working tree, index or base: {path}"
+                    f"Selected file does not exist in the {request.source} source or base: {path}"
                 )
             row = {
                 "path": path,
-                "selected": _descriptor(working, mode),
+                "selected": _descriptor(selected, mode),
                 "base": _descriptor(base, base_mode),
                 "staged": _descriptor(staged, staged_mode),
             }
@@ -365,14 +380,14 @@ class ReviewStore:
                 "added"
                 if base is None
                 else "deleted"
-                if working is None
+                if selected is None
                 else "unchanged"
-                if (working, mode) == (base, base_mode)
+                if (selected, mode) == (base, base_mode)
                 else "modified"
             )
             files.append(row)
             for section, data in (
-                ("selected", working),
+                ("selected", selected),
                 ("base", base),
                 ("staged", staged),
             ):
@@ -381,14 +396,14 @@ class ReviewStore:
                     if total > _MAX_TOTAL:
                         raise ValueError("Review content exceeds 16 MiB")
                     contents.append((section, path, data))
-            if (working, mode) != (base, base_mode):
+            if (selected, mode) != (base, base_mode):
                 diff.append(
                     f"File: {path}\nModes: {base_mode or 'absent'} -> {mode or 'absent'}\n"
                 )
                 try:
                     old, new = (
                         (base or b"").decode("utf-8"),
-                        (working or b"").decode("utf-8"),
+                        (selected or b"").decode("utf-8"),
                     )
                     if "\0" in old or "\0" in new:
                         raise UnicodeError
@@ -410,18 +425,21 @@ class ReviewStore:
                     )
         # Both complete scans must agree, including identity and selection. No live
         # reads are needed later to reconstruct any section of this bundle.
+        current_index = self._index() if identity["kind"] == "git" else {}
         if (
             self._identity(request.base) != identity
-            or self._selection(request, identity) != paths
+            or self._selection(request, identity, current_index, tree) != paths
         ):
             raise _Mutation("Git identity or selected paths changed during capture")
-        current_index = self._index() if identity["kind"] == "git" else {}
         if any(current_index.get(path) != index.get(path) for path in paths):
             raise _Mutation("Selected Git index changed during capture")
-        for path in paths:
-            if self._working(path) != observed[path]:
-                raise _Mutation(f"Selected file changed during capture: {path}")
-        fingerprint = _sha(_json({"files": files, "git": identity}).encode())
+        if request.source == "worktree":
+            for path in paths:
+                if self._working(path) != observed[path]:
+                    raise _Mutation(f"Selected file changed during capture: {path}")
+        fingerprint = _sha(
+            _json({"files": files, "git": identity, "source": request.source}).encode()
+        )
         checks = []
         for check in request.checks:
             item = check.model_dump()
@@ -439,10 +457,13 @@ class ReviewStore:
             checks.append(item)
         manifest = {
             "schema_version": 1,
+            "source": request.source,
             "requirements": request.requirements,
             "criteria": request.criteria,
             "selection": "explicit_paths"
             if request.paths is not None
+            else "staged_changes"
+            if request.source == "staged"
             else "current_changes",
             "requested_base": request.base,
             "git": identity,
@@ -463,10 +484,17 @@ class ReviewStore:
                 "observed": [
                     "Git HEAD/base identity",
                     "selected index entries",
-                    "selected files stable across two reads",
+                    "selected index entries stable across two reads"
+                    if request.source == "staged"
+                    else "selected files stable across two reads",
                 ],
                 "external": [
                     "unselected files",
+                    *(
+                        ["working tree and untracked files"]
+                        if request.source == "staged"
+                        else []
+                    ),
                     "runtime/environment/dependencies",
                     "external services",
                     "test execution",
@@ -550,8 +578,9 @@ class ReviewStore:
             "review_id": manifest["review_id"],
             "created": manifest["created"],
             "scope_id": manifest["scope_id"],
+            "source": manifest.get("source", "worktree"),
             "code_fingerprint": manifest["code_fingerprint"],
-            "summary": f"Immutable review bundle of {len(manifest['files'])} selected paths",
+            "summary": f"Immutable {manifest.get('source', 'worktree')} review bundle of {len(manifest['files'])} selected paths",
             "file_count": len(manifest["files"]),
             "check_count": len(manifest["checks"]),
             "selection": manifest["selection"],
@@ -602,6 +631,7 @@ class ReviewStore:
             if not file[section]["exists"]:
                 return {
                     "review_id": review_id,
+                    "source": manifest.get("source", "worktree"),
                     "section": section,
                     "path": path,
                     "exists": False,
@@ -651,6 +681,7 @@ class ReviewStore:
         end = offset + len(content)
         return {
             "review_id": review_id,
+            "source": manifest.get("source", "worktree"),
             "section": section,
             "path": path,
             "exists": True,
@@ -665,6 +696,7 @@ class ReviewStore:
 
     def assess(self, review_id: str) -> dict:
         manifest = self._manifest(review_id)
+        source = manifest.get("source", "worktree")
         changed, unknown, index_changed = [], [], []
         identity, index = None, None
         try:
@@ -678,15 +710,23 @@ class ReviewStore:
         for row in manifest["files"]:
             path = row["path"]
             try:
-                data, mode, _ = self._working(path)
-                if _descriptor(data, mode) != row["selected"]:
-                    changed.append(path)
+                if source == "worktree":
+                    data, mode, _ = self._working(path)
+                    if _descriptor(data, mode) != row["selected"]:
+                        changed.append(path)
                 if index is not None:
                     stages = index.get(path, [])
                     if len(stages) > 1 or (stages and stages[0][2] != "0"):
                         index_changed.append(path)
+                        if source == "staged":
+                            changed.append(path)
                     else:
                         staged, staged_mode = self._blob(stages[0] if stages else None)
+                        if (
+                            source == "staged"
+                            and _descriptor(staged, staged_mode) != row["selected"]
+                        ):
+                            changed.append(path)
                         if _descriptor(staged, staged_mode) != row["staged"]:
                             index_changed.append(path)
             except ValueError as exc:
@@ -707,6 +747,7 @@ class ReviewStore:
         )
         return {
             "review_id": manifest["review_id"],
+            "source": source,
             "assessed_at": time.time(),
             "status": status,
             "changed_paths": changed,
@@ -717,5 +758,10 @@ class ReviewStore:
             "snapshot_head": manifest["git"]["head"],
             "observed_head": identity["head"] if identity else None,
             "whole_environment_immutable": False,
-            "scope": "selected files and captured Git identity only; external boundaries remain unknown",
+            "scope": (
+                "selected index paths and captured Git identity only; working tree, "
+                "unselected staged paths and external boundaries remain outside this review"
+                if source == "staged"
+                else "selected files and captured Git identity only; external boundaries remain unknown"
+            ),
         }

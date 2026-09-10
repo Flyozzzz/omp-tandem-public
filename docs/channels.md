@@ -2,7 +2,7 @@
 
 [Back to README](../README.md) · [Русский README](../README.ru.md) · [中文 README](../README.zh-CN.md)
 
-This reference describes optional delivery for OMP Tandem 3.1.0. Bounded MCP polling works without Channels or hooks. Channels are a Claude Code feature, not a portable MCP guarantee and not a permission-approval relay.
+This reference describes optional delivery for OMP Tandem 3.2.0. Bounded MCP polling works without Channels or hooks. Channels are a Claude Code feature, not a portable MCP guarantee and not a permission-approval relay.
 
 ## Choose the delivery mode
 

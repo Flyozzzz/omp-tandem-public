@@ -1,6 +1,7 @@
 """Snapshot access and stage boundaries exercised through MCP and native host tools."""
 
 import json
+import subprocess
 
 from fastmcp.exceptions import ToolError
 
@@ -107,3 +108,57 @@ class ReviewIntegrationTests(RpcHarness):
         result = await self.result(second["task_id"])
         self.assertEqual(result["review"]["stage"], "independent")
         self.assertFalse(json.loads(result["answer"])["author_visible"])
+
+    async def test_staged_mcp_snapshot_native_reader_excludes_worktree(self):
+        def git(*args):
+            return subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "commit.gpgsign=false",
+                    *args,
+                ],
+                cwd=self.root,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                check=True,
+                timeout=15,
+            ).stdout
+
+        git("init", "-q")
+        git("config", "user.email", "review@example.invalid")
+        git("config", "user.name", "Review Integration")
+        git("add", "sample.txt")
+        git("commit", "-qm", "base")
+        (self.root / "sample.txt").write_text("index version\n")
+        git("add", "sample.txt")
+        (self.root / "sample.txt").write_text("excluded worktree version\n")
+        (self.root / "untracked.txt").write_text("excluded untracked file")
+        review = await self.call(
+            "tandem_review",
+            action="create",
+            request={"requirements": "Review the index only.", "source": "staged"},
+        )
+        self.assertEqual(review["source"], "staged")
+        self.assertEqual(review["file_count"], 1)
+        (self.root / "sample.txt").unlink()
+        (self.root / "sample.txt").symlink_to(self.root / "missing-target")
+        first = await self.start("snapshot-reader", review_id=review["review_id"])
+        result = await self.result(first["task_id"])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(
+            json.loads(result["answer"]),
+            {"saved": "index version\n", "author_visible": False},
+        )
+        self.assertEqual(
+            result["review"]["applicability"]["status"], "current_selected_state"
+        )
+        self.assertEqual(result["review"]["applicability"]["source"], "staged")
+        (self.root / "sample.txt").unlink()
+        (self.root / "sample.txt").write_text("next index version\n")
+        git("add", "sample.txt")
+        refreshed = await self.result(first["task_id"])
+        self.assertEqual(refreshed["review"]["applicability"]["status"], "stale")
+        self.assertEqual(json.loads(refreshed["answer"])["saved"], "index version\n")

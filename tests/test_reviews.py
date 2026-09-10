@@ -327,3 +327,313 @@ class ReviewTests(unittest.TestCase):
         review = self.create(paths=["tracked.txt"])
         diff = self.store.read(review["review_id"], "diff")["content"]
         self.assertIn("-base\n+without newline\n\\ No newline at end of file\n", diff)
+
+    def test_staged_partial_content_diff_and_fingerprint_ignore_unstaged_changes(self):
+        self.initialize()
+        (self.root / "tracked.txt").write_text("staged\n")
+        self.git("add", "tracked.txt")
+        (self.root / "tracked.txt").write_text("unstaged\n")
+        (self.root / "deleted.txt").unlink()
+        (self.root / "untracked.txt").write_text("untracked")
+        with patch.object(
+            self.store, "_working", side_effect=AssertionError("live read")
+        ):
+            review = self.create(source="staged")
+            rid = review["review_id"]
+            manifest = self.manifest(rid)
+            self.assertEqual(
+                [row["path"] for row in manifest["files"]], ["tracked.txt"]
+            )
+            self.assertEqual(manifest["source"], "staged")
+            self.assertEqual(manifest["files"][0]["change"], "modified")
+            saved = self.store.read(rid, "selected", "tracked.txt")
+            self.assertEqual(saved["content"], "staged\n")
+            self.assertEqual(saved["source"], "staged")
+            self.assertIn("-base\n+staged\n", self.store.read(rid, "diff")["content"])
+            self.assertNotIn("unstaged", self.store.read(rid, "diff")["content"])
+            (self.root / "tracked.txt").unlink()
+            (self.root / "tracked.txt").symlink_to(self.home / "missing-outside-file")
+            (self.root / "another-untracked.txt").write_text("later")
+            second = self.create(source="staged")
+            self.assertEqual(second["code_fingerprint"], review["code_fingerprint"])
+            self.assertEqual(self.store.assess(rid)["status"], "current_selected_state")
+            explicit = self.create(source="staged", paths=["tracked.txt"])
+            self.assertEqual(explicit["code_fingerprint"], review["code_fingerprint"])
+
+    def test_staged_deletion_and_additions_do_not_consult_conflicting_live_paths(self):
+        self.initialize()
+        self.git("rm", "deleted.txt")
+        (self.root / "deleted.txt").write_text("recreated, not staged")
+        (self.root / "missing.txt").write_text("saved addition")
+        nested = self.root / "nested"
+        nested.mkdir()
+        (nested / "file.txt").write_text("saved nested addition")
+        self.git("add", "missing.txt", "nested/file.txt")
+        (self.root / "missing.txt").unlink()
+        (nested / "file.txt").unlink()
+        nested.rmdir()
+        nested.symlink_to(self.home, target_is_directory=True)
+        with patch.object(
+            self.store, "_working", side_effect=AssertionError("live read")
+        ):
+            review = self.create(source="staged")
+            rid = review["review_id"]
+            self.assertEqual(
+                {row["path"]: row["change"] for row in self.manifest(rid)["files"]},
+                {
+                    "deleted.txt": "deleted",
+                    "missing.txt": "added",
+                    "nested/file.txt": "added",
+                },
+            )
+            deleted = self.store.read(rid, "selected", "deleted.txt")
+            self.assertFalse(deleted["exists"])
+            self.assertEqual(deleted["source"], "staged")
+            self.assertEqual(
+                self.store.read(rid, "selected", "missing.txt")["content"],
+                "saved addition",
+            )
+            self.assertEqual(
+                self.store.read(rid, "selected", "nested/file.txt")["content"],
+                "saved nested addition",
+            )
+            self.assertEqual(self.store.assess(rid)["status"], "current_selected_state")
+
+    def test_staged_assessment_tracks_selected_index_not_new_unselected_paths(self):
+        self.initialize()
+        (self.root / "tracked.txt").write_text("staged")
+        self.git("add", "tracked.txt")
+        review = self.create(source="staged")
+        rid = review["review_id"]
+        (self.root / "later.txt").write_text("not reviewed")
+        self.git("add", "later.txt")
+        assessment = self.store.assess(rid)
+        self.assertEqual(assessment["status"], "current_selected_state")
+        self.assertEqual(assessment["changed_paths"], [])
+        with self.assertRaisesRegex(ValueError, "not part of this review"):
+            self.store.read(rid, "selected", "later.txt")
+        (self.root / "tracked.txt").write_text("new staged")
+        self.git("add", "tracked.txt")
+        with patch.object(
+            self.store, "_working", side_effect=AssertionError("live read")
+        ):
+            assessment = self.store.assess(rid)
+        self.assertEqual(assessment["source"], "staged")
+        self.assertEqual(assessment["status"], "stale")
+        self.assertEqual(assessment["changed_paths"], ["tracked.txt"])
+        self.assertEqual(assessment["changed_index_paths"], ["tracked.txt"])
+        self.assertEqual(
+            self.store.read(rid, "selected", "tracked.txt")["content"], "staged"
+        )
+
+    def test_staged_index_race_retries_coherently_and_rejects_continuous_mutation(self):
+        self.initialize()
+        (self.root / "tracked.txt").write_text("first")
+        self.git("add", "tracked.txt")
+        original = self.store._index
+        calls = 0
+
+        def mutate_once():
+            nonlocal calls
+            result = original()
+            calls += 1
+            if calls == 1:
+                (self.root / "tracked.txt").write_text("second")
+                (self.root / "arrived.txt").write_text("arrived during capture")
+                self.git("add", "tracked.txt", "arrived.txt")
+            return result
+
+        with (
+            patch.object(self.store, "_index", side_effect=mutate_once),
+            patch.object(
+                self.store, "_working", side_effect=AssertionError("live read")
+            ),
+        ):
+            review = self.create(source="staged")
+        rid = review["review_id"]
+        self.assertEqual(
+            self.store.read(rid, "selected", "tracked.txt")["content"], "second"
+        )
+        self.assertEqual(
+            self.store.read(rid, "selected", "arrived.txt")["content"],
+            "arrived during capture",
+        )
+        self.assertIn("+second", self.store.read(rid, "diff")["content"])
+        self.assertNotIn("+first", self.store.read(rid, "diff")["content"])
+
+        def mutate_always():
+            nonlocal calls
+            result = original()
+            calls += 1
+            (self.root / "tracked.txt").write_text(f"changing {calls}")
+            self.git("add", "tracked.txt")
+            return result
+
+        with (
+            patch.object(self.store, "_index", side_effect=mutate_always),
+            patch.object(
+                self.store, "_working", side_effect=AssertionError("live read")
+            ),
+            self.assertRaisesRegex(ValueError, "three capture attempts"),
+        ):
+            self.create(source="staged", paths=["tracked.txt"])
+        with sqlite3.connect(self.db_path) as db:
+            self.assertEqual(
+                db.execute("SELECT count(*) FROM reviews").fetchone()[0], 1
+            )
+
+    def test_staged_modes_binary_and_rename_are_saved_from_index(self):
+        self.initialize()
+        self.git("mv", "tracked.txt", "renamed.txt")
+        self.git("update-index", "--chmod=+x", "renamed.txt")
+        self.git("update-index", "--chmod=+x", "deleted.txt")
+        binary = b"\x00\xff\x80"
+        (self.root / "binary.dat").write_bytes(binary)
+        self.git("add", "binary.dat")
+        (self.root / "binary.dat").write_text("live text")
+        (self.root / "renamed.txt").unlink()
+        review = self.create(source="staged")
+        rid = review["review_id"]
+        files = {row["path"]: row for row in self.manifest(rid)["files"]}
+        self.assertEqual(
+            {path: row["change"] for path, row in files.items()},
+            {
+                "tracked.txt": "deleted",
+                "renamed.txt": "added",
+                "binary.dat": "added",
+                "deleted.txt": "modified",
+            },
+        )
+        self.assertEqual(files["renamed.txt"]["selected"]["mode"], "100755")
+        self.assertEqual(files["deleted.txt"]["selected"]["mode"], "100755")
+        self.assertEqual(
+            self.store.read(rid, "selected", "renamed.txt")["content"], "base\n"
+        )
+        self.assertEqual(
+            base64.b64decode(self.store.read(rid, "selected", "binary.dat")["content"]),
+            binary,
+        )
+        diff = self.store.read(rid, "diff")["content"]
+        self.assertIn("Modes: absent -> 100755", diff)
+        self.assertIn("Modes: 100644 -> 100755", diff)
+        self.assertIn(hashlib.sha256(binary).hexdigest(), diff)
+        self.assertNotIn("live text", diff)
+
+    def test_staged_selection_uses_requested_base_and_distinguishes_source_hash(self):
+        self.initialize()
+        base = self.git("rev-parse", "HEAD").decode().strip()
+        (self.root / "tracked.txt").write_text("committed later\n")
+        self.git("add", "tracked.txt")
+        self.git("commit", "-qm", "later")
+        self.assertEqual(self.create(source="staged")["file_count"], 0)
+        review = self.create(source="staged", base=base)
+        self.assertEqual(
+            self.store.read(review["review_id"], "base", "tracked.txt")["content"],
+            "base\n",
+        )
+        self.assertEqual(
+            self.store.read(review["review_id"], "selected", "tracked.txt")["content"],
+            "committed later\n",
+        )
+        worktree = self.create(paths=["tracked.txt"], base=base)
+        self.assertNotEqual(review["code_fingerprint"], worktree["code_fingerprint"])
+
+    def test_staged_source_validation_empty_selection_and_unborn_repository(self):
+        (self.root / "only-live.txt").write_text("not staged")
+        with self.assertRaisesRegex(
+            ValueError, "Staged reviews require a Git repository"
+        ):
+            self.create(source="staged", paths=["only-live.txt"])
+        with self.assertRaisesRegex(
+            ValueError, "Staged reviews require a Git repository"
+        ):
+            self.create(source="staged")
+        with self.assertRaises(ValueError):
+            self.create(source="index", paths=["only-live.txt"])
+        self.git("init", "-q")
+        empty = self.create(source="staged")
+        self.assertEqual(empty["file_count"], 0)
+        self.assertIsNone(empty["git"]["head"])
+        self.assertIsNone(empty["git"]["base_commit"])
+        self.assertEqual(self.store.read(empty["review_id"], "diff")["content"], "")
+        with self.assertRaisesRegex(ValueError, "does not exist"):
+            self.create(source="staged", paths=["only-live.txt"])
+        self.git("add", "only-live.txt")
+        added = self.create(source="staged")
+        self.assertEqual(
+            self.manifest(added["review_id"])["files"][0]["change"], "added"
+        )
+        self.assertEqual(
+            self.store.read(added["review_id"], "selected", "only-live.txt")["content"],
+            "not staged",
+        )
+        self.assertEqual(
+            self.store.assess(empty["review_id"])["status"], "current_selected_state"
+        )
+        with self.assertRaises(ValueError):
+            self.store.read(empty["review_id"], "selected", "only-live.txt")
+
+    def test_staged_unmerged_entries_and_submodules_are_explicitly_rejected(self):
+        self.initialize()
+        head = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{head},module")
+        with self.assertRaisesRegex(ValueError, "submodules"):
+            self.create(source="staged")
+        # Unselected unsupported material does not broaden an explicit review.
+        review = self.create(source="staged", paths=["tracked.txt"])
+        self.assertEqual(review["file_count"], 1)
+        self.git("update-index", "--force-remove", "module")
+        oid = self.git("rev-parse", "HEAD:tracked.txt").decode().strip()
+        subprocess.run(
+            ["git", "update-index", "--index-info"],
+            cwd=self.root,
+            input=f"0 {'0' * 40}\ttracked.txt\n100644 {oid} 1\ttracked.txt\n".encode(),
+            capture_output=True,
+            check=True,
+            timeout=15,
+        )
+        with self.assertRaisesRegex(ValueError, "Unmerged index entry"):
+            self.create(source="staged")
+        self.assertEqual(self.store.assess(review["review_id"])["status"], "stale")
+
+    def test_legacy_manifest_without_source_preserves_stored_bytes_and_hash(self):
+        (self.root / "file.txt").write_text("saved")
+        review = self.create(paths=["file.txt"])
+        rid = review["review_id"]
+        manifest = self.manifest(rid)
+        del manifest["source"]
+        manifest["code_fingerprint"] = hashlib.sha256(
+            json.dumps(
+                {"files": manifest["files"], "git": manifest["git"]},
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        legacy = json.dumps(
+            manifest, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        )
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("UPDATE reviews SET manifest=? WHERE review_id=?", (legacy, rid))
+        saved = self.store.read(rid)
+        expected_hash = hashlib.sha256(legacy.encode()).hexdigest()
+        self.assertEqual(saved["sha256"], expected_hash)
+        self.assertEqual(saved["content"], legacy)
+        self.assertEqual(saved["source"], "worktree")
+        self.assertEqual(self.store.info(rid)["source"], "worktree")
+        self.assertEqual(
+            self.store.info(rid)["code_fingerprint"], manifest["code_fingerprint"]
+        )
+        (self.root / "file.txt").write_text("changed")
+        assessment = self.store.assess(rid)
+        self.assertEqual(assessment["source"], "worktree")
+        self.assertEqual(assessment["status"], "stale")
+        self.assertEqual(self.store.read(rid)["sha256"], expected_hash)
+        self.assertEqual(self.store.read(rid)["content"], legacy)
+        with sqlite3.connect(self.db_path) as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT manifest FROM reviews WHERE review_id=?", (rid,)
+                ).fetchone()[0],
+                legacy,
+            )

@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Version: 3.1.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Version: 3.2.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -294,6 +294,15 @@ The shared skills provide:
 
 ## Working with a peer
 
+For nontrivial development, the skill requires **understand → independently assess → compare → plan → implement → cross-check**, before implementation edits or a delegated `work` task:
+
+1. Establish the actual need, constraints, confirmed facts and observable acceptance criteria.
+2. Form a preliminary assessment and ask OMP for its independent framing before sharing the coordinator's diagnosis or arguments.
+3. Compare approaches and evidence, resolve material disagreements, and record the chosen approach, file ownership, implementation order and checks.
+4. Execute that plan, then cross-check the implementation and verification evidence against the original criteria. Revisit planning when a material premise changes.
+
+Only a mechanical edit without substantive design/behavior choices, or an explicitly user-approved plan with unchanged scope/assumptions, permits a shortened path. State the exception and checks. An established goal or a small diff alone does not qualify. Do not force consensus or ask the user to approve every ordinary technical detail. Read-only planning does not become writable through continuation: start a new authorized `work` conversation and pass the agreed plan. Analysis-only requests do not authorize implementation.
+
 Good requests split complementary work rather than duplicating it:
 
 > First give OMP the original task, constraints, evidence, and code without my diagnosis or proposed solution. Read its independent problem framing. Only then reveal my proposal and arguments in a follow-up and compare the assessments.
@@ -306,7 +315,7 @@ Good requests split complementary work rather than duplicating it:
 
 User-confirmed observations are distinct from peer hypotheses. Do not rerun an already confirmed experiment merely to reconfirm the user; investigate new claims or changed code. Neither participant is a rubber stamp.
 
-For consequential analysis and review, this two-stage order reduces anchoring on the coordinator's framing. Use `tandem_start` for the initial assessment and `tandem_continue` to reveal and compare the proposal. Preserve user-confirmed facts. If code, history, or shared context already exposes the solution, acknowledge that exposure rather than claiming a blind review. Simple execution with an established goal does not require two stages.
+For planning and consequential analysis/review, use `tandem_start` for the independent assessment and `tandem_continue` to reveal and compare the proposal. Preserve user-confirmed facts and acknowledge prior exposure from code, history or shared context instead of claiming a blind review. The explicit shortened-path exceptions above govern when fresh development planning may be skipped.
 
 ## Tasks and execution modes
 
@@ -358,7 +367,17 @@ Prepare all review materials with one `tandem_review(action="create")` call. Exa
 }
 ```
 
-Without `paths`, capture selects current nonignored Git changes, including staged, unstaged and new files. Explicit `paths` select a bounded set relative to the bound project; they also support non-Git projects. The bundle stores selected/base/staged bytes, modes and hashes, Git identities and a diff derived from the captured bytes. Renames are represented as deletion/addition pairs. Selected submodules and unmerged index entries require a separate review and are rejected explicitly.
+Choose `request.source`: **`worktree`** (default) reviews working content against `base`, while **`staged`** reviews the Git index against `base`. Without `paths`, worktree selects current nonignored changes, including unstaged/new files; staged selects only index/base differences. Explicit paths select material from that same source. Non-Git projects support only worktree with explicit paths.
+
+To review only the prepared commit:
+
+```json
+{"action":"create","request":{"requirements":"Review only the prepared commit against the user requirements.","source":"staged","base":"HEAD"}}
+```
+
+For staged captures, `selected`, modes, change classification and diff come from the index; no working files are read, including during capture retries and assessment. Later unstaged edits and untracked files do not leak into the bundle. A staged deletion stays deleted even if its working file was recreated. Empty staged selection returns zero files; do not start an empty review.
+
+The bundle stores selected/base/staged bytes, hashes and Git identities. Renames remain deletion/addition pairs; selected submodules and unmerged index entries are rejected explicitly. New manifests/fingerprints identify the source. Legacy snapshots without it remain worktree snapshots without rewriting their saved content or hashes.
 
 Optional `checks` entries contain `name`, `output`, optional `command`, `source` and `code_fingerprint`. Collection never executes those commands. Supplied reports remain `verified=false`; without a matching supplied fingerprint, their association with this code version is unknown or different, not silently certified.
 
@@ -379,6 +398,8 @@ Snapshot-bound tasks require `think` mode. Their `tandem_review_read` host tool 
 Coordinator reads use `tandem_review(action="read", review_id=..., section=...)`. Sections are `manifest`, `requirements`, `criteria`, `diff`, `selected`, `base`, `staged`, `checks`, and explicitly revealed `author`. File sections require `path`; page with `offset`, `limit` and `next_offset`. Binary bytes use base64 pages. Author proposal/rationale are stored separately and excluded from first-stage manifests and metadata; the worker cannot read them before comparison.
 
 `tandem_review(action="assess", review_id=...)` and terminal result `review.applicability` report `current_selected_state`, `stale`, `previous_version`, or `unknown`, with an observation time. The old answer remains tied to its saved snapshot; changes do not rewrite it or automatically prove it wrong. Unrelated files are outside the selected scope.
+
+For staged snapshots, unstaged edits do not change applicability; modifying a selected index entry makes it stale. New staged paths outside the saved bundle are not implicitly reviewed. Recapture before claiming coverage of a changed complete commit candidate.
 
 The manifest separates **saved**, **observed**, and **external** boundaries. Capture checks for changes across bounded repeated reads; it is not an atomic filesystem snapshot. A saved lockfile does not prove installed dependencies, and unchanged selected bytes do not certify external services or the whole system.
 
@@ -405,6 +426,8 @@ Computation settings are independent of `think`/`analyze`/`work` permissions:
 | `quick` | `low` | 600 seconds |
 | `balanced` | `high` | 1800 seconds |
 | `deep` | `high` | 3600 seconds |
+
+**Deep means the same default `high` reasoning with a longer deadline: 60 minutes instead of balanced's 30. It does not select a higher thinking level.** Before choosing, inspect `tandem_scope.execution_profiles` or the tool schema; their values describe defaults, not effective/actual settings after overrides.
 
 Pass `execution` to `tandem_start` or `tandem_continue`:
 

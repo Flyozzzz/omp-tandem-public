@@ -17,11 +17,11 @@ Consult, design, implement, and review together through [Oh My Pi](https://githu
 A second agent should do more than approve the first agent's work. OMP Tandem lets your coordinator ask for independent reasoning, explore alternatives, delegate a separate implementation slice, and compare findings against evidence.
 
 - **Real OMP, your provider.** Uses the official `omp_rpc` client and `omp --mode rpc`, not a substitute direct-API wrapper.
-- **Complementary work.** Consultation, design, implementation, and review—not just testing at the end.
+- **Plan before nontrivial development.** Independent peer framing, a concrete shared plan, implementation and cross-checking; narrow exceptions for mechanical edits or unchanged user-approved plans.
 - **Persistent conversations.** Continue a discussion while replacing the current goal and preserving its base constraints.
 - **Scoped knowledge.** Separate project histories, optional versioned product rules, and explicit cross-project sharing.
 - **Honest results.** Structured outcomes, questions with deadlines, and recoverable intermediate artifacts.
-- **Version-bound reviews.** Saved code and diffs, independent-first comparison, stale-result detection and finding history. [Review workflow](docs/guide.md#immutable-review-bundles).
+- **Version-bound reviews.** Choose worktree or staged-only material, then use independent-first comparison, stale-result detection and finding history. [Review workflow](docs/guide.md#immutable-review-bundles).
 - **Bounded waiting and visible usage.** Claude watchdog with polling fallback, explicit live diagnostics, and depth/budget settings separate from permissions. [Profiles and usage](docs/guide.md#computation-profiles-and-usage).
 - **Portable integration.** Claude Code plugin, Agent Plugins package for Codex, and ordinary local stdio MCP for other hosts.
 

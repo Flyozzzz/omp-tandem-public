@@ -24,10 +24,41 @@ TOKEN_FIELDS = {
 }
 
 
+def profile_catalog() -> dict:
+    """Return independent descriptions of profile defaults, not effective settings."""
+    return {
+        name: {
+            **settings,
+            "description": (
+                f"Defaults to {settings['thinking']} thinking with a "
+                f"{settings['timeout_seconds']}-second deadline."
+                + (
+                    " Uses the same thinking level as balanced with a longer "
+                    "deadline, not higher reasoning."
+                    if name == "deep"
+                    else ""
+                )
+            ),
+        }
+        for name, settings in PROFILES.items()
+    }
+
+
 class ExecutionOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    profile: Literal["quick", "balanced", "deep"] = "balanced"
+    profile: Literal["quick", "balanced", "deep"] = Field(
+        default="balanced",
+        description=(
+            "Profile defaults: "
+            + " ".join(
+                f"{name}: {settings['description']}"
+                for name, settings in profile_catalog().items()
+            )
+            + " These are default choices; overrides, effective settings, and "
+            "actual settings are reported separately."
+        ),
+    )
     model: str | None = Field(default=None, min_length=1, pattern=r"\S")
     thinking: ThinkingLevel | None = None
     timeout_seconds: int | None = Field(default=None, ge=1, le=7200, strict=True)

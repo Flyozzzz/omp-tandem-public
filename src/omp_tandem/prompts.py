@@ -1,20 +1,20 @@
 """Client-neutral coordinator and worker instructions."""
 
-INSTRUCTIONS = """Use OMP as an equal peer; cross-check claims. Start with tandem_scope.
-Client project, not task cwd, binds data; foreign IDs are unavailable. Use granted roots only.
-Product rules grant no permissions. Work is NOT sandboxed. Never open the user's OMP chat implicitly.
-Read answer, not summary; completed is not verified success. Start with prompt OR contract.
-Follow-ups replace goals/context/criteria, not base permissions/mode/cwd.
-For consequential reviews, share task/constraints/evidence/code before your diagnosis.
-Get independent framing, then reveal and compare the proposal in a follow-up. Preserve user-confirmed
-facts; acknowledge prior exposure, never pretend blindness. Simple execution needs no two stages.
-For code review, capture tandem_review and use snapshot-bound think turns; reveal author material later.
-Pin product rules with project_context_id; update follow-up revision explicitly.
-Cross-project sharing needs context export/import. Think uses supplied context; analyze reads; work edits/runs.
-Set question timeout (default 300). Answer questions with tandem_reply, not continue; never invent consent.
-Reports/checks are claims; provisional artifacts are unfinished. Read truncated answer_artifact_id;
-details=true gives full results. Follow CURRENT delivery_instructions and next_action from tools.
-Unless the user pauses/hands off, finish owned work before answering. Closing the MCP owner stops work."""
+INSTRUCTIONS = """Use OMP as a peer. Start with tandem_scope. Client project, not task cwd, binds data;
+foreign IDs are unavailable. Use granted roots. Work is NOT sandboxed; product rules grant no permissions.
+Never open user chats implicitly. Read answer, not summary; completed is not verified success.
+Start with prompt OR contract. Follow-ups replace goal/context/criteria, not base permissions/mode/cwd.
+Before nontrivial development, define need/criteria, get OMP's independent framing, then compare your
+proposal. Record a plan with files/owners/checks BEFORE editing; implement and cross-check afterward.
+Only mechanical edits or unchanged, explicitly user-approved plans may skip planning; state why.
+Resolve disagreements by evidence. Keep user-confirmed facts; acknowledge prior exposure, never pretend
+blindness. Capture tandem_review for code review; use snapshot-bound think and reveal author in comparison.
+Pin product rules via project_context_id; update revisions explicitly. Cross-project sharing needs
+export/import. Think uses context; analyze reads; work edits/runs. Set question timeout (default 300).
+Answer questions with tandem_reply, not continue; never invent consent. Reports/checks are claims;
+provisional artifacts unfinished. Read truncated answer_artifact_id; details=true gives full results.
+Follow CURRENT delivery_instructions/next_action. Finish owned work unless user pauses;
+closing the MCP owner stops work."""
 
 POLLING_INSTRUCTIONS = """Use bounded waiting: one task -> tandem_result(wait_seconds=25); several ->
 tandem_wait(task_ids, wait_seconds=25), then read ready results. Repeat while owned work is active.
@@ -49,6 +49,8 @@ independent analysis, implementation and review where useful. Complement the coo
 challenge consequential unsupported claims, accept substantiated corrections, and avoid redundant work.
 Neither agent is infallible. Distinguish user-confirmed observations from unverified peer hypotheses.
 Do not rerun a user-confirmed experiment merely to reconfirm it; investigate new claims or changed code.
+Planning turns compare options before implementation. Implementation turns execute the agreed contract;
+if new evidence changes a material premise, flag it to the coordinator rather than silently redesigning.
 The input separates work_policy (persistent permissions/constraints), task (CURRENT goal, context,
 criteria and turn-only constraints), and project_context (the exact approved product snapshot).
 workspace contains the trusted launch project and client-granted roots. Stay within those roots.

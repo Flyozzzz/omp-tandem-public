@@ -17,12 +17,12 @@
 第二个智能体不应只是认可第一个智能体的工作。OMP Tandem 可以提供独立推理、比较替代方案、承担互不重叠的实现任务，并根据证据核对结论。
 
 - **真正的 OMP，自选提供商。** 使用官方 `omp_rpc` 和 `omp --mode rpc`，而不是替代性的直接 API 包装器。
-- **互补协作。** 涵盖咨询、设计、实现和审查，不仅是最后的测试。
+- **先规划再开发。** 对非机械开发先获取协作者的独立判断、明确共同计划，再实现与交叉检查；机械修改或未变的用户批准计划可简化。
 - **持久对话。** 保留基础约束，在同一对话中更新当前目标。
 - **隔离的知识。** 分离项目历史，可选用版本化产品规则，并显式共享上下文。
 - **诚实的结果。** 结构化结果、带期限的问题，以及可恢复的中间产物。
 - **可移植集成。** Claude Code 插件、面向 Codex 的 Agent Plugins 包，以及适用于其他宿主的本地 stdio MCP。
-- **3.1.0 快照审查。** [固定代码与证据，先独立判断再比较作者方案](docs/guide.zh-CN.md#snapshot-reviews)，并[追踪问题的确认与修复验证](docs/guide.zh-CN.md#finding-lifecycle)。
+- **可选择来源的快照审查。** [选择 worktree 或仅 staged，先独立判断再比较作者方案](docs/guide.zh-CN.md#snapshot-reviews)，并[追踪问题的确认与修复验证](docs/guide.zh-CN.md#finding-lifecycle)。
 - **可解释的执行。** [逐轮选择计算配置，分别查看实际模型、令牌与已知费用](docs/guide.zh-CN.md#execution-and-accounting)。
 - **可靠接收。** [可选看门狗与有界轮询](docs/guide.zh-CN.md#polling-channels-and-webhooks)、[结果处理凭据](docs/guide.zh-CN.md#result-receipts)和[当前客户端诊断](docs/guide.zh-CN.md#live-diagnostics)明确区分投递、处理与验证。
 
