@@ -1219,9 +1219,8 @@ class WorkStore:
             )
         return commit
 
-    def authorize(
-        self,
-        work_id,
+    @staticmethod
+    def preview_authorization(
         *,
         budget_seconds: int,
         max_launches: int,
@@ -1233,6 +1232,12 @@ class WorkStore:
         claude_model: str | None = None,
         omp_model: str | None = None,
     ) -> dict:
+        """Validate and describe a grant without storing anything.
+
+        Returns the grant fields the operator is about to activate plus the same
+        `preview` block that get/show render, so the ceiling, reserve policy and
+        real permissions can be inspected before any launch becomes possible.
+        """
         if allow_shell is None and allow_tests is None:
             allow_shell = False
         elif allow_shell is None:
@@ -1279,6 +1284,26 @@ class WorkStore:
                 "omp": "default" if omp_model is None else "explicit",
             },
         }
+        grant = {
+            "budget_seconds": budget_seconds,
+            "max_launches": max_launches,
+            "max_cost_usd": max_cost_usd,
+            "allow_work": allow_work,
+            "allow_shell": allow_shell,
+            "max_attempt_cost_usd": ceiling,
+            "attempt_cost_policy": policy,
+            **selection,
+        }
+        return {**grant, "preview": grant_preview(grant), "stored": False}
+
+    def authorize(self, work_id, **request) -> dict:
+        preview = self.preview_authorization(**request)
+        fields = {
+            key: value
+            for key, value in preview.items()
+            if key not in {"preview", "stored"}
+        }
+        budget_seconds = fields.pop("budget_seconds")
         source_commit = self._head()
         with self._transaction() as db:
             card = self._load(db, work_id)
@@ -1299,16 +1324,10 @@ class WorkStore:
                 "plan_revision": card["plan_revision"],
                 "authorized_at": now,
                 "deadline": now + budget_seconds,
-                "max_launches": max_launches,
                 "launches": 0,
-                "max_cost_usd": max_cost_usd,
                 "used_cost_usd": 0.0,
                 "unknown_cost": False,
-                "allow_work": allow_work,
-                "allow_shell": allow_shell,
-                "max_attempt_cost_usd": ceiling,
-                "attempt_cost_policy": policy,
-                **selection,
+                **fields,
                 "source_commit": source_commit,
                 "revoked_at": None,
             }

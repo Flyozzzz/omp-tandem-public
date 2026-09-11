@@ -949,3 +949,28 @@ class AttemptBudgetAndShellTests(WorkItemsTests):
         grant = self.view()["authorization"]
         self.assertIn("model_selection_error", grant)
         self.assertIn("preview", grant)
+
+    def test_preview_authorization_shows_policy_without_storing(self):
+        self.agreed()
+        preview = self.store.preview_authorization(
+            budget_seconds=60,
+            max_launches=8,
+            max_cost_usd=8.0,
+            allow_work=True,
+            allow_tests=True,
+        )
+        self.assertIs(preview["stored"], False)
+        self.assertEqual(preview["preview"]["max_attempt_cost_usd"], 4.0)
+        self.assertEqual(preview["preview"]["attempt_cost_policy"], "default_share")
+        self.assertIn("unreserved remainder", preview["preview"]["reserve_policy"])
+        self.assertIs(preview["preview"]["permissions"]["shell"], True)
+        self.assertIsNone(self.view()["authorization"])
+        with self.assertRaises(ValueError):
+            self.store.preview_authorization(
+                budget_seconds=60,
+                max_launches=1,
+                max_cost_usd=1.0,
+                allow_work=True,
+                allow_shell=True,
+                allow_tests=False,
+            )

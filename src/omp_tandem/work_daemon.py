@@ -57,6 +57,14 @@ def parser():
         ),
     )
     authorize.add_argument(
+        "--preview",
+        action="store_true",
+        help=(
+            "Validate and print the ceiling, reserve policy and permissions this "
+            "grant would activate, without storing anything"
+        ),
+    )
+    authorize.add_argument(
         "--allow-work",
         action="store_true",
         help="Permit edits in managed implementation worktrees",
@@ -247,17 +255,25 @@ def main(argv=None):
                         file=sys.stderr,
                         flush=True,
                     )
-                result = store.authorize(
-                    args.work_id,
-                    budget_seconds=args.budget_seconds,
-                    max_launches=args.max_launches,
-                    max_cost_usd=args.max_cost_usd,
-                    max_attempt_cost_usd=args.max_attempt_cost_usd,
-                    allow_work=args.allow_work,
-                    allow_shell=args.allow_shell or args.allow_tests,
-                    claude_model=args.claude_model,
-                    omp_model=args.model,
-                )
+                request = {
+                    "budget_seconds": args.budget_seconds,
+                    "max_launches": args.max_launches,
+                    "max_cost_usd": args.max_cost_usd,
+                    "max_attempt_cost_usd": args.max_attempt_cost_usd,
+                    "allow_work": args.allow_work,
+                    "allow_shell": args.allow_shell or args.allow_tests,
+                    "claude_model": args.claude_model,
+                    "omp_model": args.model,
+                }
+                if args.preview:
+                    # Nothing is written: the operator sees the exact ceiling,
+                    # reserve policy and permissions before activating a grant.
+                    result = {
+                        "work_id": args.work_id,
+                        **store.preview_authorization(**request),
+                    }
+                else:
+                    result = store.authorize(args.work_id, **request)
             elif args.command == "revoke":
                 result = store.revoke(args.work_id)
             elif args.command == "run":
