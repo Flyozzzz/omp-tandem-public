@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**版本：3.4.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**版本：3.5.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -359,6 +359,12 @@ Claude 插件提供轻量前置工具诊断，以及可选的独立看门狗：
 <a id="shared-work"></a>
 ## 共享任务与自主执行
 
+### 选择入口与项目边界
+
+审查待提交的索引快照用 `tandem_review_run`：只读，不修改或执行 shell。两个智能体共同开发用 `tandem_work`：共同计划、文件归属和不同参与者验收。[助手兼容性](helper-compatibility.md)记录 `delegation.available=false` 及五个未满足门槛：子工具继承父限制、项目替换 scout、任务级设置快照、父用量独立核算、每次 spawn 额外模型调用。未发布 C–F 阶段或助手节省费用的承诺。
+
+claim/submit 要求**绑定的项目根本身是已有 HEAD 提交的 Git 仓库**。从父目录启动可能出现 `Work execution requires a Git repository with an immutable HEAD commit`。请在正确仓库启动，或修正客户端的项目根绑定；任务 `cwd` 不会改变该边界。刻意新建的仓库需要先有初始提交才能执行。
+
 `tandem_work(request: WorkCommand, wait_seconds=0)` 是宿主和 OMP 共用的入口。它保存一张项目内持久任务卡：目标、版本化计划、双方共识、步骤依赖、领取记录、阻塞、不可变提交和独立验收。原有 `tandem_start`／`tandem_continue` 对话以及只读 `tandem_review_run` 保持不变；共享任务不是把一次审查变成后台实现。
 
 ### 先区分身份、共识与权限
@@ -499,7 +505,17 @@ CAS 冲突表示卡片已变化：重新读取、理解变化，再用新 `opera
 {"request":{"action":"claim","work_id":"WORK_ID","step_id":"parse","expected_revision":7,"operation_id":"csv-review-parse-001"}}
 ```
 
-在该审查会话中阅读**当前 `submission.commit` 的精确内容**，不要以另一个工作区的最新文件替代它。核对各项标准后，引用当前 `submission_id`：
+在该审查会话中阅读**当前 `submission.commit` 的精确内容**，不要以另一个工作区的最新文件替代。先保存完整独立报告，再至多开启一次可选比较，最后引用当前 `submission_id` 验收：
+
+```json
+{"request":{"action":"report","work_id":"WORK_ID","step_id":"parse","expected_revision":8,"operation_id":"csv-report-parse-001","submission_id":"SUBMISSION_ID","resolution":"success","note":"填写完整独立评估","evidence":["填写对此精确提交的真实独立证据"]}}
+```
+
+```json
+{"request":{"action":"compare","work_id":"WORK_ID","step_id":"parse","expected_revision":9,"operation_id":"csv-compare-parse-001","submission_id":"SUBMISSION_ID"}}
+```
+
+每次操作都重新读取当前 revision；示例数字不是可直接重放的序列。无需作者比较时省略 `compare`。
 
 ```json
 {
@@ -518,6 +534,10 @@ CAS 冲突表示卡片已变化：重新读取、理解变化，再用新 `opera
 
 需要修改时改用 `action: "reject"`，填写真实问题及证据，并使用新的操作 ID；作者不能自我验收。`format` 同理但双方角色相反；最后 `integrate` 的审查者还需核对全局标准。验收记录是带归属的**模型／人工声明**，存储层不会执行或认证检查；有提交、有共识、任务 `completed` 均不能替代真实的运行证据。
 
+新审查使用 `independent_first`。`report` 的 `resolution` 为 `success`、`partial` 或 `blocked`，报告不可改写；成功仅说明独立评估完整完成，不说明没有缺陷。只有成功报告才允许比较或验收；可依据独立证据直接拒绝或阻塞。作者说明、自由文本 evidence 和相关产物**直到 compare 开启才披露**，报告后仍然隐藏。
+
+受管 Claude/OMP 审查者通过服务器绑定的 reader 读取固定提交快照，不使用实时文件工具或任意 shell；需求及原始快照来源信息可见。手动发布门槛和服务器过滤不能消除交互客户端先前已见内容，也不是操作系统沙箱。Shell 授权会在**受管审查启动前**建立操作者阻塞：目前没有经过证明的阶段限定 shell。参与者不能解除该策略阻塞；操作者须凭证据明确允许无 shell 审查，并如实记录未执行检查，否则保持阻塞。不得悄悄删除必需检查。
+
 ### 阻塞、暂停与在线唤醒
 
 | 操作 | 当前版本与新操作 ID 之外的必要输入／作用 |
@@ -530,6 +550,8 @@ CAS 冲突表示卡片已变化：重新读取、理解变化，再用新 `opera
 | `list` | 无需 CAS，列出当前可信项目的任务 |
 
 普通阻塞被有证据地解除后，若没有不确定执行、任务未暂停且自主授权仍有效，控制器可继续选择就绪步骤；无需为了推进而重新发送通知。若 `block` 隔离了正在执行的尝试，则先走下文的操作者恢复流程。显式暂停具有粘性，计划确认、通知或重启控制器都不会自动撤销它。
+
+未解决阻塞的 ID、原始计划/步骤及历史跨 `propose` 保留；删除步骤后成为卡片级阻塞，阻止所有步骤执行或发布。双方可以确认纠正计划，但确认、重试、审查换阶段都不会解除阻塞。只有阻塞作者或操作者可凭证据解决，或用 `resolution="not_applicable"` 加 `note` 原因说明不再适用。解除卡片级阻塞时省略 `step_id`；被阻塞的工作不能 submit/accept。
 
 若当前执行者主动登记阻塞并以 `blocked` 正常结束，控制器会保留中间提交为 `checkpoint`、确认进程已退出并释放执行槽位。有证据地解除阻塞后，新尝试从该检查点继续已有改动，而非重新实现整个模块；检查点不等于验收。外部强制停止、丢失启动确认、未知费用或未确认的副作用仍需操作者恢复。
 
@@ -547,11 +569,22 @@ CAS 冲突表示卡片已变化：重新读取、理解变化，再用新 `opera
 
 ```sh
 python -m omp_tandem.work_daemon --project-root /absolute/project \
+  --claude-model sonnet --omp-model <provider/model> \
   authorize WORK_ID --budget-seconds 1800 --max-launches 8 \
-  --max-cost-usd 5 --allow-work
+  --max-cost-usd 5 --max-attempt-cost-usd 2.5 --allow-work --preview
 ```
 
-`--allow-work` 允许受管实现的写入；若用户还明确允许 shell 检查，则在这条授权命令末尾添加 `--allow-tests`。**它允许任意 shell 能力，不是只允许名为“测试”的安全命令。** 不授予 shell 时应记录未执行的验证，不能编造通过结果。已知费用、未知费用和每次启动保留的费用额度用于调度；美元上限是估算／软上限，不保证提供商账单绝不超额。用量未知会暂停任务；预算、启动次数或期限耗尽不会自动追加授权。
+`authorize --preview` 校验并打印 `stored=false`，不保存授权，也不证明任务已经就绪。先检查输出；操作者明确同意后，去掉 `--preview` 重复执行才激活授权。`--allow-work` 允许实现写入；`--allow-shell` 允许任意 shell（含网络和进程能力），不是测试沙箱。`--allow-tests` 是已弃用的同权限别名，并输出警告。不授予 shell 时应记录未执行检查，不能编造通过结果。
+
+`--claude-model` 默认 `sonnet`，`--omp-model` 是 `--model` 的明确别名；两者放在 `authorize` 前。模型选择固定在授权中，之后的 `run`/`start` 不能覆盖。请求/默认选择及其来源与实际观测模型身份分开，不借用交互会话设置。
+
+`--max-attempt-cost-usd` 默认总预算的一半，与 `--max-launches` 无关；显式值不超过总预算。每次启动原子预留 `min(单次上限, 总预算 − 已知费用 − 活跃预留)`；并发就绪步骤按启动顺序分享未预留余额，不保证平分。未知用量停止新启动。授权及 `show` 展示 `max_attempt_cost_usd`、`attempt_cost_policy`、`preview.reserve_policy` 和 `preview.permissions`（`read`、`edit_write`、`shell`、进程不受限的 `network`、`os_sandbox=false`）。美元限额是估算软限制，不是账单硬上限；额度用完不会自动扩权。
+
+#### 迁移与回滚限制
+
+旧授权保留历史 `max_cost_usd / max_launches` 单次上限（`legacy_launch_share`）和 `allow_tests` 解码，不扩大权限或改写活跃预留。旧审查标为 `legacy_disclosure`，不追认独立性；含糊的旧 OMP 模型选择需要显式重新授权。阻塞来源、费用和 recovery 保留；读取/迁移不会重启工作，不确定执行须先核查恢复。
+
+旧项目导入只复制，不删除源数据。没有自动降级、撤销外部副作用或安全重放保证。手动备份/恢复前停止所有写状态的客户端和控制器，按自己的备份程序保留完整状态及 worktree；不能只复制活跃 SQLite 文件，也不能假设恢复数据库会取消外部进程。
 
 选择前台运行，或显式脱离客户端运行；二者是替代方式，不要重复启动：
 

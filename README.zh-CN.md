@@ -87,6 +87,16 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 
 `tandem_work` 是宿主与 OMP 共用的持久任务卡，不是普通对话或一次性审查的替代品。`claim` 只领取工作，不启动模型、不编辑文件；手动提交必须引用真实的完整 Git 提交哈希及证据。若要在关闭客户端后继续工作，需要用户另行批准并执行操作者 CLI 的有界授权与 `run`／`start`。在线唤醒通知不会启动已退出的客户端，机器关机时不会执行。完整的 JSON、授权、停止、异常恢复和显式应用命令见[共享任务指南](docs/guide.zh-CN.md#shared-work)。
 
+## 3.5.0 的两个入口
+
+- **已准备的变更：** 使用 `tandem_review_run` 和 `source="staged"` 审查待提交的索引快照；只读，不实现修改或运行测试。
+- **共同开发：** 使用 `tandem_work` 保存两个智能体的计划、文件归属、领取、真实提交和交叉验收。claim/submit 要求**绑定的项目根本身是已有 HEAD 提交的 Git 仓库**。从父目录启动可能出现 `Work execution requires a Git repository with an immutable HEAD commit`；任务 `cwd` 不能修复启动边界。
+- **操作者授权：** 先查看 `authorize --preview`。`--claude-model`（默认 `sonnet`）和 `--omp-model`（`--model` 的别名）放在 `authorize` 前；`--max-attempt-cost-usd`、`--allow-shell` 和已弃用的 `--allow-tests` 放在其后。Shell 是任意执行能力，不是测试沙箱。授权的 `preview.permissions` 和预留策略展示权限及单次上限（默认总预算的一半，与启动次数无关）；固定的模型选择不等于已观测到实际模型身份。
+- **先独立审查：** `report` → 至多一次可选 `compare` → `accept`/`reject`。作者解释在独立报告完成后仍隐藏，直到开启比较。受管审查者只能读取固定提交快照；授予 shell 会在**审查启动前**产生操作者阻塞，而不会悄悄绕过独立性。报告成功不等于验收。
+- **迁移与限制：** 未解决的阻塞跨 `propose` 保留；删除步骤后转为卡片级阻塞，只有阻塞作者或操作者才能凭证据解除。旧授权保留“总预算 / `max_launches`”的单次上限和 `allow_tests` 解码；旧审查标为 `legacy_disclosure`，不追认独立性。迁移不会重启执行；停止、恢复和显式 apply 仍是不同操作。
+
+[命令与迁移详情](docs/guide.zh-CN.md#shared-work)。[助手兼容性](docs/helper-compatibility.md)记录了**五个未满足的门槛**：子工具继承父限制、项目替换 scout、任务级设置快照、父用量独立核算、每次 spawn 的额外模型调用。助手保持禁用（`delegation.available=false`）；未发布 C–F 阶段或助手节省费用的承诺。
+
 ## 工作原理
 
 ```mermaid

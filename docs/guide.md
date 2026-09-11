@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Version: 3.4.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Version: 3.5.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -388,6 +388,12 @@ The scenario never edits files, executes supplied test commands, approves permis
 <a id="shared-tasks"></a>
 ## Shared tasks and autonomous execution
 
+### Choose the entry path
+
+Use `tandem_review_run` to review a prepared commit's staged/index snapshot without edits or shell. Use `tandem_work` to run one shared development task with two agents, agreed ownership and distinct acceptance. Neither path enables production helpers: [the compatibility map](helper-compatibility.md) records `delegation.available=false` and five unsatisfied gates (child-tool restriction inheritance, project scout replacement, task-wide settings snapshots, exclusive parent usage and extra model calls per spawn). Stages C–F and helper savings are not released.
+
+For shared claim/submit, the **bound project root itself must be a Git repository with an immutable HEAD commit**. A session launched from a parent directory may fail with `Work execution requires a Git repository with an immutable HEAD commit`. Open the correct repository or correct the client's project-root binding; task `cwd` cannot change that boundary. An intentionally new repository needs its initial commit before execution.
+
 `tandem_work` maintains a project-scoped task independently of individual conversations and native turns. Its `get` result includes the agreed plan, versioned checklist, roles, dependencies, blockers, submissions, acceptance evidence, authorization summary and a `markdown` rendering of that same state. SQLite is authoritative; two agents do not overwrite a shared Markdown file.
 
 The two participant seats are `claude` and `omp`. The host MCP seat defaults to `claude`; an operator configuring a second peer client can set `--work-participant omp`. Native OMP host tools use `omp`. These are attributed participant seats, not cryptographic model-identity claims. Managed workers instead receive an attempt-bound capability: they cannot choose their identity or act on unrelated assignments. Capabilities and provider configuration must never be published.
@@ -465,9 +471,17 @@ The other participant uses **its own seat** and a freshly read `revision`; a cal
 
 The assigned participant uses `claim` with `work_id`, `step_id`, current revision and operation ID. The claim is atomic with dependency/role checks and returns an attempt capability; the current MCP or native-tool session retains it for subsequent step operations. A claim does not launch a model, authorize shell, or edit the project.
 
-Manual implementation happens under the host's existing permissions. Submit an **already committed, full Git hash** through `submit`, with `commit`, `note` and nonempty `evidence`. The bridge verifies ancestry and exact declared changed-file ownership before retaining the immutable result; it does not run tests because their names appear in evidence. A different participant claims the review and uses `accept` or `reject` with the exact `submission_id`, current revision, note and evidence. Acceptance is an attributed assessment of that output and plan, not an exit-code inference or guarantee of correctness. Final acceptance also attests the task's global criteria.
+Manual implementation happens under the host's existing permissions. Submit an **already committed, full Git hash** through `submit`, with `commit`, `note` and nonempty `evidence`. The bridge verifies ancestry and exact declared changed-file ownership before retaining the immutable result; it does not run tests because their names appear in evidence. A different participant claims review, records `report`, optionally opens `compare` once, then uses `accept` or `reject` with the exact `submission_id`, current revision, note and evidence. Acceptance is an attributed assessment of that output and plan, not an exit-code inference or guarantee of correctness. Final acceptance also attests the task's global criteria.
 
 Manual claim lifetime is bounded; reconnecting does not silently take it over. A still-active claim can be recovered by its **exact original claim operation**, including original revision/operation ID. Otherwise inspect and reconcile it explicitly. Never paste capabilities into project documentation or use another participant's token.
+
+#### Independent report before author comparison
+
+New review attempts use `independent_first`. After the reviewer claim, submit `action="report"` with the exact `submission_id`, `resolution="success"` (or `"partial"`/`"blocked"`), the complete independent assessment in `note`, and nonempty `evidence`. Use fresh revision/operation IDs as for other mutations. A complete successful report means the assessment finished, not that the code has no defects. Only a successful report permits acceptance or the optional `action="compare"`; comparison opens at most once. Defects can justify rejection/blocking without author comparison.
+
+Author notes, free-text evidence and related artifacts remain author interpretation, withheld **until compare opens**, including after recording the report. Managed Claude and OMP reviewers use a server-bound reader for the pinned submission commit, not live filesystem tools or arbitrary shell. Requirements and raw snapshot provenance remain available. Manual publication gates and server-channel filtering do not erase earlier disclosure in an interactive client or create an OS sandbox.
+
+A grant with shell permission creates an operator-owned policy blocker **before a managed review launches**, because no stage-confined shell mechanism is available. Participants cannot waive this blocker. An operator must explicitly resolve it with evidence for a no-shell review (and honestly record unrun checks); otherwise review stays blocked. Do not silently drop required checks or claim unrestricted shell is independent-first.
 
 ### Explicitly authorize unattended work
 
@@ -475,13 +489,18 @@ Autonomous authority is **not an MCP operation**. The operator runs these comman
 
 ```sh
 python -m omp_tandem.work_daemon --project-root /absolute/project \
+  --claude-model sonnet --omp-model <provider/model> \
   authorize <work-id> --budget-seconds 1800 --max-launches 12 \
-  --max-cost-usd 6 --allow-work
+  --max-cost-usd 6 --max-attempt-cost-usd 3 --allow-work --preview
 ```
 
 The `python` below must come from an environment with this Tandem version installed. In a source checkout use `uv run --frozen python ...`; from another directory use `uv run --project /absolute/path/to/omp-tandem --frozen python ...`. A plugin's private runtime is not a global Python installation. Its `server.py --prepare` command reports the prepared interpreter in the `python` field; do not guess cache paths.
 
-This pins the source commit, plan revision, deadline, launch count and reported-cost budget. `--allow-work` permits managed implementation edits; **only `--allow-tests` additionally exposes shell**, which permits arbitrary code execution and is **not an OS sandbox**. No permission-bypass flag is added. There is no default paid/background launch, global service installation or account switch.
+`--preview` validates and prints the proposed grant with `stored=false`; it does not activate authorization or prove the task is ready. Inspect it first, then only with explicit operator approval repeat without `--preview`. The active grant pins source commit, plan revision, deadline, launch count, model selections and reported-cost budget. `--allow-work` permits managed implementation edits; `--allow-shell` permits arbitrary shell (including network/process effects), **not an OS sandbox**. `--allow-tests` is a deprecated alias with identical permission and a warning. No permission-bypass flag, default background launch, service installation or account switch is added.
+
+`--claude-model` defaults to `sonnet`; `--omp-model` is the unambiguous synonym for `--model`. Both are authorization-only options before the subcommand; later `run`/`start` cannot override the grant. Requested/default selections and provenance are separate from observed actual model identity; no interactive chat settings are borrowed.
+
+`--max-attempt-cost-usd` defaults to half `--max-cost-usd`, independent of `--max-launches`; an explicit ceiling is clamped to the total. Each launch atomically reserves `min(attempt ceiling, total − known spend − active reserves)`. Concurrent ready steps share the unreserved remainder in launch order, not a guaranteed equal split. Unknown reported cost stops new launches. The grant and `show` expose `max_attempt_cost_usd`, `attempt_cost_policy`, and `preview` with `reserve_policy` and `permissions` (`read`, `edit_write`, `shell`, unrestricted process `network`, `os_sandbox=false`). These estimates are not hard invoice caps.
 
 ```sh
 # Foreground, supervised and interruptible:
@@ -498,7 +517,7 @@ python -m omp_tandem.work_daemon --project-root /absolute/project stop
 python -m omp_tandem.work_daemon --project-root /absolute/project revoke <work-id>
 ```
 
-Place an explicit `--state-dir` before the subcommand if the MCP client uses a nondefault state base; it must identify the same task store. `--omp`, `--claude` and `--model` are operator executable/OMP-model overrides, also before the subcommand. `--once` exits when no currently runnable/active work remains; omit it to wait for resolvable blockers within the grant deadline.
+Place an explicit `--state-dir` before the subcommand if the MCP client uses a nondefault state base; it must identify the same task store. Executable options `--omp` and `--claude` also go before the subcommand. Model options are accepted only with `authorize`. `--once` exits when no currently runnable/active work remains; omit it to wait for resolvable blockers within the grant deadline.
 
 The controller holds one kernel project lease, reserves ready assignments once, and launches dedicated attempts in separate detached Git worktrees. Claude uses a new bounded headless session with a restricted task-only MCP connection; OMP uses the existing native RPC runtime and shared host tool. Neither adapter attaches to the user's open terminal, selects the newest conversation or resumes possibly running work. Independent steps in the same task can run concurrently; the default is two, maximum four. Monetary envelopes are reserved before launch, so parallel workers cannot each treat the whole remaining budget as their own.
 
@@ -509,6 +528,14 @@ Each worker must acknowledge its assignment through `heartbeat` before work. A l
 ### Blockers, wake and recovery
 
 `block` records a note and a specific resolution condition; `unblock` requires the blocker ID, actual resolution and evidence. Dependencies open only after current prerequisite submissions are accepted—not merely when a native task exits. Cooperative blocked work can finish cleanly, retain its partial source checkpoint, release execution capacity and continue from that checkpoint after an evidenced unblock under the same still-valid grant. A checkpoint is not an accepted submission. Unknown termination, failed dispatch acknowledgement or possible unfinished external effects instead require reconciliation; they never become automatic retries.
+
+Unresolved blockers retain identity, original plan/step and resolution history across `propose`. Removing their step moves them to card scope, where they block all execution/publication. Both participants may agree to a corrective plan while blockers remain; agreement, retries and review-stage changes do not resolve them. Only the blocker author or operator may record evidence-backed resolution or `resolution="not_applicable"` with a reason in `note`. For a card-level blocker omit `step_id` when unblocking. Blocked work cannot be submitted or accepted.
+
+#### Migration and rollback limits
+
+Legacy grants retain the historical `max_cost_usd / max_launches` attempt ceiling (`legacy_launch_share`) and `allow_tests` decoding; migration does not increase shell permission or rewrite active reservations. Legacy review attempts are labelled `legacy_disclosure`, not retroactively independent-first. Ambiguous legacy OMP model selection needs explicit reauthorization. Existing blocker provenance, recovery and spent budget remain; reading/migrating state never authorizes a restart. Inspect and reconcile uncertain execution before reauthorization.
+
+Legacy project import is copy-only and does not delete its source. There is no automatic downgrade, rollback of external effects or replay guarantee. Before a manual backup/restore, stop all clients/controllers that write the state and preserve the complete state and retained workspaces using your backup procedure; do not copy a live SQLite file alone or assume restoring it cancels external processes.
 
 Attached clients receive best-effort shared-work change hints through an already functioning channel. Read current state on wake, or use bounded waiting:
 

@@ -85,6 +85,16 @@ For development, scale planning to uncertainty: a known local fix needs a brief 
 
 `tandem_work` exposes the same durable card to both participants, including a readable Markdown view. Work survives a conversation ending; **a saved task is not a running agent**. Existing-client work is manual; opt-in unattended execution uses a separate bounded controller, dedicated Claude/OMP attempts and isolated Git worktrees. Accepted results are not silently merged into your current branch. [Shared-task workflow and operator commands](docs/guide.md#shared-tasks).
 
+## Two entry paths in 3.5.0
+
+- **Prepared change:** use `tandem_review_run` with `source="staged"` for the intended commit's index snapshot; it is a read-only review, not implementation or test execution.
+- **Shared development:** use `tandem_work` for a two-agent plan, file ownership, claims, committed submissions and distinct review. The bound **project root must be a Git repository with a HEAD commit** for claim/submit; launching from its parent folder can produce `Work execution requires a Git repository with an immutable HEAD commit`. A task `cwd` cannot repair the launch boundary.
+- **Operator grant:** inspect `authorize --preview` before activating. `--claude-model` (default `sonnet`) and `--omp-model` (alias of `--model`) go before `authorize`; `--max-attempt-cost-usd`, `--allow-shell` and deprecated `--allow-tests` go after it. Shell means arbitrary execution, not a test sandbox. The grant's `preview.permissions` and reserve policy disclose the actual permissions and default attempt ceiling (half the total budget, independent of launch count); model selections are pinned, not proof of observed model identity.
+- **Independent-first review:** `report` → optional single `compare` → `accept`/`reject`. Author interpretation stays withheld through the independent report until comparison opens. Managed reviewers read only the pinned commit snapshot; a shell-granted review creates an operator blocker **before launch**, not a silently unrestricted review. A successful report is not acceptance.
+- **Migration and limits:** unresolved blockers survive `propose`; removed steps leave card-level blockers. Only the blocker author/operator can resolve them with evidence. Legacy grants retain total-budget/`max_launches` attempt ceilings and `allow_tests` decoding; legacy review attempts are labelled `legacy_disclosure`, not retrospectively independent. No migration restarts work. Acceptance does not apply code: stop/recovery and explicit operator apply remain separate.
+
+[Operator commands and migration details](docs/guide.md#shared-tasks). [Helper compatibility](docs/helper-compatibility.md) records **five unsatisfied gates**: child-tool restriction inheritance, project scout replacement, task-wide settings snapshots, exclusive parent usage, and extra model calls per spawn. Helpers remain disabled (`delegation.available=false`); stages C–F and helper savings are not released.
+
 ## How it works
 
 ```mermaid

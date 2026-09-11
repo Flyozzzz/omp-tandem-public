@@ -3,8 +3,8 @@
 The pinned combination is **official OMP 18.1.13** with the Python RPC SDK
 at **`daf07999c2fee9b22edc7bf8fea1fb6272e0df5e`**. The checked-in
 [local verification report](compatibility-result.json) passed on Darwin arm64 /
-Python 3.13 with the Tandem source at `dbb111f` (version field 3.4.0); temporary
-paths are redacted. This is evidence for that exact combination, not a
+Python 3.13 with the integrated 3.5.0 source (accepted A–B chain plus G0);
+temporary paths are redacted. This is evidence for that exact combination, not a
 supported-version range or proof of every provider. The report also contains the
 stage-G0 helper (native `task` subagent) probes described in
 [helper-compatibility.md](helper-compatibility.md); their capability gates are
@@ -113,6 +113,13 @@ CI prints this bounded report directly in the step log (also on failure) and
 writes the JSON to the runner temporary directory. No additional upload-action
 pin is needed. These timings and synthetic token counts are compatibility
 fixture evidence, **not model-performance or cost benchmark results**.
+
+For a release report refresh, keep only a completed passing run; never replace
+this evidence with a failed or partial result. Preserve versions, digests,
+observations and unsupported verdicts. Redact the generated
+`tandem-real-omp-*` temporary root as `<tmp>`, including truncated path excerpts.
+Do not refresh merely to change durations or temporary paths. The 3.5.0 refresh
+records changed installed/source versions with the same helper capability verdicts.
 
 ## Pin sources
 
