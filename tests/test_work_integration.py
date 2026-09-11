@@ -17,8 +17,10 @@ from pydantic_core import to_jsonable_python
 
 from omp_tandem.api import build_server
 from omp_tandem.bridge import Bridge
+from omp_tandem.work_adapters import OmpWorkAdapter
 from omp_tandem.work_notifications import WorkNotifications
 from omp_tandem.work_supervisor import WorkSupervisor
+from omp_tandem.work_workspace import WorkWorkspace
 
 
 class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -95,7 +97,7 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def create(self):
+    async def create(self, owner="claude"):
         view = await self.call(
             self.claude,
             {
@@ -113,8 +115,8 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
                             "id": "change",
                             "title": "Change module",
                             "goal": "Update module",
-                            "owner": "claude",
-                            "reviewer": "omp",
+                            "owner": owner,
+                            "reviewer": "omp" if owner == "claude" else "claude",
                             "owned_files": ["module.txt"],
                             "depends_on": [],
                             "acceptance": ["Module contains the agreed output."],
@@ -127,6 +129,148 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.mutate(self.claude, identifier, "agree")
         await self.mutate(self.omp, identifier, "agree")
         return identifier
+
+    async def daemon(self, *args):
+        return await asyncio.to_thread(
+            subprocess.run,
+            [
+                sys.executable,
+                "-I",
+                "-m",
+                "omp_tandem.work_daemon",
+                "--project-root",
+                str(self.root),
+                "--state-dir",
+                str(self.state),
+                *args,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    async def test_cli_authorize_show_and_model_alias_pin_selections(self):
+        for alias in ("--model", "--omp-model"):
+            identifier = await self.create()
+            result = await self.daemon(
+                "--claude-model",
+                "claude-opus-4-6",
+                alias,
+                "provider/authorized",
+                "authorize",
+                identifier,
+                "--budget-seconds",
+                "60",
+                "--max-launches",
+                "2",
+                "--max-cost-usd",
+                "1",
+                "--allow-work",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            grant = json.loads(result.stdout)["authorization"]
+            self.assertEqual(grant["claude_model"], "claude-opus-4-6")
+            self.assertEqual(grant["omp_model"], "provider/authorized")
+            self.assertEqual(
+                grant["model_provenance"], {"claude": "explicit", "omp": "explicit"}
+            )
+            shown = await self.daemon("show", identifier)
+            self.assertEqual(shown.returncode, 0, shown.stderr)
+            self.assertEqual(json.loads(shown.stdout)["authorization"], grant)
+            for command in ("run", "start"):
+                rejected = await self.daemon(
+                    "--claude-model",
+                    "sonnet",
+                    alias,
+                    "other/model",
+                    command,
+                    "--work-id",
+                    identifier,
+                    "--once",
+                )
+                self.assertNotEqual(rejected.returncode, 0)
+            saved = await self.call(
+                self.claude, {"action": "get", "work_id": identifier}
+            )
+            self.assertEqual(saved["authorization"], grant)
+            self.assertIsNone(saved["steps"][0]["attempt"])
+
+    async def test_cli_default_selection_and_invalid_identifiers(self):
+        identifier = await self.create()
+        arguments = (
+            "authorize",
+            identifier,
+            "--budget-seconds",
+            "60",
+            "--max-launches",
+            "2",
+            "--max-cost-usd",
+            "1",
+        )
+        for flag in ("--claude-model", "--omp-model"):
+            rejected = await self.daemon(flag, "", *arguments)
+            self.assertNotEqual(rejected.returncode, 0)
+            saved = await self.call(
+                self.claude, {"action": "get", "work_id": identifier}
+            )
+            self.assertIsNone(saved["authorization"])
+        result = await self.daemon(*arguments)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        grant = json.loads(result.stdout)["authorization"]
+        self.assertEqual(grant["claude_model"], "sonnet")
+        self.assertIsNone(grant["omp_model"])
+        self.assertEqual(
+            grant["model_provenance"], {"claude": "default", "omp": "default"}
+        )
+        shown = await self.daemon("show")
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertEqual(json.loads(shown.stdout)["items"][0]["authorization"], grant)
+
+    async def test_native_launch_resolves_authorized_model_without_process_inheritance(
+        self,
+    ):
+        for selected in ("provider/authorized", None):
+            identifier = await self.create(owner="omp")
+            store = self.omp_bridge.work_items
+            view = store.authorize(
+                identifier,
+                budget_seconds=60,
+                max_launches=2,
+                max_cost_usd=1,
+                allow_work=True,
+                allow_tests=False,
+                omp_model=selected,
+            )
+            attempt = store.reserve(
+                identifier,
+                "change",
+                actor="omp",
+                kind="implement",
+                owner_id=str(uuid4()),
+            )
+            workspace = WorkWorkspace(self.omp_bridge.scope).prepare(
+                attempt, view["plan"], []
+            )
+            token_file = self.omp_bridge.scope.directory / (
+                "token-" + attempt["attempt_id"]
+            )
+            token_file.write_text(attempt["token"])
+            token_file.chmod(0o600)
+            # Explicit grants override process defaults; configured-default grants
+            # use a model-less daemon bridge, as make_bridge constructs it.
+            self.omp_bridge.runtime.model = "process/other" if selected else ""
+            adapter = OmpWorkAdapter(self.omp_bridge)
+            self.addCleanup(adapter.close)
+            # Stop at the provider boundary; admission and ExecutionOptions resolution are real.
+            with patch.object(self.omp_bridge.runtime.worker, "execute"):
+                handle = adapter.start(
+                    attempt, view["plan"], workspace, token_file=token_file
+                )
+                adapter._join(handle)
+            launch = json.loads((handle.directory / "launch.json").read_text())
+            self.assertEqual(launch["execution"]["effective"]["model"], selected)
+            self.assertIsNone(launch["execution"]["actual"]["model"])
+            self.assertEqual(launch["model_selection"]["omp_model"], selected)
 
     async def test_rejected_create_can_be_corrected_without_partial_work(self):
         steps = [

@@ -196,6 +196,72 @@ class WorkItemsTests(unittest.TestCase):
             cost_usd=0.25,
         )
 
+    def test_authorized_models_survive_reopen_and_cannot_change_active_attempt(self):
+        self.agreed()
+        grant = self.authorize(
+            claude_model="claude-opus-4-6", omp_model="provider/authorized"
+        )["authorization"]
+        self.store = WorkStore(self.store.database, self.scope)
+        grant["claude_model"] = "mutated-response"
+        attempt = self.reserve()
+        self.assertEqual(attempt["claude_model"], "claude-opus-4-6")
+        self.assertEqual(attempt["omp_model"], "provider/authorized")
+        self.assertEqual(
+            attempt["model_provenance"], {"claude": "explicit", "omp": "explicit"}
+        )
+        with self.assertRaises(ValueError):
+            self.authorize(claude_model="sonnet", omp_model="other/model")
+        saved = self.store.attempt(attempt["attempt_id"])
+        self.assertEqual(saved["omp_model"], "provider/authorized")
+        self.assertEqual(
+            self.view()["authorization"]["claude_model"], "claude-opus-4-6"
+        )
+
+    def test_invalid_model_does_not_create_authorization(self):
+        self.agreed()
+        for key in ("claude_model", "omp_model"):
+            for value in ("", " ", "model\nother", "--flag", 12):
+                with self.subTest(key=key, value=value):
+                    with self.assertRaises(ValueError):
+                        self.authorize(**{key: value})
+                    self.assertIsNone(self.view()["authorization"])
+
+    def test_legacy_grant_is_labelled_without_rewriting_or_omp_launch(self):
+        self.agreed(parallel=True)
+        self.authorize()
+        with sqlite3.connect(self.store.database) as db:
+            card = json.loads(
+                db.execute(
+                    "SELECT card FROM work_cards WHERE work_id=?", (self.work_id,)
+                ).fetchone()[0]
+            )
+            for key in ("claude_model", "omp_model", "model_provenance"):
+                card["authorization"].pop(key)
+            db.execute(
+                "UPDATE work_cards SET card=? WHERE work_id=?",
+                (json.dumps(card), self.work_id),
+            )
+        self.store = WorkStore(self.store.database, self.scope)
+        view = self.view()
+        self.assertEqual(
+            view["authorization"]["model_provenance"],
+            {"claude": "legacy_default", "omp": "legacy_unpinned"},
+        )
+        self.assertEqual(view["steps"][0]["state"], "ready")
+        with self.assertRaisesRegex(ValueError, "reauthorize"):
+            self.reserve()
+        self.assertEqual(self.view()["authorization"]["launches"], 0)
+        with sqlite3.connect(self.store.database) as db:
+            saved = json.loads(
+                db.execute(
+                    "SELECT card FROM work_cards WHERE work_id=?", (self.work_id,)
+                ).fetchone()[0]
+            )
+        self.assertNotIn("claude_model", saved["authorization"])
+        attempt = self.reserve("frontend", actor="claude")
+        self.assertEqual(attempt["claude_model"], "sonnet")
+        self.assertEqual(attempt["model_provenance"]["claude"], "legacy_default")
+
     def test_two_claims_have_one_winner_and_no_public_credentials(self):
         self.agreed()
         revision = self.view()["revision"]

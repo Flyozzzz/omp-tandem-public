@@ -33,6 +33,63 @@ _Identifier = Annotated[
 _Actor = Literal["claude", "omp"]
 _ACTIVE = {"reserved", "running"}
 
+# Historical managed Claude policy, now visible in CLI help and authorization.
+CLAUDE_DEFAULT_MODEL = "sonnet"
+
+
+def validate_model(model: str) -> str:
+    """Validate a CLI model identifier without inventing a provider catalogue."""
+    if (
+        not isinstance(model, str)
+        or not model
+        or model.startswith("-")
+        or any(
+            character.isspace() or not character.isprintable() for character in model
+        )
+    ):
+        raise ValueError(
+            "Model must be a nonempty identifier without whitespace or control characters"
+        )
+    return model
+
+
+def model_selection(record: dict) -> dict:
+    """Decode saved policy; only wholly pre-selection records are legacy grants."""
+    keys = {"claude_model", "omp_model", "model_provenance"}
+    if not keys.intersection(record):
+        return {
+            "claude_model": CLAUDE_DEFAULT_MODEL,
+            "omp_model": None,
+            "model_provenance": {
+                "claude": "legacy_default",
+                "omp": "legacy_unpinned",
+            },
+        }
+    if not keys.issubset(record):
+        raise ValueError(
+            "Incomplete authorized model selection; reauthorize before launch"
+        )
+    claude_model = validate_model(record["claude_model"])
+    omp_model = record["omp_model"]
+    if omp_model is not None:
+        validate_model(omp_model)
+    provenance = record["model_provenance"]
+    if (
+        not isinstance(provenance, dict)
+        or provenance.get("claude") not in {"explicit", "default", "legacy_default"}
+        or provenance.get("omp") not in {"explicit", "default", "legacy_unpinned"}
+        or (provenance["claude"] != "explicit" and claude_model != CLAUDE_DEFAULT_MODEL)
+        or (provenance["omp"] == "explicit") != (omp_model is not None)
+    ):
+        raise ValueError(
+            "Invalid authorized model provenance; reauthorize before launch"
+        )
+    return {
+        "claude_model": claude_model,
+        "omp_model": omp_model,
+        "model_provenance": dict(provenance),
+    }
+
 
 class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid", revalidate_instances="always")
@@ -428,6 +485,8 @@ class WorkStore:
 
     def _view(self, db, card):
         view = json.loads(_json(card))
+        if view["authorization"] is not None:
+            view["authorization"].update(model_selection(view["authorization"]))
         for step in view["steps"]:
             step["attempt"] = (
                 _public_attempt(self._attempt(db, step["attempt"]))
@@ -1119,6 +1178,8 @@ class WorkStore:
         max_cost_usd: float,
         allow_work: bool,
         allow_tests: bool,
+        claude_model: str | None = None,
+        omp_model: str | None = None,
     ) -> dict:
         if (
             type(budget_seconds) is not int
@@ -1134,6 +1195,16 @@ class WorkStore:
             raise ValueError(
                 "Authorization requires positive finite budgets and explicit boolean permissions"
             )
+        selection = {
+            "claude_model": CLAUDE_DEFAULT_MODEL
+            if claude_model is None
+            else validate_model(claude_model),
+            "omp_model": None if omp_model is None else validate_model(omp_model),
+            "model_provenance": {
+                "claude": "default" if claude_model is None else "explicit",
+                "omp": "default" if omp_model is None else "explicit",
+            },
+        }
         source_commit = self._head()
         with self._transaction() as db:
             card = self._load(db, work_id)
@@ -1161,6 +1232,7 @@ class WorkStore:
                 "unknown_cost": False,
                 "allow_work": allow_work,
                 "allow_tests": allow_tests,
+                **selection,
                 "source_commit": source_commit,
                 "revoked_at": None,
             }
@@ -1270,6 +1342,7 @@ class WorkStore:
             raise WorkConflict("Step is not ready for this actor and attempt kind")
         grant = card["authorization"]
         envelope = 0.0
+        selection = {}
         if autonomous:
             if (
                 not grant
@@ -1278,6 +1351,14 @@ class WorkStore:
                 or grant["deadline"] <= time.time()
             ):
                 raise ValueError("Current operator authorization is required")
+            selection = model_selection(grant)
+            if (
+                actor == "omp"
+                and selection["model_provenance"]["omp"] == "legacy_unpinned"
+            ):
+                raise ValueError(
+                    "Legacy OMP model was not pinned; reauthorize before launch"
+                )
             if (
                 grant["unknown_cost"]
                 or grant["used_cost_usd"] >= grant["max_cost_usd"]
@@ -1331,6 +1412,7 @@ class WorkStore:
             "session_id": None,
             "allow_work": grant["allow_work"] if autonomous else False,
             "allow_tests": grant["allow_tests"] if autonomous else False,
+            **selection,
             "remaining_cost_usd": envelope,
             "reserved_cost_usd": envelope,
             "submission": step["submission"] if kind == "review" else None,

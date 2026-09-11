@@ -18,6 +18,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from .models import TaskOutcome
+from .work_items import model_selection
 
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 STARTUP_SECONDS = 45
@@ -169,6 +170,17 @@ class _Adapter:
             raise ValueError("Attempt belongs to the other adapter participant")
         if attempt["state"] != "reserved" or attempt.get("started_at") is not None:
             raise ValueError("Attempt has already launched; reconciliation is required")
+        selection = model_selection(attempt)
+        if self.actor == "omp":
+            if selection["model_provenance"]["omp"] == "legacy_unpinned":
+                raise ValueError(
+                    "Legacy OMP model was not pinned; reauthorize before launch"
+                )
+            if selection["omp_model"] is None and self.bridge.runtime.model:
+                raise ValueError(
+                    "Process-wide OMP override conflicts with the authorized configured default"
+                )
+        attempt.update(selection)
         deadline = attempt["deadline"]
         budget = attempt.get("remaining_cost_usd")
         if not _number(deadline) or deadline <= time.time():
@@ -261,6 +273,7 @@ class OmpWorkAdapter(_Adapter):
                 cwd=workspace["path"],
                 mode="work" if attempt["kind"] == "implement" else "analyze",
                 timeout_seconds=max(1, min(7200, int(handle.deadline - time.time()))),
+                execution={"model": attempt["omp_model"]},
                 contract={
                     "goal": step["goal"],
                     "context": prompt,
@@ -277,7 +290,10 @@ class OmpWorkAdapter(_Adapter):
             )
             handle.native_task_id = result["task_id"]
             handle.session_id = result["conversation_id"]
-            _private_file(handle.directory / "launch.json", json.dumps(result))
+            _private_file(
+                handle.directory / "launch.json",
+                json.dumps({**result, "model_selection": model_selection(attempt)}),
+            )
         except BaseException:
             # Binding is performed BEFORE NativeWorker runs; recover its identity
             # if the caller lost the acknowledgement after actual dispatch.
@@ -468,7 +484,7 @@ class ClaudeWorkAdapter(_Adapter):
             "--session-id",
             handle.session_id,
             "--model",
-            "sonnet",
+            attempt["claude_model"],
             "--max-budget-usd",
             str(handle.budget),
             "--json-schema",
@@ -480,7 +496,13 @@ class ClaudeWorkAdapter(_Adapter):
         ]
         _private_file(
             handle.directory / "launch.json",
-            json.dumps({"session_id": handle.session_id, "argv": argv}),
+            json.dumps(
+                {
+                    "session_id": handle.session_id,
+                    "argv": argv,
+                    "model_selection": model_selection(attempt),
+                }
+            ),
         )
         self.bridge.work_items.started(
             handle.attempt_id, workspace=workspace["path"], session_id=handle.session_id

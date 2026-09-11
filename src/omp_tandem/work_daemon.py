@@ -11,6 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .bridge import Bridge
+from .work_items import CLAUDE_DEFAULT_MODEL, validate_model
 from .work_supervisor import WorkSupervisor, private_json, supervisor_status
 from .work_workspace import WorkWorkspace
 from .workspace import resolve_scope
@@ -26,8 +27,16 @@ def parser():
     root.add_argument("--claude", default=shutil.which("claude") or "claude")
     root.add_argument(
         "--model",
+        "--omp-model",
         default=None,
-        help="OMP model override; otherwise use its configured provider",
+        type=validate_model,
+        help="OMP model override for authorize; default: OMP configured selection",
+    )
+    root.add_argument(
+        "--claude-model",
+        type=validate_model,
+        default=None,
+        help=f"Claude model for authorize (default: {CLAUDE_DEFAULT_MODEL}); not an observed model identity",
     )
     commands = root.add_subparsers(dest="command", required=True)
     authorize = commands.add_parser(
@@ -101,7 +110,7 @@ def make_bridge(args):
     return Bridge(
         args.state_dir,
         args.omp,
-        args.model,
+        None,  # Managed model selections belong to grants, never this process.
         project_root=args.project_root,
         channel_enabled=False,
         webhook_enabled=False,
@@ -131,8 +140,6 @@ def start_detached(args, scope):
         "--claude",
         args.claude,
     ]
-    if args.model:
-        command += ["--model", args.model]
     command += ["run", "--concurrency", str(args.concurrency)]
     if args.work_id:
         command += ["--work-id", args.work_id]
@@ -176,6 +183,12 @@ def start_detached(args, scope):
 def main(argv=None):
     arguments = parser()
     args = arguments.parse_args(argv)
+    if args.command != "authorize" and (
+        args.model is not None or args.claude_model is not None
+    ):
+        arguments.error(
+            "Model flags apply only to authorize; run/start use the saved grant"
+        )
     os.umask(0o077)
     scope = resolve_scope(args.state_dir, args.project_root)
     if args.command == "status":
@@ -217,6 +230,8 @@ def main(argv=None):
                     max_cost_usd=args.max_cost_usd,
                     allow_work=args.allow_work,
                     allow_tests=args.allow_tests,
+                    claude_model=args.claude_model,
+                    omp_model=args.model,
                 )
             elif args.command == "revoke":
                 result = store.revoke(args.work_id)

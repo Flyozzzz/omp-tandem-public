@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import threading
@@ -64,6 +65,9 @@ class WorkAdapterTests(unittest.TestCase):
             "remaining_cost_usd": 1.0,
             "allow_work": True,
             "allow_tests": False,
+            "claude_model": "claude-opus-4-6",
+            "omp_model": "provider/authorized-model",
+            "model_provenance": {"claude": "explicit", "omp": "explicit"},
         }
         self.store = AttemptStore(self.attempt)
         self.plan = {
@@ -143,6 +147,68 @@ class WorkAdapterTests(unittest.TestCase):
         self.assertNotIn(
             "private-attempt-secret", (handle.directory / "context.txt").read_text()
         )
+
+    def test_claude_launch_uses_trusted_selection_not_supplied_attempt(self):
+        adapter = self.adapter(
+            self.result_program(
+                "result['structured_output']['answer'] = sys.argv[sys.argv.index('--model') + 1]"
+            )
+        )
+        supplied = {**self.attempt, "claude_model": "untrusted-model"}
+        handle = adapter.start(
+            supplied, self.plan, self.workspace, token_file=self.token
+        )
+        self.attempt["heartbeat_at"] = time.time()
+        result = self.finish(adapter, handle)
+        self.assertEqual(result["answer"], "claude-opus-4-6")
+        selection = json.loads((handle.directory / "launch.json").read_text())[
+            "model_selection"
+        ]
+        self.assertEqual(selection["model_provenance"]["claude"], "explicit")
+
+    def test_legacy_claude_launch_labels_historical_default(self):
+        for key in ("claude_model", "omp_model", "model_provenance"):
+            self.attempt.pop(key)
+        adapter = self.adapter(
+            self.result_program(
+                "result['structured_output']['answer'] = sys.argv[sys.argv.index('--model') + 1]"
+            )
+        )
+        handle = self.launch(adapter)
+        self.assertEqual(self.finish(adapter, handle)["answer"], "sonnet")
+        selection = json.loads((handle.directory / "launch.json").read_text())[
+            "model_selection"
+        ]
+        self.assertEqual(selection["model_provenance"]["claude"], "legacy_default")
+        self.assertNotIn("claude_model", self.attempt)
+
+    def test_incomplete_or_invalid_selection_never_launches(self):
+        adapter = self.adapter(self.result_program())
+        original = dict(self.attempt)
+        for value in (None, "", "  ", "--model", "opus\nsonnet"):
+            with self.subTest(value=value):
+                self.attempt.update(original, claude_model=value)
+                with self.assertRaises(ValueError):
+                    self.launch(adapter)
+        self.attempt.update(original)
+        self.attempt.pop("claude_model")
+        with self.assertRaises(ValueError):
+            self.launch(adapter)
+        self.assertFalse((self.state / "work-adapters").exists())
+
+    def test_legacy_omp_or_conflicting_process_override_never_launches(self):
+        self.attempt.update(actor="omp", omp_model=None)
+        self.attempt["model_provenance"]["omp"] = "default"
+        self.bridge.runtime = SimpleNamespace(model="process-override")
+        adapter = OmpWorkAdapter(self.bridge)
+        self.addCleanup(adapter.close)
+        with self.assertRaisesRegex(ValueError, "Process-wide"):
+            self.launch(adapter)
+        for key in ("claude_model", "omp_model", "model_provenance"):
+            self.attempt.pop(key)
+        with self.assertRaisesRegex(ValueError, "reauthorize"):
+            self.launch(adapter)
+        self.assertFalse((self.state / "work-adapters").exists())
 
     def test_exit_zero_with_confident_prose_is_failure(self):
         adapter = self.adapter("print('Everything is done and approved')\n")
