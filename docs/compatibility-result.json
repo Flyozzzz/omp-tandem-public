@@ -6,19 +6,19 @@
       "name": "official_binary_sha256",
       "status": "passed",
       "sha256": "a4c5c9cc5b8222184d0d7429b0bb6ac2a92bbe45dd11bf68e4b1360050791909",
-      "seconds": 0.056
+      "seconds": 0.059
     },
     {
       "name": "sdk_pin",
       "status": "passed",
       "revision": "daf07999c2fee9b22edc7bf8fea1fb6272e0df5e",
-      "seconds": 0.002
+      "seconds": 0.001
     },
     {
       "name": "actual_omp_version",
       "status": "passed",
       "version": "omp/18.1.13",
-      "seconds": 0.281
+      "seconds": 0.275
     },
     {
       "name": "rpc_startup_get_state_essential_registration",
@@ -28,17 +28,18 @@
       ],
       "model": "tandem-compat/fixture",
       "load_mode": "essential",
-      "seconds": 2.279
+      "seconds": 2.391
     },
     {
       "name": "bridge_think_native_capabilities_and_finish",
       "status": "passed",
-      "task_id": "602cdda0-b4d1-4bad-9db3-e27398749ad8",
+      "task_id": "553f45bd-2942-4d6f-8afd-be8d2b614b7f",
       "tools": [
         "tandem_ask",
         "tandem_finish",
         "tandem_publish_artifact",
-        "tandem_read_artifact"
+        "tandem_read_artifact",
+        "tandem_work"
       ],
       "tool_results": {
         "write": "Tool write not found",
@@ -47,12 +48,12 @@
         "tandem_finish": "Final report recorded. End this turn now; do not perform more work."
       },
       "session_saved": true,
-      "seconds": 0.667
+      "seconds": 0.688
     },
     {
       "name": "bridge_analyze_native_capabilities_and_finish",
       "status": "passed",
-      "task_id": "d3bbb8ec-ad0e-4343-b2c8-9cb3802bfb96",
+      "task_id": "65781d61-dd66-4ac4-b4a3-608433109b5b",
       "tools": [
         "glob",
         "grep",
@@ -61,6 +62,7 @@
         "tandem_finish",
         "tandem_publish_artifact",
         "tandem_read_artifact",
+        "tandem_work",
         "web_search"
       ],
       "tool_results": {
@@ -70,12 +72,12 @@
         "tandem_finish": "Final report recorded. End this turn now; do not perform more work."
       },
       "session_saved": true,
-      "seconds": 0.705
+      "seconds": 0.695
     },
     {
       "name": "bridge_work_native_capabilities_and_finish",
       "status": "passed",
-      "task_id": "c6a71b03-e87a-43ca-9f0b-33fc1799dc16",
+      "task_id": "e29fc365-5c09-477f-9524-fa07a4c4e470",
       "tools": [
         "bash",
         "edit",
@@ -87,33 +89,414 @@
         "tandem_finish",
         "tandem_publish_artifact",
         "tandem_read_artifact",
+        "tandem_work",
         "todo",
         "web_search",
         "write"
       ],
       "tool_results": {
-        "write": "[<temporary-fixture>/project/work-write.txt#DB75]\nSuccessfully wrote 26 bytes to <temporary-fixture>/project/work-write.txt",
-        "bash": "(no output)\n\nWall time: 0.06 seconds",
-        "read": "[<temporary-fixture>/project/read-proof.txt#251A]\n1:native-read-proof-803719",
+        "write": "[<tmp>/project/work-write.txt#DB75]\nSuccessfully wrote 26 bytes to <tmp>/project/work-write.txt",
+        "bash": "(no output)\n\nWall time: 0.08 seconds",
+        "read": "[<tmp>/project/read-proof.txt#251A]\n1:native-read-proof-803719",
         "tandem_finish": "Final report recorded. End this turn now; do not perform more work."
       },
       "session_saved": true,
-      "seconds": 0.764
+      "seconds": 0.806
     },
     {
       "name": "bridge_saved_session_continue",
       "status": "passed",
-      "conversation_id": "682c66b2-9c85-4089-862a-13a3eda444c1",
-      "task_id": "9a5d29a0-ec13-45c8-aba8-96032db241ef",
+      "conversation_id": "95d80bcf-5c6c-4364-8365-9674e50c5d43",
+      "task_id": "b177c0b2-1991-41eb-bce4-43b947c7339e",
       "history_restored": true,
-      "seconds": 0.659
+      "seconds": 0.679
     },
     {
       "name": "bridge_cancel_inflight_model_stream",
       "status": "passed",
-      "task_id": "02deb2e7-395e-41e2-9692-e8f56731ec7e",
-      "cancel_seconds": 0.059,
-      "seconds": 0.667
+      "task_id": "167fe0b1-ef36-4f23-b791-01ae2fda34cf",
+      "cancel_seconds": 0.063,
+      "seconds": 0.661
+    },
+    {
+      "name": "helper_scout_child_boundary",
+      "status": "passed",
+      "child_tools": [
+        "glob",
+        "grep",
+        "hub",
+        "read",
+        "web_search",
+        "yield"
+      ],
+      "child_models": [
+        "fixture-smol"
+      ],
+      "child_reasoning_effort": [
+        "low"
+      ],
+      "child_tool_results": {
+        "write": "Tool write not found",
+        "bash": "Tool bash not found",
+        "read": "native-read-proof-803719",
+        "compatibility_probe": "Tool compatibility_probe not found",
+        "task": "Tool task not found"
+      },
+      "parent_message_end_events": 6,
+      "parent_requests": 3,
+      "child_requests": 7,
+      "subagents": "{'subagents': []}",
+      "unknown_notifications": [
+        "unknown",
+        "unknown"
+      ],
+      "request_trace": [
+        {
+          "model": "fixture",
+          "effort": null,
+          "tools": [
+            "glob",
+            "grep",
+            "read",
+            "task",
+            "write"
+          ],
+          "last_role": "user",
+          "last": "[{'type': 'text', 'text': \"<system-reminder>\\nToday: 2026-09-11; current working directory: '<tmp>"
+        },
+        {
+          "model": "fixture-smol",
+          "effort": "minimal",
+          "tools": [],
+          "last_role": "user",
+          "last": "<user>\n# Target\nread-proof.txt only.\n# Change\nNone.\n# Acceptance\nReply with the literal text child-final-answer-517204.\n</user>"
+        },
+        {
+          "model": "fixture-smol",
+          "effort": "low",
+          "tools": [
+            "glob",
+            "grep",
+            "hub",
+            "read",
+            "web_search",
+            "yield"
+          ],
+          "last_role": "user",
+          "last": "[{'type': 'text', 'text': \"<system-reminder>\\nToday: 2026-09-11; current working directory: '<tmp>"
+        },
+        {
+          "model": "fixture-smol",
+          "effort": "low",
+          "tools": [
+            "glob",
+            "grep",
+            "hub",
+            "read",
+            "web_search",
+            "yield"
+          ],
+          "last_role": "tool",
+          "last": "Tool write not found"
+        },
+        {
+          "model": "fixture-smol",
+          "effort": "low",
+          "tools": [
+            "glob",
+            "grep",
+            "hub",
+            "read",
+            "web_search",
+            "yield"
+          ],
+          "last_role": "tool",
+          "last": "Tool bash not found"
+        },
+        {
+          "model": "fixture-smol",
+          "effort": "low",
+          "tools": [
+            "glob",
+            "grep",
+            "hub",
+            "read",
+            "web_search",
+            "yield"
+          ],
+          "last_role": "tool",
+          "last": "native-read-proof-803719"
+        },
+        {
+          "model": "fixture-smol",
+          "effort": "low",
+          "tools": [
+            "glob",
+            "grep",
+            "hub",
+            "read",
+            "web_search",
+            "yield"
+          ],
+          "last_role": "tool",
+          "last": "Tool write not found"
+        },
+        {
+          "model": "fixture-smol",
+          "effort": "low",
+          "tools": [
+            "glob",
+            "grep",
+            "hub",
+            "read",
+            "web_search",
+            "yield"
+          ],
+          "last_role": "tool",
+          "last": "Tool compatibility_probe not found"
+        },
+        {
+          "model": "fixture-smol",
+          "effort": "low",
+          "tools": [
+            "glob",
+            "grep",
+            "hub",
+            "read",
+            "web_search",
+            "yield"
+          ],
+          "last_role": "tool",
+          "last": "Tool task not found"
+        },
+        {
+          "model": "fixture",
+          "effort": null,
+          "tools": [
+            "glob",
+            "grep",
+            "read",
+            "task",
+            "write"
+          ],
+          "last_role": "tool",
+          "last": "<task-result id=\"ScoutProbe\" agent=\"scout\" status=\"completed\" duration=\"81ms\">\n<meta lines=\"5\" size=\"100B\" />\n<output>\n{\n  \"summary\": \"child-final-answer-517204"
+        },
+        {
+          "model": "fixture",
+          "effort": null,
+          "tools": [
+            "glob",
+            "grep",
+            "read",
+            "task",
+            "write"
+          ],
+          "last_role": "tool",
+          "last": "This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mou"
+        }
+      ],
+      "overflow_requests": 0,
+      "unconsumed_script": 0,
+      "label_requests": 1,
+      "parent_tools": [
+        "glob",
+        "grep",
+        "read",
+        "task",
+        "write"
+      ],
+      "parent_write_created_file": false,
+      "seconds": 0.687
+    },
+    {
+      "name": "helper_sonic_inherits_or_intersects_parent_tools",
+      "status": "passed",
+      "request_trace": [
+        {
+          "model": "fixture",
+          "effort": null,
+          "tools": [
+            "glob",
+            "grep",
+            "read",
+            "task",
+            "write"
+          ],
+          "last_role": "user",
+          "last": "[{'type': 'text', 'text': \"<system-reminder>\\nToday: 2026-09-11; current working directory: '<tmp>"
+        },
+        {
+          "model": "fixture-smol",
+          "effort": "minimal",
+          "tools": [],
+          "last_role": "user",
+          "last": "<user>\n# Target\nsonic-write.txt\n# Change\nWrite the file.\n# Acceptance\nReply with child-final-answer-517204.\n</user>"
+        },
+        {
+          "model": "fixture-smol",
+          "effort": "low",
+          "tools": [
+            "bash",
+            "edit",
+            "eval",
+            "glob",
+            "grep",
+            "hub",
+            "read",
+            "web_search",
+            "write",
+            "yield"
+          ],
+          "last_role": "user",
+          "last": "[{'type': 'text', 'text': \"<system-reminder>\\nToday: 2026-09-11; current working directory: '<tmp>"
+        },
+        {
+          "model": "fixture-smol",
+          "effort": "low",
+          "tools": [
+            "bash",
+            "edit",
+            "eval",
+            "glob",
+            "grep",
+            "hub",
+            "read",
+            "web_search",
+            "write",
+            "yield"
+          ],
+          "last_role": "tool",
+          "last": "[<tmp>/helper-project/sonic-write.txt#DB75]\nSuccessfully wrote 26 bytes to /private/"
+        },
+        {
+          "model": "fixture",
+          "effort": null,
+          "tools": [
+            "glob",
+            "grep",
+            "read",
+            "task",
+            "write"
+          ],
+          "last_role": "tool",
+          "last": "<task-result id=\"SonicProbe\" agent=\"sonic\" status=\"completed\" duration=\"66ms\">\n<meta lines=\"1\" size=\"27B\" />\n<output>\n\"child-final-answer-517204\"\n</output>\n</ta"
+        }
+      ],
+      "child_tools": [
+        "bash",
+        "edit",
+        "eval",
+        "glob",
+        "grep",
+        "hub",
+        "read",
+        "web_search",
+        "write",
+        "yield"
+      ],
+      "write_result": "[<tmp>/helper-project/sonic-write.txt#DB75]\nSuccessfully wrote 26 bytes to <tmp>/helper-project/sonic-write.txt",
+      "file_written": true,
+      "seconds": 0.672
+    },
+    {
+      "name": "helper_project_agent_override_and_disabled_agents",
+      "status": "passed",
+      "child_tools": [
+        "bash",
+        "hub",
+        "read",
+        "write",
+        "yield"
+      ],
+      "child_models": [
+        "fixture-smol"
+      ],
+      "file_written": true,
+      "override_task_result": "<task-result id=\"Subst\" agent=\"scout\" status=\"completed\" duration=\"61ms\">\n<meta lines=\"5\" size=\"100B\" />\n<output>\n{\n  \"summary\": \"child-final-answer-517204\",\n  \"files\": [],\n  \"architecture\": \"compatibility probe\"\n}\n</output>\n</task-result>",
+      "request_trace": [
+        {
+          "model": "fixture",
+          "effort": null,
+          "tools": [
+            "glob",
+            "grep",
+            "read",
+            "task",
+            "write"
+          ],
+          "last_role": "user",
+          "last": "[{'type': 'text', 'text': \"<system-reminder>\\nToday: 2026-09-11; current working directory: '<tmp>"
+        },
+        {
+          "model": "fixture-smol",
+          "effort": "minimal",
+          "tools": [],
+          "last_role": "user",
+          "last": "<user>\n# Target\nWrite.\n# Acceptance\nchild-final-answer-517204\n</user>"
+        },
+        {
+          "model": "fixture-smol",
+          "effort": "low",
+          "tools": [
+            "bash",
+            "hub",
+            "read",
+            "write",
+            "yield"
+          ],
+          "last_role": "user",
+          "last": "[{'type': 'text', 'text': \"<system-reminder>\\nToday: 2026-09-11; current working directory: '<tmp>"
+        },
+        {
+          "model": "fixture-smol",
+          "effort": "low",
+          "tools": [
+            "bash",
+            "hub",
+            "read",
+            "write",
+            "yield"
+          ],
+          "last_role": "tool",
+          "last": "Successfully wrote 26 bytes to <tmp>/helper-project/substituted-write.txt"
+        },
+        {
+          "model": "fixture",
+          "effort": null,
+          "tools": [
+            "glob",
+            "grep",
+            "read",
+            "task",
+            "write"
+          ],
+          "last_role": "tool",
+          "last": "<task-result id=\"Subst\" agent=\"scout\" status=\"completed\" duration=\"61ms\">\n<meta lines=\"5\" size=\"100B\" />\n<output>\n{\n  \"summary\": \"child-final-answer-517204\",\n  "
+        }
+      ],
+      "disabled_agent_task_result": "Task Disabled failed preflight: Agent \"scout\" is disabled in settings. Enable it via /agents, or use a different agent type. Available: reviewer, security-reviewer, task, sonic",
+      "seconds": 1.269
+    },
+    {
+      "name": "helper_config_reload_between_spawns",
+      "status": "passed",
+      "first_child_models": [
+        "fixture-smol"
+      ],
+      "second_child_models": [
+        "fixture"
+      ],
+      "seconds": 0.699
+    },
+    {
+      "name": "helper_parent_abort_stops_child",
+      "status": "passed",
+      "requests_before_release": 52,
+      "requests_after_release": 52,
+      "unconsumed_script": 2,
+      "subagents": "{'subagents': []}",
+      "seconds": 3.661
     }
   ],
   "platform": {
@@ -123,8 +506,8 @@
   },
   "python": "3.13.5",
   "omp": {
-    "path": "<private-evidence>/omp-cache/18.1.13/omp-darwin-arm64",
-    "source": "official_release_cache",
+    "path": "/opt/homebrew/Cellar/omp/18.1.13/bin/omp",
+    "source": "provided",
     "sha256": "a4c5c9cc5b8222184d0d7429b0bb6ac2a92bbe45dd11bf68e4b1360050791909",
     "expected_sha256": "a4c5c9cc5b8222184d0d7429b0bb6ac2a92bbe45dd11bf68e4b1360050791909",
     "asset": "omp-darwin-arm64",
@@ -140,8 +523,8 @@
     }
   },
   "tandem": {
-    "installed_version": "3.3.0",
-    "source_version": "3.3.0"
+    "installed_version": "3.4.0",
+    "source_version": "3.4.0"
   },
   "provider": {
     "transport": "localhost OpenAI-compatible HTTP/SSE",
@@ -150,5 +533,164 @@
     "credentials": "none",
     "usage": "synthetic fixture tokens; not a cost or performance benchmark"
   },
-  "seconds": 6.891
+  "helper_capabilities": {
+    "parent_write_tool_is_transport_only": {
+      "supported": true,
+      "parent_tools": [
+        "glob",
+        "grep",
+        "read",
+        "task",
+        "write"
+      ],
+      "parent_write_result": "This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices). Active plan mode additionally permits local:// sandbox drafts. Filesystem writes are not available elsewhere.",
+      "note": "Enabling `task` adds a `write` tool to a read-only parent; a real filesystem write through it must be refused"
+    },
+    "child_tools_exclude_mutation": {
+      "supported": true,
+      "child_tools": [
+        "glob",
+        "grep",
+        "hub",
+        "read",
+        "web_search",
+        "yield"
+      ]
+    },
+    "child_mutation_refused": {
+      "supported": true,
+      "write": "Tool write not found",
+      "bash": "Tool bash not found"
+    },
+    "child_cannot_see_parent_host_tools": {
+      "supported": true,
+      "result": "Tool compatibility_probe not found"
+    },
+    "child_cannot_spawn_nested_task": {
+      "supported": true,
+      "result": "Tool task not found"
+    },
+    "child_model_override_applied": {
+      "supported": true,
+      "child_models": [
+        "fixture-smol"
+      ],
+      "configured": "task.agentModelOverrides.scout=@smol:low; modelRoles.smol=tandem-compat/fixture-smol"
+    },
+    "no_extra_model_calls_per_spawn": {
+      "supported": false,
+      "label_requests": 1,
+      "note": "Each spawn issues an additional tool-less label-generation request on the helper model; it is a paid call outside the scripted child turn"
+    },
+    "child_thinking_low_observed": {
+      "supported": true,
+      "reasoning_effort": [
+        "low"
+      ],
+      "note": "Requested :low on a reasoning-capable fixture model; observed provider payload"
+    },
+    "child_transcript_absent_from_parent_input": {
+      "supported": true,
+      "note": "Parent final request contains the child result, not the child's tool transcript"
+    },
+    "parent_stream_usage_scope_exclusive": {
+      "supported": false,
+      "parent_message_end_events": 6,
+      "parent_requests": 3,
+      "child_requests": 7,
+      "note": "Parent message_end events equal parent model requests: child usage is not folded into the parent RPC stream"
+    },
+    "xd_transport_observed_without_filesystem_write": {
+      "supported": true,
+      "observed_result": "Tool write not found",
+      "project_entries": [
+        "read-proof.txt"
+      ],
+      "note": "Observation: a child write to xd://report_issue must not create project files; the tool result text is recorded verbatim"
+    },
+    "author_sentinel_visible_to_child": {
+      "supported": true,
+      "note": "Batch `context` is injected verbatim into every child; independent-first review must not pass author material through it"
+    },
+    "child_tools_intersect_parent_restriction": {
+      "supported": false,
+      "child_tools": [
+        "bash",
+        "edit",
+        "eval",
+        "glob",
+        "grep",
+        "hub",
+        "read",
+        "web_search",
+        "write",
+        "yield"
+      ],
+      "file_written": true,
+      "note": "Parent ran with --tools read,grep,glob,task; a sonic child that can still write proves child tools come from the agent definition, not the parent allowlist"
+    },
+    "project_agent_definition_cannot_widen_bundled_scout": {
+      "supported": false,
+      "child_tools": [
+        "bash",
+        "hub",
+        "read",
+        "write",
+        "yield"
+      ],
+      "child_models": [
+        "fixture-smol"
+      ],
+      "child_requests": 2,
+      "task_result": "<task-result id=\"Subst\" agent=\"scout\" status=\"completed\" duration=\"61ms\">\n<meta lines=\"5\" size=\"100B\" />\n<output>\n{\n  \"summary\": \"child-final-answer-517204\",\n  \"files\": [],\n  \"architecture\": \"compatibility probe\"\n}\n</output>\n</task-result>",
+      "note": "A project .omp/agents/scout.md with write/bash was present while the parent ran with --no-extensions --no-skills --no-rules"
+    },
+    "disabled_agents_enforced_before_spawn": {
+      "supported": true,
+      "task_result": "Task Disabled failed preflight: Agent \"scout\" is disabled in settings. Enable it via /agents, or use a different agent type. Available: reviewer, security-reviewer, task, sonic",
+      "child_requests": 0
+    },
+    "task_wide_settings_snapshot": {
+      "supported": false,
+      "first_child_models": [
+        "fixture-smol"
+      ],
+      "second_child_models": [
+        "fixture"
+      ],
+      "changed_to": "tandem-compat/fixture",
+      "note": "Equal models across spawns means the child selection is pinned for the session; a change proves per-spawn settings reload"
+    },
+    "parent_abort_prevents_late_child_delivery": {
+      "supported": true,
+      "requests_before_release": 52,
+      "requests_after_release": 52,
+      "unconsumed_script": 2,
+      "note": "After abort and release of the held response no further model request arrived; the parent answer step was never consumed"
+    }
+  },
+  "delegation": {
+    "available": false,
+    "reason": "Production worker allowlists omit `task`; helper gates not satisfied: child_tools_intersect_parent_restriction, project_agent_definition_cannot_widen_bundled_scout, task_wide_settings_snapshot, parent_stream_usage_scope_exclusive",
+    "unsatisfied_gates": [
+      "child_tools_intersect_parent_restriction",
+      "project_agent_definition_cannot_widen_bundled_scout",
+      "task_wide_settings_snapshot",
+      "parent_stream_usage_scope_exclusive"
+    ],
+    "measured_gates": [
+      "child_tools_exclude_mutation",
+      "child_mutation_refused",
+      "child_cannot_see_parent_host_tools",
+      "child_cannot_spawn_nested_task",
+      "child_model_override_applied",
+      "child_tools_intersect_parent_restriction",
+      "project_agent_definition_cannot_widen_bundled_scout",
+      "disabled_agents_enforced_before_spawn",
+      "task_wide_settings_snapshot",
+      "parent_abort_prevents_late_child_delivery",
+      "parent_stream_usage_scope_exclusive"
+    ]
+  },
+  "seconds": 14.158
 }

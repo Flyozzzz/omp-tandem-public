@@ -3,8 +3,12 @@
 The pinned combination is **official OMP 18.1.13** with the Python RPC SDK
 at **`daf07999c2fee9b22edc7bf8fea1fb6272e0df5e`**. The checked-in
 [local verification report](compatibility-result.json) passed on Darwin arm64 /
-Python 3.13.5 with Tandem 3.3.0; temporary paths are redacted. This is evidence for
-that exact combination, not a supported-version range or proof of every provider.
+Python 3.13 with the Tandem source at `dbb111f` (version field 3.4.0); temporary
+paths are redacted. This is evidence for that exact combination, not a
+supported-version range or proof of every provider. The report also contains the
+stage-G0 helper (native `task` subagent) probes described in
+[helper-compatibility.md](helper-compatibility.md); their capability gates are
+recorded separately from check success and `delegation.available` is `false`.
 CI runs the same verifier on Linux and macOS; consult its actual run result
 rather than treating the presence of a workflow as a pass.
 
@@ -19,14 +23,16 @@ uv run --frozen python scripts/verify_omp.py --cache-dir /tmp/tandem-omp-cache -
 This single finite command downloads the platform-specific official release
 binary to the explicit cache directory, verifies its SHA-256 **before execution**,
 and runs the checks. It never installs or replaces a global `omp` executable.
-The entire command has a 480-second deadline, with shorter startup, request,
+The entire command has a 600-second deadline, with shorter startup, request,
 task, cancellation, and teardown bounds. Network transfer speed can make the
 first download exceed the deadline; rerun the same command after resolving the
 network issue. An incomplete download is removed rather than cached.
 
 To check a binary already on disk, add `--omp /absolute/path/to/omp`. The provided
 binary must still match the pinned official asset digest; its actual digest and
-`--version` output are recorded. A wrong or corrupt binary fails closed, including
+`--version` output are recorded. The Homebrew `omp` 18.1.13 binary for Darwin
+arm64 is byte-identical to the official release asset, so
+`--omp /opt/homebrew/Cellar/omp/18.1.13/bin/omp` avoids the download. A wrong or corrupt binary fails closed, including
 a corrupt cache entry. Remove only that reported cache file and rerun to download
 it again. This verifier deliberately does not certify custom builds.
 
@@ -62,6 +68,17 @@ The checks exercise:
 6. Cancellation through `Bridge.cancel` while the real binary is waiting on a
    held localhost model response. Cancellation must reach a terminal cancelled
    task without claiming a success outcome.
+7. Helper probes (`helper_*` checks) that start the binary through the public
+   SDK with `task` enabled — never through the production `Bridge` — and script
+   parent and child model turns: a read-only `scout` child under a restricted
+   parent, a full-access `sonic` child under the same parent, a project
+   `.omp/agents/scout.md` substitution, `task.disabledAgents`, a configuration
+   change between two spawns of one session, and a parent abort while the child
+   stream is held. Each probe records the actual model-boundary requests
+   (advertised tools, model, `reasoning_effort`, tool results) and writes a
+   capability gate to `report.helper_capabilities`. A gate that is not
+   `supported` is a documented blocker, not a failed run; see
+   [helper-compatibility.md](helper-compatibility.md).
 
 The tool restrictions tested here are tool availability, **not an OS filesystem
 sandbox**. This does not certify every native tool, interactive UI, language
@@ -77,8 +94,11 @@ are not copied. The native shell runs without login startup files. No changes
 are made to user authentication, global binaries, or permission grants.
 
 A deterministic HTTP/SSE server binds only to `127.0.0.1` on an ephemeral port.
-The only selected model is `tandem-compat/fixture`, configured with `auth: none`;
-all model traffic goes to this local server. The fixture rejects unexpected
+The selected models are `tandem-compat/fixture` (parent) and
+`tandem-compat/fixture-smol` (helper role, reasoning-capable so the requested
+effort is observable), both configured with `auth: none`; all model traffic goes
+to this local server. During helper probes the fixture answers OMP's automatic
+tool-less subagent label requests without consuming the script and counts them. The fixture rejects unexpected
 routes, model IDs, authorization headers, oversized requests, and excessive
 requests. It controls model outputs only and records the tool results OMP sends
 back. There are no paid-provider requests. HTTP connections, server threads,
@@ -87,7 +107,8 @@ up, including the held cancellation request.
 
 The JSON report records exact binary identity, SDK version/revision/source,
 installed and source Tandem versions, Python, OS/kernel, architecture, per-check
-status and elapsed seconds, bounded native tool results, and failure details.
+status and elapsed seconds, bounded native tool results, helper capability gates
+with their observations, the `delegation` verdict, and failure details.
 CI prints this bounded report directly in the step log (also on failure) and
 writes the JSON to the runner temporary directory. No additional upload-action
 pin is needed. These timings and synthetic token counts are compatibility

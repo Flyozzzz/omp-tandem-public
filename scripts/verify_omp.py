@@ -32,6 +32,8 @@ from omp_tandem.runtime_models import ACTIVE
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = "tandem-compat/fixture"
+HELPER_MODEL = "tandem-compat/fixture-smol"
+FIXTURE_MODELS = {"fixture", "fixture-smol"}
 READ_TOKEN = "native-read-proof-803719"
 WRITE_TOKEN = "native-write-proof-194827\n"
 logger = logging.getLogger(__name__)
@@ -164,6 +166,9 @@ class Provider:
         self.entered = threading.Event()
         self.release = threading.Event()
         self.total_requests = 0
+        self.lenient = False
+        self.overflow = 0
+        self.label_requests = 0
         provider = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -181,7 +186,7 @@ class Provider:
                     require(0 < length <= 2 * 1024 * 1024, "Invalid HTTP request size")
                     body = json.loads(self.rfile.read(length))
                     require(
-                        body.get("model") == "fixture",
+                        body.get("model") in FIXTURE_MODELS,
                         "Unexpected paid/non-fixture model",
                     )
                     require(
@@ -198,11 +203,20 @@ class Provider:
                             "Unexpected model request loop",
                         )
                         provider.requests.append(body)
-                        require(
-                            bool(provider.steps),
-                            "Unexpected model request after script exhausted",
-                        )
-                        step = provider.steps.pop(0)
+                        if provider.lenient and not body.get("tools"):
+                            # OMP generates a subagent label with an extra tool-less
+                            # model call; answer it without consuming the script.
+                            provider.label_requests += 1
+                            step = "probe-label"
+                        elif provider.steps:
+                            step = provider.steps.pop(0)
+                        else:
+                            require(
+                                provider.lenient,
+                                "Unexpected model request after script exhausted",
+                            )
+                            provider.overflow += 1
+                            step = "fixture-script-exhausted"
                     if step == "hold":
                         provider.entered.set()
                         provider.release.wait(timeout=90)
@@ -253,7 +267,7 @@ class Provider:
                                         "id": f"fixture_{provider.total_requests}",
                                         "object": "chat.completion.chunk",
                                         "created": 1,
-                                        "model": "fixture",
+                                        "model": body.get("model"),
                                         **chunk,
                                     }
                                 )
@@ -297,8 +311,17 @@ class Provider:
             require(not self.steps, "Previous HTTP script was not consumed")
             self.steps = list(steps)
             self.requests = []
+            self.overflow = 0
+            self.label_requests = 0
             self.entered.clear()
             self.release.clear()
+
+    def drain(self):
+        """Discard an unconsumed script; returns how many steps were left."""
+        with self.lock:
+            leftover = len(self.steps)
+            self.steps = []
+        return leftover
 
     def results(self):
         require(not self.errors, f"Local provider errors: {self.errors}")
@@ -337,7 +360,21 @@ class Provider:
                                         "cacheRead": 0,
                                         "cacheWrite": 0,
                                     },
-                                }
+                                },
+                                {
+                                    "id": "fixture-smol",
+                                    "name": "Deterministic helper fixture",
+                                    "reasoning": True,
+                                    "input": ["text"],
+                                    "contextWindow": 128000,
+                                    "maxTokens": 4096,
+                                    "cost": {
+                                        "input": 0,
+                                        "output": 0,
+                                        "cacheRead": 0,
+                                        "cacheWrite": 0,
+                                    },
+                                },
                             ],
                         }
                     }
@@ -606,6 +643,600 @@ def exercise(executable, root, provider, report):
     }
 
 
+# --- Native helper (task subagent) capability probes -----------------------------
+#
+# These probes never run through the production Bridge: Tandem's worker still omits
+# `task` from every allowlist, so production delegation stays unavailable. They start
+# the official binary through the public SDK with `task` enabled, script both parent
+# and child model turns on the localhost fixture, and record what the runtime enforces.
+# A probe check "passes" when the measurement executed; whether the measured behavior
+# satisfies the helper contract is recorded separately in report["helper_capabilities"].
+
+CHILD_ANSWER = "child-final-answer-517204"
+SCOUT_YIELD = (
+    "yield",
+    {
+        "data": {
+            "summary": CHILD_ANSWER,
+            "files": [],
+            "architecture": "compatibility probe",
+        }
+    },
+)
+PLAIN_YIELD = ("yield", {"data": CHILD_ANSWER})
+PARENT_ANSWER = "parent-final-answer-661938"
+PARENT_WRITE = "parent-write-probe-330011\n"
+AUTHOR_SENTINEL = "author-interpretation-sentinel-445120"
+
+
+def helper_settings(agent, *, disabled_agents=(), scout_override="@smol:low"):
+    """Isolated OMP settings for helper probes; JSON is a YAML subset."""
+    (agent / "config.yml").write_text(
+        json.dumps(
+            {
+                "async": {"enabled": False},
+                "modelRoles": {"default": MODEL, "smol": HELPER_MODEL},
+                "task": {
+                    "agentModelOverrides": {
+                        "scout": scout_override,
+                        "sonic": "@smol:low",
+                    },
+                    "maxRecursionDepth": 1,
+                    "maxConcurrency": 2,
+                    "disabledAgents": list(disabled_agents),
+                    "isolation": {"enabled": False},
+                },
+                "retry": {"modelFallback": False, "enabled": False},
+                "prewalk": {"enabled": False},
+                "advisor": {"enabled": False},
+            }
+        )
+    )
+
+
+def spawn(agent_name, task_text, name="Probe"):
+    return (
+        "task",
+        {
+            "context": (
+                "# Goal\nCompatibility probe.\n# Constraints\nDo exactly the scripted calls.\n"
+                "# Contract\nNone.\n" + AUTHOR_SENTINEL
+            ),
+            "tasks": [{"name": name, "agent": agent_name, "task": task_text}],
+        },
+    )
+
+
+def request_tools(request):
+    return {tool["function"]["name"] for tool in request.get("tools", [])}
+
+
+def tool_results(request):
+    """Map tool_call_id -> (name, result) visible in one model request's history."""
+    calls, results = {}, {}
+    for message in request["messages"]:
+        for call in message.get("tool_calls", []) or []:
+            calls[call["id"]] = call["function"]["name"]
+        if message.get("role") == "tool":
+            identifier = message.get("tool_call_id")
+            results[identifier] = (
+                calls.get(identifier, identifier),
+                str(message.get("content", "")),
+            )
+    return results
+
+
+def request_trace(provider):
+    """Compact per-request view: model, effort, advertised tools, last input role."""
+    trace = []
+    for request in provider.requests:
+        last = request["messages"][-1] if request.get("messages") else {}
+        trace.append(
+            {
+                "model": request.get("model"),
+                "effort": request.get("reasoning_effort"),
+                "tools": sorted(request_tools(request)),
+                "last_role": last.get("role"),
+                "last": str(last.get("content"))[:160],
+            }
+        )
+    return trace
+
+
+def split_requests(provider):
+    """Parent requests advertise `task`; child requests never should. Returns both."""
+    parents, children = [], []
+    for request in provider.requests:
+        if not request.get("tools"):
+            continue  # tool-less label generation calls are counted separately
+        (parents if "task" in request_tools(request) else children).append(request)
+    return parents, children
+
+
+def parent_client(executable, project, host_tools):
+    from omp_rpc import RpcClient
+
+    client = RpcClient(
+        executable=str(executable),
+        cwd=project,
+        model=MODEL,
+        thinking="off",
+        no_skills=True,
+        no_rules=True,
+        no_session=True,
+        tools=("read", "grep", "glob", "task"),
+        custom_tools=host_tools,
+        extra_args=[
+            "--no-lsp",
+            "--no-extensions",
+            "--no-title",
+            "--approval-mode=yolo",
+        ],
+        startup_timeout=45,
+        request_timeout=20,
+    )
+    return client
+
+
+def run_probe(
+    executable, project, provider, steps, *, probe_tool, abort_when_held=False
+):
+    """One parent turn with scripted parent+child model responses; returns observations."""
+    provider.drain()
+    provider.prepare(steps)
+    provider.lenient = True
+    observed = {
+        "parent_message_end": 0,
+        "parent_tool_events": [],
+        "unknown_notifications": [],
+    }
+    client = parent_client(executable, project, (probe_tool,))
+    client.on_message_end(
+        lambda _event: observed.__setitem__(
+            "parent_message_end", observed["parent_message_end"] + 1
+        )
+    )
+    client.on_tool_execution_end(
+        lambda event: observed["parent_tool_events"].append(
+            {
+                "tool": event.tool_name,
+                "is_error": event.is_error,
+                "result": str(event.result)[:1200],
+            }
+        )
+    )
+    client.on_unknown_notification(
+        lambda payload: observed["unknown_notifications"].append(
+            str(getattr(payload, "type", payload))[:200]
+        )
+    )
+    client.start()
+    try:
+        ended = threading.Event()
+        client.on_agent_end(lambda _event: ended.set())
+        client.prompt("Helper compatibility probe turn.")
+        if abort_when_held:
+            require(
+                provider.entered.wait(timeout=45),
+                "Child never reached the held localhost model response",
+            )
+            client.abort()
+        require(ended.wait(timeout=90), "Parent turn did not end within 90 seconds")
+        try:
+            observed["subagents"] = client.request_raw("get_subagents")
+        except Exception as exc:  # noqa: BLE001 - observation only
+            observed["subagents"] = f"{type(exc).__name__}: {exc}"[:300]
+    finally:
+        client.stop()
+        provider.lenient = False
+    observed["unconsumed_script"] = provider.drain()
+    observed["overflow_requests"] = provider.overflow
+    observed["label_requests"] = provider.label_requests
+    return observed
+
+
+def helper_probe(executable, root, agent, provider, report):
+    from omp_rpc import host_tool
+
+    project = root / "helper-project"
+    project.mkdir()
+    (project / "read-proof.txt").write_text(READ_TOKEN)
+    probe_tool = host_tool(
+        name="compatibility_probe",
+        description="Parent-only host tool; a child must never see or call it",
+        parameters={"type": "object", "properties": {}},
+        execute=lambda _params, _ctx: "parent-host-tool-called",
+    )
+    capabilities = report.setdefault("helper_capabilities", {})
+
+    def gate(name, supported, **evidence):
+        capabilities[name] = {"supported": bool(supported), **evidence}
+
+    helper_settings(agent)
+
+    # Probe 1: read-only scout under a restricted parent; mutation, xd transport,
+    # parent host tools, nested task, model/thinking routing, usage scope.
+    with check(report, "helper_scout_child_boundary") as evidence:
+        write_path = project / "child-write.txt"
+        shell_path = project / "child-shell.txt"
+        steps = [
+            spawn(
+                "scout",
+                "# Target\nread-proof.txt only.\n# Change\nNone.\n# Acceptance\n"
+                f"Reply with the literal text {CHILD_ANSWER}.",
+                name="ScoutProbe",
+            ),
+            ("write", {"path": str(write_path), "content": WRITE_TOKEN}),
+            (
+                "bash",
+                {
+                    "command": f"/usr/bin/touch {shlex.quote(str(shell_path))}",
+                    "timeout": 5,
+                },
+            ),
+            ("read", {"path": str(project / "read-proof.txt")}),
+            ("write", {"path": "xd://report_issue", "content": "compatibility probe"}),
+            ("compatibility_probe", {}),
+            (
+                "task",
+                {"context": "nested", "tasks": [{"task": "nested spawn attempt"}]},
+            ),
+            SCOUT_YIELD,
+            (
+                "write",
+                {"path": str(project / "parent-write.txt"), "content": PARENT_WRITE},
+            ),
+            PARENT_ANSWER,
+        ]
+        observed = run_probe(
+            executable, project, provider, steps, probe_tool=probe_tool
+        )
+        parents, children = split_requests(provider)
+        parent_write = (project / "parent-write.txt").exists()
+        if parent_write:
+            (project / "parent-write.txt").unlink()
+        require(
+            len(parents) >= 2, f"Parent did not receive the task result: {len(parents)}"
+        )
+        require(children, "No child model request reached the fixture")
+        child_tools = set().union(*(request_tools(request) for request in children))
+        results = {}
+        for request in children + parents[1:]:
+            for name, content in tool_results(request).values():
+                results.setdefault(name, content)
+        child_models = sorted({request.get("model") for request in children})
+        efforts = sorted({str(request.get("reasoning_effort")) for request in children})
+        final_parent = parents[-1]
+        parent_history = json.dumps(final_parent["messages"])
+        child_history = json.dumps([request["messages"] for request in children])
+        evidence.update(
+            child_tools=sorted(child_tools),
+            child_models=child_models,
+            child_reasoning_effort=efforts,
+            child_tool_results={key: value[:600] for key, value in results.items()},
+            parent_message_end_events=observed["parent_message_end"],
+            parent_requests=len(parents),
+            child_requests=len(children),
+            subagents=str(observed["subagents"])[:1500],
+            unknown_notifications=observed["unknown_notifications"][:20],
+            request_trace=request_trace(provider),
+            overflow_requests=observed["overflow_requests"],
+            unconsumed_script=observed["unconsumed_script"],
+            label_requests=observed["label_requests"],
+            parent_tools=sorted(request_tools(parents[0])),
+            parent_write_created_file=parent_write,
+        )
+        gate(
+            "parent_write_tool_is_transport_only",
+            "write" in request_tools(parents[0]) and not parent_write,
+            parent_tools=sorted(request_tools(parents[0])),
+            parent_write_result=next(
+                (
+                    content
+                    for name, content in tool_results(parents[-1]).values()
+                    if name == "write"
+                ),
+                "",
+            )[:300],
+            note="Enabling `task` adds a `write` tool to a read-only parent; a real filesystem write through it must be refused",
+        )
+        gate(
+            "child_tools_exclude_mutation",
+            not {"write", "edit", "bash"} & child_tools
+            and not write_path.exists()
+            and not shell_path.exists(),
+            child_tools=sorted(child_tools),
+        )
+        unavailable = re.compile(
+            r"not found|unknown tool|not available|not enabled|disabled|no such tool",
+            re.I,
+        )
+        gate(
+            "child_mutation_refused",
+            bool(unavailable.search(results.get("write", "")))
+            and bool(unavailable.search(results.get("bash", "")))
+            and not write_path.exists()
+            and not shell_path.exists(),
+            write=results.get("write", "")[:300],
+            bash=results.get("bash", "")[:300],
+        )
+        gate(
+            "child_cannot_see_parent_host_tools",
+            "compatibility_probe" not in child_tools
+            and "parent-host-tool-called" not in child_history,
+            result=results.get("compatibility_probe", "")[:300],
+        )
+        gate(
+            "child_cannot_spawn_nested_task",
+            "task" not in child_tools,
+            result=results.get("task", "")[:300],
+        )
+        gate(
+            "child_model_override_applied",
+            child_models == ["fixture-smol"],
+            child_models=child_models,
+            configured="task.agentModelOverrides.scout=@smol:low; modelRoles.smol="
+            + HELPER_MODEL,
+        )
+        gate(
+            "no_extra_model_calls_per_spawn",
+            observed["label_requests"] == 0,
+            label_requests=observed["label_requests"],
+            note="Each spawn issues an additional tool-less label-generation request on the helper model; it is a paid call outside the scripted child turn",
+        )
+        gate(
+            "child_thinking_low_observed",
+            efforts == ["low"],
+            reasoning_effort=efforts,
+            note="Requested :low on a reasoning-capable fixture model; observed provider payload",
+        )
+        gate(
+            "child_transcript_absent_from_parent_input",
+            CHILD_ANSWER in parent_history
+            and READ_TOKEN not in parent_history
+            and WRITE_TOKEN.strip() not in parent_history,
+            note="Parent final request contains the child result, not the child's tool transcript",
+        )
+        gate(
+            "parent_stream_usage_scope_exclusive",
+            observed["parent_message_end"] == len(parents),
+            parent_message_end_events=observed["parent_message_end"],
+            parent_requests=len(parents),
+            child_requests=len(children),
+            note="Parent message_end events equal parent model requests: child usage is not folded into the parent RPC stream",
+        )
+        gate(
+            "xd_transport_observed_without_filesystem_write",
+            set(project.iterdir()) == {project / "read-proof.txt"},
+            observed_result=results.get("write", "")[:300],
+            project_entries=sorted(path.name for path in project.iterdir()),
+            note="Observation: a child write to xd://report_issue must not create project files; the tool result text is recorded verbatim",
+        )
+        gate(
+            "author_sentinel_visible_to_child",
+            AUTHOR_SENTINEL in child_history,
+            note="Batch `context` is injected verbatim into every child; independent-first review must not pass author material through it",
+        )
+        require(CHILD_ANSWER in parent_history, "Child result did not reach the parent")
+
+    # Probe 2: a FULL-access agent (sonic) under the same restricted parent.
+    with check(report, "helper_sonic_inherits_or_intersects_parent_tools") as evidence:
+        write_path = project / "sonic-write.txt"
+        steps = [
+            spawn(
+                "sonic",
+                "# Target\nsonic-write.txt\n# Change\nWrite the file.\n# Acceptance\n"
+                f"Reply with {CHILD_ANSWER}.",
+                name="SonicProbe",
+            ),
+            ("write", {"path": str(write_path), "content": WRITE_TOKEN}),
+            PLAIN_YIELD,
+            PARENT_ANSWER,
+        ]
+        run_probe(executable, project, provider, steps, probe_tool=probe_tool)
+        parents, children = split_requests(provider)
+        child_tools = set().union(*(request_tools(request) for request in children))
+        results = {}
+        for request in children + parents[1:]:
+            for name, content in tool_results(request).values():
+                results.setdefault(name, content)
+        evidence.update(
+            request_trace=request_trace(provider),
+            child_tools=sorted(child_tools),
+            write_result=results.get("write", "")[:400],
+            file_written=write_path.exists(),
+        )
+        gate(
+            "child_tools_intersect_parent_restriction",
+            "write" not in child_tools and not write_path.exists(),
+            child_tools=sorted(child_tools),
+            file_written=write_path.exists(),
+            note="Parent ran with --tools read,grep,glob,task; a sonic child that can still write proves child tools come from the agent definition, not the parent allowlist",
+        )
+
+    # Probe 3: project-level agent substitution and task.disabledAgents.
+    with check(report, "helper_project_agent_override_and_disabled_agents") as evidence:
+        agents_dir = project / ".omp" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "scout.md").write_text(
+            "---\nname: scout\ndescription: substituted scout\n"
+            'tools:\n  - read\n  - write\n  - bash\nmodel:\n  - "@default"\n'
+            "thinkingLevel: high\n---\nSubstituted project scout.\n"
+        )
+        write_path = project / "substituted-write.txt"
+        steps = [
+            spawn(
+                "scout", f"# Target\nWrite.\n# Acceptance\n{CHILD_ANSWER}", name="Subst"
+            ),
+            ("write", {"path": str(write_path), "content": WRITE_TOKEN}),
+            SCOUT_YIELD,
+            PARENT_ANSWER,
+        ]
+        run_probe(executable, project, provider, steps, probe_tool=probe_tool)
+        parents, children = split_requests(provider)
+        child_tools = set().union(*(request_tools(request) for request in children))
+        child_models = sorted({request.get("model") for request in children})
+        override_result = ""
+        for request in parents[1:]:
+            for name, content in tool_results(request).values():
+                if name == "task":
+                    override_result = content
+        evidence.update(
+            child_tools=sorted(child_tools),
+            child_models=child_models,
+            file_written=write_path.exists(),
+            override_task_result=override_result[:800],
+            request_trace=request_trace(provider),
+        )
+        gate(
+            "project_agent_definition_cannot_widen_bundled_scout",
+            "write" not in child_tools and not write_path.exists(),
+            child_tools=sorted(child_tools),
+            child_models=child_models,
+            child_requests=len(children),
+            task_result=override_result[:300],
+            note="A project .omp/agents/scout.md with write/bash was present while the parent ran with --no-extensions --no-skills --no-rules",
+        )
+        shutil.rmtree(project / ".omp")
+        helper_settings(agent, disabled_agents=("scout",))
+        steps = [
+            spawn(
+                "scout",
+                f"# Target\nnone\n# Acceptance\n{CHILD_ANSWER}",
+                name="Disabled",
+            ),
+            PARENT_ANSWER,
+        ]
+        run_probe(executable, project, provider, steps, probe_tool=probe_tool)
+        parents, children = split_requests(provider)
+        task_result = ""
+        for request in parents[1:]:
+            for name, content in tool_results(request).values():
+                if name == "task":
+                    task_result = content
+        evidence["disabled_agent_task_result"] = task_result[:600]
+        gate(
+            "disabled_agents_enforced_before_spawn",
+            not children and "disabled" in task_result.lower(),
+            task_result=task_result[:300],
+            child_requests=len(children),
+        )
+        helper_settings(agent)
+
+    # Probe 4: configuration changed between two spawns of one parent session.
+    with check(report, "helper_config_reload_between_spawns") as evidence:
+        provider.drain()
+        provider.lenient = True
+        provider.prepare(
+            [
+                spawn("scout", f"# Acceptance\n{CHILD_ANSWER}", name="First"),
+                SCOUT_YIELD,
+                "first spawn done",
+            ]
+        )
+        client = parent_client(executable, project, (probe_tool,))
+        client.start()
+        try:
+            client.prompt_and_wait("First spawn.", timeout=90)
+            _first_parents, first_children = split_requests(provider)
+            first_models = sorted({request.get("model") for request in first_children})
+            helper_settings(agent, scout_override=MODEL)
+            provider.drain()
+            provider.prepare(
+                [
+                    spawn("scout", f"# Acceptance\n{CHILD_ANSWER}", name="Second"),
+                    SCOUT_YIELD,
+                    "second spawn done",
+                ]
+            )
+            client.prompt_and_wait("Second spawn.", timeout=90)
+            _second_parents, second_children = split_requests(provider)
+            second_models = sorted(
+                {request.get("model") for request in second_children}
+            )
+        finally:
+            client.stop()
+            provider.lenient = False
+            provider.drain()
+            helper_settings(agent)
+        evidence.update(
+            first_child_models=first_models, second_child_models=second_models
+        )
+        gate(
+            "task_wide_settings_snapshot",
+            first_models == second_models == ["fixture-smol"],
+            first_child_models=first_models,
+            second_child_models=second_models,
+            changed_to=MODEL,
+            note="Equal models across spawns means the child selection is pinned for the session; a change proves per-spawn settings reload",
+        )
+
+    # Probe 5: parent abort while the child model stream is held open.
+    with check(report, "helper_parent_abort_stops_child") as evidence:
+        steps = [
+            spawn("scout", f"# Acceptance\n{CHILD_ANSWER}", name="Held"),
+            "hold",
+            SCOUT_YIELD,
+            PARENT_ANSWER,
+        ]
+        observed = run_probe(
+            executable,
+            project,
+            provider,
+            steps,
+            probe_tool=probe_tool,
+            abort_when_held=True,
+        )
+        before = provider.total_requests
+        provider.release.set()
+        time.sleep(3)
+        after = provider.total_requests
+        evidence.update(
+            requests_before_release=before,
+            requests_after_release=after,
+            unconsumed_script=observed["unconsumed_script"],
+            subagents=str(observed["subagents"])[:1500],
+        )
+        gate(
+            "parent_abort_prevents_late_child_delivery",
+            after == before and observed["unconsumed_script"] >= 1,
+            requests_before_release=before,
+            requests_after_release=after,
+            unconsumed_script=observed["unconsumed_script"],
+            note="After abort and release of the held response no further model request arrived; the parent answer step was never consumed",
+        )
+
+    required = (
+        "child_tools_exclude_mutation",
+        "child_mutation_refused",
+        "child_cannot_see_parent_host_tools",
+        "child_cannot_spawn_nested_task",
+        "child_model_override_applied",
+        "child_tools_intersect_parent_restriction",
+        "project_agent_definition_cannot_widen_bundled_scout",
+        "disabled_agents_enforced_before_spawn",
+        "task_wide_settings_snapshot",
+        "parent_abort_prevents_late_child_delivery",
+        "parent_stream_usage_scope_exclusive",
+    )
+    missing = [
+        name for name in required if not capabilities.get(name, {}).get("supported")
+    ]
+    report["delegation"] = {
+        "available": False,
+        "reason": (
+            "Production worker allowlists omit `task`; helper gates not satisfied: "
+            + ", ".join(missing)
+            if missing
+            else "Production worker allowlists omit `task`; all measured gates passed but "
+            "budget admission, tree shutdown acknowledgement and snapshot-bound child readers "
+            "are not implemented in Tandem"
+        ),
+        "unsatisfied_gates": missing,
+        "measured_gates": list(required),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -643,11 +1274,11 @@ def main():
 
     def expired(_signal, _frame):
         raise TimeoutError(
-            "Compatibility command exceeded its 480-second total deadline"
+            "Compatibility command exceeded its 600-second total deadline"
         )
 
     previous_handler = signal.signal(signal.SIGALRM, expired)
-    signal.alarm(480)
+    signal.alarm(600)
     try:
         executable = binary(args, manifest, report)
         with check(report, "sdk_pin") as evidence:
@@ -694,6 +1325,7 @@ def main():
                 with Provider() as provider:
                     provider.configure(agent)
                     exercise(executable, root, provider, report)
+                    helper_probe(executable, root, agent, provider, report)
         report["status"] = "passed"
     except Exception as exc:
         logger.exception("Real OMP compatibility verification failed")
