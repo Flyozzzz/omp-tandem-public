@@ -18,7 +18,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from .models import TaskOutcome
-from .work_items import model_selection
+from .work_items import model_selection, shell_permission
 
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 STARTUP_SECONDS = 45
@@ -115,7 +115,7 @@ def _prompt(attempt, plan, workspace):
         "Review must independently examine the EXACT submitted snapshot and use tandem_work "
         "accept or reject with exact submission_id, current revision and evidence. "
         "A prose verdict does not accept anything. A reviewer must not edit files. "
-        "Only run shell checks if explicitly granted below; shell access is arbitrary code "
+        "Only run shell checks if allow_shell is granted below; shell access is arbitrary code "
         "execution, NOT a sandbox, and may modify files. Record every check and its outcome. "
         "If blocked, record the blocker with tandem_work. Never re-run an uncertain prior attempt. "
         "Heartbeat periodically through tandem_work. Finish with the requested structured outcome "
@@ -123,7 +123,7 @@ def _prompt(attempt, plan, workspace):
         + json.dumps(
             {
                 "allow_work": attempt.get("allow_work") is True,
-                "allow_tests": attempt.get("allow_tests") is True,
+                "allow_shell": shell_permission(attempt),
             }
         )
         + "\nSaved attempt context:\n"
@@ -438,7 +438,7 @@ class ClaudeWorkAdapter(_Adapter):
         tools = ["Read", "Grep", "Glob"]
         if attempt["kind"] == "implement" and attempt.get("allow_work") is True:
             tools += ["Edit", "Write"]
-        if attempt.get("allow_tests") is True:
+        if shell_permission(attempt):
             tools.append("Bash")
         config = {
             "mcpServers": {

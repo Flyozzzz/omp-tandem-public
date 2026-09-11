@@ -53,6 +53,52 @@ def validate_model(model: str) -> str:
     return model
 
 
+# Default share of the grant one attempt may reserve when the operator sets no
+# explicit ceiling: half of the grant, matching the supervisor's default of two
+# parallel attempts. Deliberately independent of max_launches.
+ATTEMPT_SHARE_DEFAULT = 2
+
+
+def shell_permission(record: dict) -> bool:
+    """Canonical shell permission; legacy records only carry allow_tests."""
+    if "allow_shell" in record:
+        return record["allow_shell"] is True
+    return record.get("allow_tests") is True
+
+
+def attempt_budget(grant: dict) -> dict:
+    """Effective per-attempt ceiling with its provenance; legacy grants keep theirs."""
+    if "max_attempt_cost_usd" in grant:
+        return {
+            "max_attempt_cost_usd": grant["max_attempt_cost_usd"],
+            "attempt_cost_policy": grant.get("attempt_cost_policy", "explicit"),
+        }
+    return {
+        "max_attempt_cost_usd": grant["max_cost_usd"] / grant["max_launches"],
+        "attempt_cost_policy": "legacy_launch_share",
+    }
+
+
+def grant_preview(grant: dict) -> dict:
+    """Operator-facing summary of what an authorization actually permits."""
+    budget = attempt_budget(grant)
+    return {
+        **budget,
+        "reserve_policy": (
+            "Each launch reserves min(max_attempt_cost_usd, max_cost_usd - used - "
+            "active reserves); concurrent ready steps share the unreserved remainder "
+            "in launch order; unknown reported cost stops new launches."
+        ),
+        "permissions": {
+            "read": True,
+            "edit_write": grant.get("allow_work") is True,
+            "shell": shell_permission(grant),
+            "network": "unrestricted for the worker process",
+            "os_sandbox": False,
+        },
+    }
+
+
 def model_selection(record: dict) -> dict:
     """Decode saved policy; only wholly pre-selection records are legacy grants."""
     keys = {"claude_model", "omp_model", "model_provenance"}
@@ -486,7 +532,11 @@ class WorkStore:
     def _view(self, db, card):
         view = json.loads(_json(card))
         if view["authorization"] is not None:
-            view["authorization"].update(model_selection(view["authorization"]))
+            try:
+                view["authorization"].update(model_selection(view["authorization"]))
+            except ValueError as error:
+                view["authorization"]["model_selection_error"] = str(error)
+            view["authorization"]["preview"] = grant_preview(view["authorization"])
         for step in view["steps"]:
             step["attempt"] = (
                 _public_attempt(self._attempt(db, step["attempt"]))
@@ -1177,10 +1227,20 @@ class WorkStore:
         max_launches: int,
         max_cost_usd: float,
         allow_work: bool,
-        allow_tests: bool,
+        allow_shell: bool | None = None,
+        allow_tests: bool | None = None,
+        max_attempt_cost_usd: float | None = None,
         claude_model: str | None = None,
         omp_model: str | None = None,
     ) -> dict:
+        if allow_shell is None and allow_tests is None:
+            allow_shell = False
+        elif allow_shell is None:
+            allow_shell = allow_tests  # deprecated alias, identical permission
+        elif allow_tests is not None and allow_tests != allow_shell:
+            raise ValueError(
+                "allow_tests is a deprecated alias of allow_shell; the values conflict"
+            )
         if (
             type(budget_seconds) is not int
             or budget_seconds <= 0
@@ -1190,11 +1250,25 @@ class WorkStore:
             or not math.isfinite(max_cost_usd)
             or max_cost_usd <= 0
             or type(allow_work) is not bool
-            or type(allow_tests) is not bool
+            or type(allow_shell) is not bool
         ):
             raise ValueError(
                 "Authorization requires positive finite budgets and explicit boolean permissions"
             )
+        if max_attempt_cost_usd is None:
+            ceiling = max_cost_usd / ATTEMPT_SHARE_DEFAULT
+            policy = "default_share"
+        else:
+            if (
+                isinstance(max_attempt_cost_usd, bool)
+                or not math.isfinite(max_attempt_cost_usd)
+                or max_attempt_cost_usd <= 0
+            ):
+                raise ValueError(
+                    "max_attempt_cost_usd must be a positive finite amount"
+                )
+            ceiling = min(float(max_attempt_cost_usd), max_cost_usd)
+            policy = "explicit"
         selection = {
             "claude_model": CLAUDE_DEFAULT_MODEL
             if claude_model is None
@@ -1231,7 +1305,9 @@ class WorkStore:
                 "used_cost_usd": 0.0,
                 "unknown_cost": False,
                 "allow_work": allow_work,
-                "allow_tests": allow_tests,
+                "allow_shell": allow_shell,
+                "max_attempt_cost_usd": ceiling,
+                "attempt_cost_policy": policy,
                 **selection,
                 "source_commit": source_commit,
                 "revoked_at": None,
@@ -1380,7 +1456,7 @@ class WorkStore:
                 if item["authorization_id"] == grant["authorization_id"]
             )
             envelope = min(
-                grant["max_cost_usd"] / grant["max_launches"],
+                attempt_budget(grant)["max_attempt_cost_usd"],
                 grant["max_cost_usd"] - grant["used_cost_usd"] - reserved,
             )
             if envelope <= 0:
@@ -1411,7 +1487,7 @@ class WorkStore:
             "native_task_id": None,
             "session_id": None,
             "allow_work": grant["allow_work"] if autonomous else False,
-            "allow_tests": grant["allow_tests"] if autonomous else False,
+            "allow_shell": shell_permission(grant) if autonomous else False,
             **selection,
             "remaining_cost_usd": envelope,
             "reserved_cost_usd": envelope,

@@ -24,6 +24,7 @@ from .task_contracts import TaskMessages
 from .task_interaction import TaskInteraction
 from .task_store import TaskStore
 from .work_access import WorkToolRequest, perform_work
+from .work_items import shell_permission
 from .worker_turn import TurnCancelled, wait_for_turn
 
 logger = logging.getLogger(__name__)
@@ -218,7 +219,7 @@ class NativeWorker:
                 tools = ["read", "grep", "glob"]
                 if managed["kind"] == "implement" and managed["allow_work"]:
                     tools += ["edit", "write"]
-                if managed["allow_tests"]:
+                if shell_permission(managed):
                     tools.append("bash")
                 args += ["--no-lsp"]
             host_tools = self.worker_tools(task)
@@ -240,7 +241,7 @@ class NativeWorker:
                 append_system_prompt=WORKER_INSTRUCTIONS
                 + (
                     "\nManaged assignment: respect its exact workspace and grants. "
-                    "A reviewer never edits source; shell checks require explicit allow_tests."
+                    "A reviewer never edits source; shell checks require the explicit allow_shell grant."
                     if managed
                     else "\nDo not modify project files or execute shell commands."
                     if task["mode"] != "work"

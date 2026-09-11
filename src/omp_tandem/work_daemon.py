@@ -48,14 +48,31 @@ def parser():
     authorize.add_argument("--max-launches", type=int, required=True)
     authorize.add_argument("--max-cost-usd", type=float, required=True)
     authorize.add_argument(
+        "--max-attempt-cost-usd",
+        type=float,
+        default=None,
+        help=(
+            "Ceiling one launch may reserve; independent of --max-launches. "
+            "Default: half of --max-cost-usd, shown in the authorization result."
+        ),
+    )
+    authorize.add_argument(
         "--allow-work",
         action="store_true",
         help="Permit edits in managed implementation worktrees",
     )
     authorize.add_argument(
+        "--allow-shell",
+        action="store_true",
+        help=(
+            "Permit arbitrary shell execution by managed workers (edits, network, "
+            "processes); NOT an OS sandbox and NOT limited to tests"
+        ),
+    )
+    authorize.add_argument(
         "--allow-tests",
         action="store_true",
-        help="Permit arbitrary shell for checks; NOT an OS sandbox",
+        help="Deprecated alias of --allow-shell with the same arbitrary-shell permission",
     )
     revoke = commands.add_parser(
         "revoke", help="Revoke one task's launch grant and stop its managed work"
@@ -223,13 +240,21 @@ def main(argv=None):
         try:
             store = bridge.work_items
             if args.command == "authorize":
+                if args.allow_tests:
+                    print(
+                        "Warning: --allow-tests is a deprecated alias of --allow-shell; "
+                        "it grants arbitrary shell execution, not a sandboxed test runner.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 result = store.authorize(
                     args.work_id,
                     budget_seconds=args.budget_seconds,
                     max_launches=args.max_launches,
                     max_cost_usd=args.max_cost_usd,
+                    max_attempt_cost_usd=args.max_attempt_cost_usd,
                     allow_work=args.allow_work,
-                    allow_tests=args.allow_tests,
+                    allow_shell=args.allow_shell or args.allow_tests,
                     claude_model=args.claude_model,
                     omp_model=args.model,
                 )

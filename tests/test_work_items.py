@@ -137,7 +137,7 @@ class WorkItemsTests(unittest.TestCase):
                 "max_launches": 8,
                 "max_cost_usd": 8.0,
                 "allow_work": True,
-                "allow_tests": False,
+                "allow_shell": False,
                 **changes,
             },
         )
@@ -857,3 +857,95 @@ class WorkItemsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AttemptBudgetAndShellTests(WorkItemsTests):
+    def _stored_grant(self):
+        with sqlite3.connect(self.store.database) as db:
+            return json.loads(
+                db.execute(
+                    "SELECT card FROM work_cards WHERE work_id=?", (self.work_id,)
+                ).fetchone()[0]
+            )["authorization"]
+
+    def _rewrite_grant(self, changes):
+        with sqlite3.connect(self.store.database) as db:
+            card = json.loads(
+                db.execute(
+                    "SELECT card FROM work_cards WHERE work_id=?", (self.work_id,)
+                ).fetchone()[0]
+            )
+            for key in changes.pop("__drop__", ()):
+                card["authorization"].pop(key, None)
+            card["authorization"].update(changes)
+            db.execute(
+                "UPDATE work_cards SET card=? WHERE work_id=?",
+                (json.dumps(card), self.work_id),
+            )
+            db.commit()
+
+    def test_attempt_ceiling_defaults_independently_of_max_launches(self):
+        self.agreed()
+        view = self.authorize(max_launches=8, max_cost_usd=8.0)
+        grant = view["authorization"]
+        self.assertEqual(grant["max_attempt_cost_usd"], 4.0)
+        self.assertEqual(grant["attempt_cost_policy"], "default_share")
+        self.assertEqual(grant["preview"]["max_attempt_cost_usd"], 4.0)
+        self.assertIs(grant["preview"]["permissions"]["shell"], False)
+        self.assertIs(grant["preview"]["permissions"]["os_sandbox"], False)
+        self.assertNotIn("allow_tests", self._stored_grant())
+        # Eight launches would previously have capped one attempt at 1.0.
+        self.assertEqual(self.reserve()["reserved_cost_usd"], 4.0)
+
+    def test_explicit_attempt_ceiling_and_remaining_budget(self):
+        self.agreed(parallel=True)
+        view = self.authorize(max_launches=8, max_cost_usd=8.0, max_attempt_cost_usd=3)
+        self.assertEqual(view["authorization"]["attempt_cost_policy"], "explicit")
+        first = self.reserve()
+        self.assertEqual(first["reserved_cost_usd"], 3.0)
+        second = self.reserve("frontend", actor="claude")
+        self.assertEqual(second["reserved_cost_usd"], 3.0)
+        with self.assertRaises(ValueError):
+            self.authorize(max_launches=1, max_cost_usd=1.0, max_attempt_cost_usd=0)
+
+    def test_legacy_grant_keeps_launch_share_and_shell_semantics(self):
+        self.agreed()
+        self.authorize(max_launches=8, max_cost_usd=8.0)
+        self._rewrite_grant(
+            {
+                "__drop__": (
+                    "max_attempt_cost_usd",
+                    "attempt_cost_policy",
+                    "allow_shell",
+                ),
+                "allow_tests": True,
+            }
+        )
+        grant = self.view()["authorization"]
+        self.assertEqual(grant["preview"]["attempt_cost_policy"], "legacy_launch_share")
+        self.assertEqual(grant["preview"]["max_attempt_cost_usd"], 1.0)
+        self.assertIs(grant["preview"]["permissions"]["shell"], True)
+        attempt = self.reserve()
+        self.assertEqual(attempt["reserved_cost_usd"], 1.0)
+        self.assertIs(attempt["allow_shell"], True)
+
+    def test_allow_tests_is_a_compatible_alias_not_a_second_permission(self):
+        self.agreed()
+        granted = self.authorize(allow_shell=None, allow_tests=True)["authorization"]
+        self.assertIs(granted["allow_shell"], True)
+        self.assertNotIn("allow_tests", self._stored_grant())
+        canonical = self.authorize(allow_shell=True)["authorization"]
+        self.assertIs(canonical["allow_shell"], True)
+        with self.assertRaises(ValueError):
+            self.authorize(allow_shell=True, allow_tests=False)
+        denied = self.authorize(allow_shell=False)["authorization"]
+        self.assertIs(denied["allow_shell"], False)
+        self.assertIs(self.reserve()["allow_shell"], False)
+
+    def test_malformed_model_selection_is_labelled_not_fatal(self):
+        self.agreed()
+        self.authorize()
+        self._rewrite_grant({"__drop__": ("model_provenance",)})
+        grant = self.view()["authorization"]
+        self.assertIn("model_selection_error", grant)
+        self.assertIn("preview", grant)

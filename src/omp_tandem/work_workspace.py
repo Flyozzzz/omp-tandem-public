@@ -13,6 +13,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
+from .work_items import shell_permission
 from .workspace import ProjectScope, _directory, _private_lock
 
 _MAX_OUTPUT = 16 * 1024 * 1024
@@ -769,7 +770,7 @@ class WorkWorkspace:
                 baseline,
                 set(),
                 capture=False,
-                allow_ignored=attempt.get("allow_tests") is True,
+                allow_ignored=shell_permission(attempt),
             )
 
     def finish(self, attempt: dict, plan: dict, workspace: dict) -> dict:
@@ -804,7 +805,7 @@ class WorkWorkspace:
                 if name
             ):
                 raise ValueError("Unexpected staged modification outside ownership")
-            allow_ignored = attempt.get("allow_tests") is True
+            allow_ignored = shell_permission(attempt)
             snapshot, contents = self._snapshot(
                 path, baseline, owned, allow_ignored=allow_ignored
             )

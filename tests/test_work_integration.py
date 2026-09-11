@@ -584,3 +584,42 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 webhook_enabled=False,
                 migrate_legacy=False,
             )
+
+
+class AuthorizeCliFlagTests(unittest.TestCase):
+    def test_allow_shell_flags_and_attempt_ceiling_parse(self):
+        from omp_tandem.work_daemon import parser
+
+        base = [
+            "--project-root",
+            ".",
+            "authorize",
+            "work",
+            "--budget-seconds",
+            "10",
+            "--max-launches",
+            "3",
+            "--max-cost-usd",
+            "6",
+        ]
+        args = parser().parse_args(
+            [*base, "--allow-shell", "--max-attempt-cost-usd", "2.5"]
+        )
+        self.assertTrue(args.allow_shell)
+        self.assertFalse(args.allow_tests)
+        self.assertEqual(args.max_attempt_cost_usd, 2.5)
+        legacy = parser().parse_args([*base, "--allow-tests"])
+        self.assertTrue(legacy.allow_tests)
+        self.assertFalse(legacy.allow_shell)
+        self.assertIsNone(legacy.max_attempt_cost_usd)
+        import argparse
+
+        subparsers = next(
+            action
+            for action in parser()._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        help_text = subparsers.choices["authorize"].format_help()
+        self.assertIn("--allow-shell", help_text)
+        self.assertIn("--max-attempt-cost-usd", help_text)
+        self.assertIn("Deprecated alias", help_text)

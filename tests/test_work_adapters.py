@@ -407,3 +407,33 @@ class WorkAdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShellPermissionAdapterTests(WorkAdapterTests):
+    def test_shell_tool_requires_canonical_grant(self):
+        self.attempt.pop("allow_tests", None)
+        self.attempt.update(kind="review", allow_work=False, allow_shell=True)
+        body = (
+            "tools = sys.argv[sys.argv.index('--tools') + 1].split(',')\n"
+            "open('shell-tool', 'w').write('Bash' in tools and 'Edit' not in tools and 'yes' or 'no')\n"
+        ) + self.result_program()
+        adapter = self.adapter(body)
+        self.finish(adapter, self.launch(adapter))
+        self.assertEqual(
+            (Path(self.workspace["path"]) / "shell-tool").read_text(), "yes"
+        )
+        context = json.loads(
+            next(
+                line
+                for line in (
+                    self.state
+                    / "work-adapters"
+                    / self.attempt["attempt_id"]
+                    / "context.txt"
+                )
+                .read_text()
+                .splitlines()
+                if line.startswith("{")
+            )
+        )
+        self.assertEqual(context, {"allow_work": False, "allow_shell": True})
