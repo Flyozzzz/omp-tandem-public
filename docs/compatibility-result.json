@@ -6,7 +6,7 @@
       "name": "official_binary_sha256",
       "status": "passed",
       "sha256": "a4c5c9cc5b8222184d0d7429b0bb6ac2a92bbe45dd11bf68e4b1360050791909",
-      "seconds": 0.059
+      "seconds": 0.057
     },
     {
       "name": "sdk_pin",
@@ -18,7 +18,7 @@
       "name": "actual_omp_version",
       "status": "passed",
       "version": "omp/18.1.13",
-      "seconds": 0.275
+      "seconds": 0.281
     },
     {
       "name": "rpc_startup_get_state_essential_registration",
@@ -28,12 +28,12 @@
       ],
       "model": "tandem-compat/fixture",
       "load_mode": "essential",
-      "seconds": 2.391
+      "seconds": 2.992
     },
     {
       "name": "bridge_think_native_capabilities_and_finish",
       "status": "passed",
-      "task_id": "553f45bd-2942-4d6f-8afd-be8d2b614b7f",
+      "task_id": "33a790e0-b856-4069-92b2-4e6f37231e75",
       "tools": [
         "tandem_ask",
         "tandem_finish",
@@ -48,12 +48,12 @@
         "tandem_finish": "Final report recorded. End this turn now; do not perform more work."
       },
       "session_saved": true,
-      "seconds": 0.688
+      "seconds": 0.711
     },
     {
       "name": "bridge_analyze_native_capabilities_and_finish",
       "status": "passed",
-      "task_id": "65781d61-dd66-4ac4-b4a3-608433109b5b",
+      "task_id": "9adf54e6-1462-4c6e-9e70-b129c9563ec0",
       "tools": [
         "glob",
         "grep",
@@ -72,12 +72,12 @@
         "tandem_finish": "Final report recorded. End this turn now; do not perform more work."
       },
       "session_saved": true,
-      "seconds": 0.695
+      "seconds": 0.681
     },
     {
       "name": "bridge_work_native_capabilities_and_finish",
       "status": "passed",
-      "task_id": "e29fc365-5c09-477f-9524-fa07a4c4e470",
+      "task_id": "04103e8e-2983-4e50-b8d5-ed477c474bd3",
       "tools": [
         "bash",
         "edit",
@@ -96,27 +96,27 @@
       ],
       "tool_results": {
         "write": "[<tmp>/project/work-write.txt#DB75]\nSuccessfully wrote 26 bytes to <tmp>/project/work-write.txt",
-        "bash": "(no output)\n\nWall time: 0.08 seconds",
+        "bash": "(no output)\n\nWall time: 0.07 seconds",
         "read": "[<tmp>/project/read-proof.txt#251A]\n1:native-read-proof-803719",
         "tandem_finish": "Final report recorded. End this turn now; do not perform more work."
       },
       "session_saved": true,
-      "seconds": 0.806
+      "seconds": 0.809
     },
     {
       "name": "bridge_saved_session_continue",
       "status": "passed",
-      "conversation_id": "95d80bcf-5c6c-4364-8365-9674e50c5d43",
-      "task_id": "b177c0b2-1991-41eb-bce4-43b947c7339e",
+      "conversation_id": "a1aef15a-78c4-4c26-8c50-215a7729dade",
+      "task_id": "db76fafc-8ad4-4e34-9afe-a4b642b97e3b",
       "history_restored": true,
-      "seconds": 0.679
+      "seconds": 0.686
     },
     {
       "name": "bridge_cancel_inflight_model_stream",
       "status": "passed",
-      "task_id": "167fe0b1-ef36-4f23-b791-01ae2fda34cf",
-      "cancel_seconds": 0.063,
-      "seconds": 0.661
+      "task_id": "f96bda4a-ca14-4bbf-acb2-52c88af59765",
+      "cancel_seconds": 0.064,
+      "seconds": 0.686
     },
     {
       "name": "helper_scout_child_boundary",
@@ -280,7 +280,7 @@
             "write"
           ],
           "last_role": "tool",
-          "last": "<task-result id=\"ScoutProbe\" agent=\"scout\" status=\"completed\" duration=\"81ms\">\n<meta lines=\"5\" size=\"100B\" />\n<output>\n{\n  \"summary\": \"child-final-answer-517204"
+          "last": "<task-result id=\"ScoutProbe\" agent=\"scout\" status=\"completed\" duration=\"86ms\">\n<meta lines=\"5\" size=\"100B\" />\n<output>\n{\n  \"summary\": \"child-final-answer-517204"
         },
         {
           "model": "fixture",
@@ -307,7 +307,7 @@
         "write"
       ],
       "parent_write_created_file": false,
-      "seconds": 0.687
+      "seconds": 0.708
     },
     {
       "name": "helper_sonic_inherits_or_intersects_parent_tools",
@@ -380,7 +380,7 @@
             "write"
           ],
           "last_role": "tool",
-          "last": "<task-result id=\"SonicProbe\" agent=\"sonic\" status=\"completed\" duration=\"66ms\">\n<meta lines=\"1\" size=\"27B\" />\n<output>\n\"child-final-answer-517204\"\n</output>\n</ta"
+          "last": "<task-result id=\"SonicProbe\" agent=\"sonic\" status=\"completed\" duration=\"68ms\">\n<meta lines=\"1\" size=\"27B\" />\n<output>\n\"child-final-answer-517204\"\n</output>\n</ta"
         }
       ],
       "child_tools": [
@@ -397,7 +397,7 @@
       ],
       "write_result": "[<tmp>/helper-project/sonic-write.txt#DB75]\nSuccessfully wrote 26 bytes to <tmp>/helper-project/sonic-write.txt",
       "file_written": true,
-      "seconds": 0.672
+      "seconds": 0.698
     },
     {
       "name": "helper_project_agent_override_and_disabled_agents",
@@ -413,7 +413,7 @@
         "fixture-smol"
       ],
       "file_written": true,
-      "override_task_result": "<task-result id=\"Subst\" agent=\"scout\" status=\"completed\" duration=\"61ms\">\n<meta lines=\"5\" size=\"100B\" />\n<output>\n{\n  \"summary\": \"child-final-answer-517204\",\n  \"files\": [],\n  \"architecture\": \"compatibility probe\"\n}\n</output>\n</task-result>",
+      "override_task_result": "<task-result id=\"Subst\" agent=\"scout\" status=\"completed\" duration=\"65ms\">\n<meta lines=\"5\" size=\"100B\" />\n<output>\n{\n  \"summary\": \"child-final-answer-517204\",\n  \"files\": [],\n  \"architecture\": \"compatibility probe\"\n}\n</output>\n</task-result>",
       "request_trace": [
         {
           "model": "fixture",
@@ -472,11 +472,11 @@
             "write"
           ],
           "last_role": "tool",
-          "last": "<task-result id=\"Subst\" agent=\"scout\" status=\"completed\" duration=\"61ms\">\n<meta lines=\"5\" size=\"100B\" />\n<output>\n{\n  \"summary\": \"child-final-answer-517204\",\n  "
+          "last": "<task-result id=\"Subst\" agent=\"scout\" status=\"completed\" duration=\"65ms\">\n<meta lines=\"5\" size=\"100B\" />\n<output>\n{\n  \"summary\": \"child-final-answer-517204\",\n  "
         }
       ],
       "disabled_agent_task_result": "Task Disabled failed preflight: Agent \"scout\" is disabled in settings. Enable it via /agents, or use a different agent type. Available: reviewer, security-reviewer, task, sonic",
-      "seconds": 1.269
+      "seconds": 1.354
     },
     {
       "name": "helper_config_reload_between_spawns",
@@ -487,16 +487,19 @@
       "second_child_models": [
         "fixture"
       ],
-      "seconds": 0.699
+      "seconds": 0.713
     },
     {
       "name": "helper_parent_abort_stops_child",
       "status": "passed",
       "requests_before_release": 52,
       "requests_after_release": 52,
+      "steps_left_after_release": 2,
+      "subagents_after_release": "{'subagents': []}",
+      "parent_alive": true,
       "unconsumed_script": 2,
       "subagents": "{'subagents': []}",
-      "seconds": 3.661
+      "seconds": 4.71
     }
   ],
   "platform": {
@@ -642,7 +645,7 @@
         "fixture-smol"
       ],
       "child_requests": 2,
-      "task_result": "<task-result id=\"Subst\" agent=\"scout\" status=\"completed\" duration=\"61ms\">\n<meta lines=\"5\" size=\"100B\" />\n<output>\n{\n  \"summary\": \"child-final-answer-517204\",\n  \"files\": [],\n  \"architecture\": \"compatibility probe\"\n}\n</output>\n</task-result>",
+      "task_result": "<task-result id=\"Subst\" agent=\"scout\" status=\"completed\" duration=\"65ms\">\n<meta lines=\"5\" size=\"100B\" />\n<output>\n{\n  \"summary\": \"child-final-answer-517204\",\n  \"files\": [],\n  \"architecture\": \"compatibility probe\"\n}\n</output>\n</task-result>",
       "note": "A project .omp/agents/scout.md with write/bash was present while the parent ran with --no-extensions --no-skills --no-rules"
     },
     "disabled_agents_enforced_before_spawn": {
@@ -665,18 +668,21 @@
       "supported": true,
       "requests_before_release": 52,
       "requests_after_release": 52,
-      "unconsumed_script": 2,
-      "note": "After abort and release of the held response no further model request arrived; the parent answer step was never consumed"
+      "steps_left_after_release": 2,
+      "subagents_after_release": "{'subagents': []}",
+      "parent_alive": true,
+      "note": "Observed before client.stop(): after abort, releasing the held child response produced no further model request while the parent process was still alive; the child answer and parent answer steps stayed unconsumed"
     }
   },
   "delegation": {
     "available": false,
-    "reason": "Production worker allowlists omit `task`; helper gates not satisfied: child_tools_intersect_parent_restriction, project_agent_definition_cannot_widen_bundled_scout, task_wide_settings_snapshot, parent_stream_usage_scope_exclusive",
+    "reason": "Production worker allowlists omit `task`; helper gates not satisfied: child_tools_intersect_parent_restriction, project_agent_definition_cannot_widen_bundled_scout, task_wide_settings_snapshot, parent_stream_usage_scope_exclusive, no_extra_model_calls_per_spawn",
     "unsatisfied_gates": [
       "child_tools_intersect_parent_restriction",
       "project_agent_definition_cannot_widen_bundled_scout",
       "task_wide_settings_snapshot",
-      "parent_stream_usage_scope_exclusive"
+      "parent_stream_usage_scope_exclusive",
+      "no_extra_model_calls_per_spawn"
     ],
     "measured_gates": [
       "child_tools_exclude_mutation",
@@ -689,8 +695,9 @@
       "disabled_agents_enforced_before_spawn",
       "task_wide_settings_snapshot",
       "parent_abort_prevents_late_child_delivery",
-      "parent_stream_usage_scope_exclusive"
+      "parent_stream_usage_scope_exclusive",
+      "no_extra_model_calls_per_spawn"
     ]
   },
-  "seconds": 14.158
+  "seconds": 16.039
 }

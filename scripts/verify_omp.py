@@ -779,7 +779,14 @@ def parent_client(executable, project, host_tools):
 
 
 def run_probe(
-    executable, project, provider, steps, *, probe_tool, abort_when_held=False
+    executable,
+    project,
+    provider,
+    steps,
+    *,
+    probe_tool,
+    abort_when_held=False,
+    before_stop=None,
 ):
     """One parent turn with scripted parent+child model responses; returns observations."""
     provider.drain()
@@ -826,6 +833,9 @@ def run_probe(
             observed["subagents"] = client.request_raw("get_subagents")
         except Exception as exc:  # noqa: BLE001 - observation only
             observed["subagents"] = f"{type(exc).__name__}: {exc}"[:300]
+        if before_stop is not None:
+            # Observations that must be made while the parent process is still alive.
+            observed["before_stop"] = before_stop(client)
     finally:
         client.stop()
         provider.lenient = False
@@ -1179,6 +1189,25 @@ def helper_probe(executable, root, agent, provider, report):
             SCOUT_YIELD,
             PARENT_ANSWER,
         ]
+
+        def release_while_alive(client):
+            # The parent process is still running here: release the held child
+            # response and watch for late model requests before any process stop.
+            before = provider.total_requests
+            provider.release.set()
+            time.sleep(4)
+            try:
+                subagents = client.request_raw("get_subagents")
+            except Exception as exc:  # noqa: BLE001 - observation only
+                subagents = f"{type(exc).__name__}: {exc}"[:300]
+            return {
+                "requests_before_release": before,
+                "requests_after_release": provider.total_requests,
+                "steps_left_after_release": len(provider.steps),
+                "subagents_after_release": str(subagents)[:1500],
+                "parent_alive": not isinstance(subagents, str),
+            }
+
         observed = run_probe(
             executable,
             project,
@@ -1186,24 +1215,20 @@ def helper_probe(executable, root, agent, provider, report):
             steps,
             probe_tool=probe_tool,
             abort_when_held=True,
+            before_stop=release_while_alive,
         )
-        before = provider.total_requests
-        provider.release.set()
-        time.sleep(3)
-        after = provider.total_requests
+        alive = observed["before_stop"]
         evidence.update(
-            requests_before_release=before,
-            requests_after_release=after,
+            **alive,
             unconsumed_script=observed["unconsumed_script"],
             subagents=str(observed["subagents"])[:1500],
         )
         gate(
             "parent_abort_prevents_late_child_delivery",
-            after == before and observed["unconsumed_script"] >= 1,
-            requests_before_release=before,
-            requests_after_release=after,
-            unconsumed_script=observed["unconsumed_script"],
-            note="After abort and release of the held response no further model request arrived; the parent answer step was never consumed",
+            alive["requests_after_release"] == alive["requests_before_release"]
+            and alive["steps_left_after_release"] >= 1,
+            **alive,
+            note="Observed before client.stop(): after abort, releasing the held child response produced no further model request while the parent process was still alive; the child answer and parent answer steps stayed unconsumed",
         )
 
     required = (
@@ -1218,6 +1243,7 @@ def helper_probe(executable, root, agent, provider, report):
         "task_wide_settings_snapshot",
         "parent_abort_prevents_late_child_delivery",
         "parent_stream_usage_scope_exclusive",
+        "no_extra_model_calls_per_spawn",
     )
     missing = [
         name for name in required if not capabilities.get(name, {}).get("supported")
