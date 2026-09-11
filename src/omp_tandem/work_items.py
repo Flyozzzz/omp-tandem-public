@@ -1892,29 +1892,34 @@ class WorkStore:
             if not grant or not shell_permission(grant):
                 return None
             step = self._step(card, step_id)
+            # Only the server-minted policy blocker counts: it carries a policy
+            # marker no participant command can set, is owned by the operator, and
+            # only an operator resolution waives it. A same-text blocker created
+            # and resolved by a participant is ignored here.
             recorded = [
                 blocker
                 for blocker in step["blockers"]
-                if blocker["note"] == self.SHELL_REVIEW_BLOCK
+                if blocker.get("policy") == "shell_review"
+                and blocker["actor"] == "operator"
             ]
-            if recorded:
-                if any(blocker["resolved_at"] is None for blocker in recorded):
-                    return (
-                        "Review launch is blocked until the operator resolves the "
-                        "recorded shell-check blocker"
-                    )
+            if any(blocker["resolved_at"] is None for blocker in recorded):
+                return (
+                    "Review launch is blocked until the operator resolves the "
+                    "recorded shell-check blocker"
+                )
+            if any(blocker.get("resolved_by") == "operator" for blocker in recorded):
                 # The operator explicitly decided; the review proceeds without shell.
                 return None
-            step["blockers"].append(
-                self._blocker(
-                    "operator",
-                    self.SHELL_REVIEW_BLOCK,
-                    "Operator resolves the blocker after re-authorizing without "
-                    "--allow-shell, or after a stage-scoped check execution path exists",
-                    card["plan_revision"],
-                    step["id"],
-                )
+            policy_blocker = self._blocker(
+                "operator",
+                self.SHELL_REVIEW_BLOCK,
+                "Operator resolves the blocker after re-authorizing without "
+                "--allow-shell, or after a stage-scoped check execution path exists",
+                card["plan_revision"],
+                step["id"],
             )
+            policy_blocker["policy"] = "shell_review"
+            step["blockers"].append(policy_blocker)
             self._record(
                 db,
                 card,

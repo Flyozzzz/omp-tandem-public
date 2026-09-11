@@ -1454,6 +1454,40 @@ class IndependentReviewTests(WorkItemsTests):
             review["shell_check_policy"], "blocked_no_stage_scoped_execution"
         )
 
+    def test_participant_cannot_forge_or_waive_the_shell_policy_blocker(self):
+        self.agreed()
+        self.authorize(allow_shell=True)
+        implementation = self.reserve()
+        # The implementer records and resolves a same-text blocker of its own.
+        self.change(
+            "block",
+            actor="omp",
+            token=implementation["token"],
+            step_id="backend",
+            note=WorkStore.SHELL_REVIEW_BLOCK,
+            condition="Resolve my own blocker",
+        )
+        forged = self.view()["steps"][0]["blockers"][0]
+        self.change(
+            "unblock",
+            actor="omp",
+            token=implementation["token"],
+            step_id="backend",
+            blocker_id=forged["blocker_id"],
+            resolution="not_applicable",
+            note="Implementation waives its own note",
+            evidence=["author decision, not operator"],
+        )
+        self.submit(implementation)
+        with self.assertRaises(ValueError):
+            self.reserve(actor="claude", kind="review")
+        blockers = self.view()["steps"][0]["blockers"]
+        policy = [item for item in blockers if item.get("policy") == "shell_review"]
+        self.assertEqual(len(policy), 1)
+        self.assertEqual(policy[0]["actor"], "operator")
+        self.assertIsNone(policy[0]["resolved_at"])
+        self.assertNotIn("policy", forged)
+
     def test_claim_response_and_replay_are_projected_for_the_reviewer(self):
         self.agreed()
         self.submit(self.reserve(autonomous=False), cost=None)
