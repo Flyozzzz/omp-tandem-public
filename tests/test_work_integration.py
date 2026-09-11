@@ -128,6 +128,49 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.mutate(self.omp, identifier, "agree")
         return identifier
 
+    async def test_rejected_create_can_be_corrected_without_partial_work(self):
+        steps = [
+            {
+                "id": identifier,
+                "title": identifier,
+                "goal": "Verify the combined result",
+                "owner": "claude",
+                "reviewer": "omp",
+                "acceptance": ["Recorded evidence supports the result"],
+            }
+            for identifier in ("suite-duration", "final-green")
+        ]
+        request = {
+            "action": "create",
+            "expected_revision": 0,
+            "operation_id": "correctable-create",
+            "plan": {
+                "title": "Integration checklist",
+                "goal": "Include every required check",
+                "acceptance": ["All checks contribute to the final result"],
+                "steps": steps,
+            },
+        }
+        with self.assertRaises(ToolError):
+            await self.call(self.claude, request)
+        steps[1]["depends_on"] = ["suite-duration"]
+        for field in ("expected_revision", "operation_id"):
+            with self.subTest(field=field), self.assertRaises(ToolError):
+                await self.call(
+                    self.claude,
+                    {key: value for key, value in request.items() if key != field},
+                )
+        with self.assertRaises(ToolError):
+            await self.call(self.claude, {**request, "expected_revision": 1})
+        self.assertEqual(
+            (await self.call(self.claude, {"action": "list"}))["items"], []
+        )
+        created = await self.call(self.claude, request)
+        retried = await self.call(self.claude, request)
+        self.assertEqual(retried["work_id"], created["work_id"])
+        items = (await self.call(self.claude, {"action": "list"}))["items"]
+        self.assertEqual([item["work_id"] for item in items], [created["work_id"]])
+
     async def test_invalid_manual_commit_does_not_poison_later_valid_submission(self):
         identifier = await self.create()
         await self.mutate(self.claude, identifier, "claim", step_id="change")

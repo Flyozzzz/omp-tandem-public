@@ -81,9 +81,13 @@ def build_server(configuration: Bridge | RuntimeOptions):
     ) -> dict:
         """Maintain one durable shared task and its role-bound checklist.
 
-        Read current revision before changing state. Plan agreement, worker submission
-        and independent acceptance are separate. Mutations require stable operation_id
-        and expected_revision; repeat an exact request only, never blindly replay work.
+        To create, send action="create", expected_revision=0, a unique operation_id,
+        and plan; omit work_id. The plan must have one final integration step that
+        depends directly or transitively on every other step, including investigations.
+        For later mutations, get the card first and use its current revision as
+        expected_revision. Use a new operation_id for a new or corrected request;
+        reuse an ID only for an exact retry. list/get/history need no operation_id.
+        Plan agreement, worker submission and independent acceptance are separate.
         Waiting observes committed changes, not permission to start an agent.
         Autonomous grants and uncertain-attempt reconciliation are operator CLI actions.
         """

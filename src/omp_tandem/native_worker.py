@@ -86,7 +86,7 @@ class NativeWorker:
             work_tools = (
                 host_tool(
                     name="tandem_work",
-                    description="Read and update the shared project task, agree on its plan, claim assignments, report blockers and review exact submissions. Actor and managed assignment are bound by the server. Read latest revision before a mutation; events are not permission. No autonomy grants or uncertain replay.",
+                    description="Read and update the shared project task, agree on its plan, claim assignments, report blockers and review exact submissions. Create requires plan, expected_revision=0, a unique operation_id and no work_id; the final integration step must depend transitively on every other step. Later mutations require the current revision from get and a unique operation_id; reuse an ID only for an exact retry, not a corrected request. Actor and managed assignment are bound by the server. Events are not permission. No autonomy grants or uncertain replay.",
                     parameters=WorkToolRequest.model_json_schema(),
                     decode=WorkToolRequest.model_validate,
                     execute=shared_work,

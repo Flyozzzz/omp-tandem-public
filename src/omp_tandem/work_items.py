@@ -45,7 +45,11 @@ class WorkStep(_Model):
     owner: _Actor
     reviewer: _Actor
     owned_files: list[_NonBlank] = Field(default_factory=list, max_length=500)
-    depends_on: list[_Identifier] = Field(default_factory=list, max_length=200)
+    depends_on: list[_Identifier] = Field(
+        default_factory=list,
+        max_length=200,
+        description="Prerequisite step IDs. One final integration step must depend, directly or transitively, on every other step, including investigation and verification steps.",
+    )
     acceptance: list[_NonBlank] = Field(min_length=1, max_length=100)
 
     @model_validator(mode="after")
@@ -76,7 +80,11 @@ class WorkPlan(_Model):
     goal: _NonBlank
     constraints: list[_NonBlank] = Field(default_factory=list, max_length=100)
     acceptance: list[_NonBlank] = Field(min_length=1, max_length=100)
-    steps: list[WorkStep] = Field(min_length=1, max_length=200)
+    steps: list[WorkStep] = Field(
+        min_length=1,
+        max_length=200,
+        description="Acyclic checklist with exactly one final integration step that depends transitively on all other steps. A one-step plan is valid.",
+    )
     context: str = Field(default="", max_length=64000)
 
     @model_validator(mode="after")
@@ -125,12 +133,21 @@ class WorkPlan(_Model):
         sinks = set(steps) - referenced
         if len(sinks) != 1:
             raise ValueError(
-                "Plan requires one final integration step depending transitively on every other step; independent final outputs cannot certify the combined result"
+                "Plan requires one final integration step depending transitively on every other step. "
+                f"Independent final steps: {', '.join(sorted(sinks))}. "
+                "Choose the intended final integration step and add the other listed IDs "
+                "to its depends_on, or add a new integration step depending on all listed IDs. "
+                "Do not remove required work to satisfy this check."
             )
         return self
 
 
 class WorkCommand(_Model):
+    """Shared-task command. create requires plan, expected_revision=0, a stable
+    operation_id, and no work_id. All other mutations require the current revision
+    from get and a stable operation_id. list/get/history need no operation_id.
+    """
+
     action: Literal[
         "create",
         "get",
@@ -151,9 +168,19 @@ class WorkCommand(_Model):
     ]
     work_id: str | None = None
     step_id: str | None = None
-    expected_revision: int | None = Field(default=None, ge=0)
-    operation_id: _NonBlank | None = None
-    plan: WorkPlan | None = None
+    expected_revision: int | None = Field(
+        default=None,
+        ge=0,
+        description="Required for every mutation: exactly 0 for create; otherwise the current card revision from get. For history, an optional exclusive event cursor. Not required for list/get.",
+    )
+    operation_id: _NonBlank | None = Field(
+        default=None,
+        description="Required for every mutation, including create. Use a unique ID for each new or corrected request; reuse it only when retrying the exact same request. Not required for list/get/history.",
+    )
+    plan: WorkPlan | None = Field(
+        default=None,
+        description="Required for create/propose. Include every required step in the dependency graph under one final integration step.",
+    )
     note: _NonBlank | None = None
     blocker_id: str | None = None
     condition: _NonBlank | None = None
@@ -163,6 +190,34 @@ class WorkCommand(_Model):
     commit: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40,64}$")] | None = (
         None
     )
+
+    @model_validator(mode="after")
+    def validate_mutation(self) -> Self:
+        if self.action in {"list", "get", "history"}:
+            return self
+        missing = [
+            field
+            for field in ("expected_revision", "operation_id")
+            if getattr(self, field) is None
+        ]
+        if missing:
+            revision_help = (
+                "Set expected_revision=0 for create and omit work_id."
+                if self.action == "create"
+                else "Read the current card with get and use its revision as expected_revision."
+            )
+            raise ValueError(
+                f"{self.action} requires missing field(s): {', '.join(missing)}. "
+                f"{revision_help} Supply a unique operation_id for each new or corrected "
+                "request; reuse it only for an exact retry."
+            )
+        if self.action == "create" and (
+            self.plan is None or self.expected_revision != 0 or self.work_id is not None
+        ):
+            raise ValueError(
+                "Create requires plan, expected_revision=0, and no work_id"
+            )
+        return self
 
 
 class WorkConflict(ValueError):
@@ -657,8 +712,6 @@ class WorkStore:
                         )
                     ],
                 }
-            if not command.operation_id or command.expected_revision is None:
-                raise ValueError("Mutations require expected_revision and operation_id")
             fingerprint = hashlib.sha256(
                 _json(
                     {
@@ -686,14 +739,6 @@ class WorkStore:
             if bound:
                 self._authenticate(db, attempt_token, actor)
             if command.action == "create":
-                if (
-                    command.plan is None
-                    or command.expected_revision != 0
-                    or command.work_id is not None
-                ):
-                    raise ValueError(
-                        "Create requires plan, expected_revision=0, and no work_id"
-                    )
                 plan = command.plan.model_dump()
                 card = {
                     "work_id": str(uuid4()),

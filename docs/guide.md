@@ -447,6 +447,8 @@ Illustrative creation arguments for **`tandem_work`**; replace the teaching goal
 
 The graph rejects missing/self/cyclic dependencies, duplicate step IDs, identical owner/reviewer, unsafe paths and overlapping ownership without an ancestor relationship. One final integration sink must depend transitively on every other step; independent accepted branches alone do not certify their combined result. A one-step task is valid.
 
+If validation lists independent final steps such as `final-green, suite-duration`, add `suite-duration` to `final-green.depends_on` if `final-green` is the intended integration step. Do not remove required investigation or verification work just to pass validation. For `create`, explicitly send `expected_revision: 0`, a unique `operation_id`, and the complete `plan`; omit `work_id`. Use a new operation ID for a corrected request; reuse an ID only for an exact retry. Rejected creation leaves no partial card.
+
 Both participants read and agree to the exact plan revision:
 
 ```json
