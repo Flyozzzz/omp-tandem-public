@@ -397,6 +397,20 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
         await self.mutate(self.omp, identifier, "claim", step_id="change")
         self.assertEqual((self.root / "module.txt").read_text(), "after\n")
+        hidden = await self.mutate(self.omp, identifier, "get")
+        self.assertIn("withheld", hidden["steps"][0]["submission"]["answer"])
+        self.assertEqual(hidden.get("visibility"), "independent_stage")
+        self.assertIn("commit", hidden["steps"][0]["submission"])
+        await self.mutate(
+            self.omp,
+            identifier,
+            "report",
+            step_id="change",
+            submission_id=submission,
+            resolution="success",
+            note="Independent read of the exact committed module",
+            evidence=[f"{commit}:module.txt contains after"],
+        )
         accepted = await self.mutate(
             self.omp,
             identifier,
@@ -469,7 +483,11 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         managed = self.bridge("omp", work_token_file=token_file)
         async with Client(build_server(managed)) as client:
             tools = await client.list_tools()
-            self.assertEqual({tool.name for tool in tools}, {"tandem_work"})
+            self.assertEqual(
+                {tool.name for tool in tools}, {"tandem_work", "tandem_review_read"}
+            )
+            with self.assertRaises(ToolError):
+                await client.call_tool("tandem_review_read", {"section": "manifest"})
             observed = await self.call(client, {"action": "get", "work_id": identifier})
             self.assertEqual(observed["participant"], "claude")
             with self.assertRaises(ToolError):

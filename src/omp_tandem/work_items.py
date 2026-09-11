@@ -99,6 +99,88 @@ def grant_preview(grant: dict) -> dict:
     }
 
 
+WITHHELD = {
+    "withheld": "author interpretation is hidden until the independent report is recorded and comparison is opened"
+}
+AUTHOR_FIELDS = ("answer", "evidence")
+
+
+def independent_stage(bound: dict | None) -> bool:
+    """True while a trusted independent-first review attempt may not see author material."""
+    return bool(
+        bound
+        and bound.get("kind") == "review"
+        and bound.get("protocol") == "independent_first"
+        and not bound.get("comparison_opened_at")
+    )
+
+
+def _withhold(record):
+    if isinstance(record, dict) and any(key in record for key in AUTHOR_FIELDS):
+        return {
+            **{key: value for key, value in record.items() if key not in AUTHOR_FIELDS},
+            **{key: WITHHELD for key in AUTHOR_FIELDS if key in record},
+        }
+    return record
+
+
+def redact_author(payload, bound: dict | None):
+    """One server-side visibility policy for every channel a reviewer can read.
+
+    Applied to card views, history events and mutation responses handed to a
+    review attempt before its comparison stage: submissions, submission intents,
+    checkpoints and dependency submissions keep raw provenance (commit, tree,
+    changed files) but lose the author's answer/evidence; history events that
+    carried them are withheld too. Requirements, plan and blockers stay visible.
+    """
+    if not independent_stage(bound):
+        return payload
+    if isinstance(payload, dict) and "steps" in payload and "plan" in payload:
+        view = json.loads(_json(payload))
+        for step in view["steps"]:
+            step["submission"] = _withhold(step.get("submission"))
+            step["checkpoint"] = _withhold(step.get("checkpoint"))
+            attempt = step.get("attempt")
+            if attempt and attempt.get("kind") == "implement":
+                # The implementer's finished answer/evidence are author material too.
+                step["attempt"] = attempt = _withhold(attempt)
+            if attempt:
+                attempt["submission"] = _withhold(attempt.get("submission"))
+                attempt["submission_intent"] = _withhold(
+                    attempt.get("submission_intent")
+                )
+                attempt["checkpoint"] = _withhold(attempt.get("checkpoint"))
+                attempt["dependencies"] = [
+                    _withhold(item) for item in attempt.get("dependencies") or []
+                ]
+        if view.get("result"):
+            view["result"] = _withhold(view["result"])
+        view["visibility"] = "independent_stage"
+        return view
+    if (
+        isinstance(payload, dict)
+        and "events" in payload
+        and isinstance(payload["events"], list)
+    ):
+        events = []
+        for event in payload["events"]:
+            details = event.get("details")
+            if isinstance(details, dict) and any(
+                key in details for key in ("note", *AUTHOR_FIELDS)
+            ):
+                details = {
+                    key: (WITHHELD if key in ("note", *AUTHOR_FIELDS) else value)
+                    for key, value in details.items()
+                }
+            projected = {**event, "details": details}
+            if isinstance(event.get("snapshot"), dict):
+                # Each history event embeds a full card snapshot; project it too.
+                projected["snapshot"] = redact_author(event["snapshot"], bound)
+            events.append(projected)
+        return {**payload, "events": events, "visibility": "independent_stage"}
+    return payload
+
+
 def model_selection(record: dict) -> dict:
     """Decode saved policy; only wholly pre-selection records are legacy grants."""
     keys = {"claude_model", "omp_model", "model_provenance"}
@@ -265,6 +347,8 @@ class WorkCommand(_Model):
         "submit",
         "accept",
         "reject",
+        "report",
+        "compare",
         "pause",
         "resume",
         "reconcile",
@@ -599,6 +683,10 @@ class WorkStore:
                 if step["attempt"]
                 else None
             )
+            if step["attempt"] and step["attempt"].get("kind") == "review":
+                # Truthful protocol label: attempts created before independent-first
+                # stages existed disclosed author material from the start.
+                step["attempt"].setdefault("protocol", "legacy_disclosure")
             if (
                 step["attempt"]
                 and step["attempt"]["state"] in _ACTIVE
@@ -878,19 +966,22 @@ class WorkStore:
                     self._authenticate(db, attempt_token, actor)
                 card = self._load(db, command.work_id)
                 if command.action == "get":
-                    return self._view(db, card)
-                return {
-                    "work_id": card["work_id"],
-                    "revision": card["revision"],
-                    "cursor": card["revision"],
-                    "events": [
-                        json.loads(row["event"])
-                        for row in db.execute(
-                            "SELECT event FROM work_events WHERE work_id=? AND revision>? ORDER BY revision",
-                            (card["work_id"], command.expected_revision or 0),
-                        )
-                    ],
-                }
+                    return redact_author(self._view(db, card), bound)
+                return redact_author(
+                    {
+                        "work_id": card["work_id"],
+                        "revision": card["revision"],
+                        "cursor": card["revision"],
+                        "events": [
+                            json.loads(row["event"])
+                            for row in db.execute(
+                                "SELECT event FROM work_events WHERE work_id=? AND revision>? ORDER BY revision",
+                                (card["work_id"], command.expected_revision or 0),
+                            )
+                        ],
+                    },
+                    bound,
+                )
             fingerprint = hashlib.sha256(
                 _json(
                     {
@@ -914,7 +1005,7 @@ class WorkStore:
                     attempt = self._attempt(db, response["claim"]["attempt_id"])
                     if attempt["state"] in _ACTIVE:
                         response["claim"]["token"] = attempt["token"]
-                return response
+                return redact_author(response, bound)
             if bound:
                 self._authenticate(db, attempt_token, actor)
             if command.action == "create":
@@ -947,7 +1038,10 @@ class WorkStore:
                 "INSERT INTO work_operations VALUES (?,?,?,?)",
                 (actor, command.operation_id, fingerprint, _json(saved)),
             )
-            return result
+            if bound and command.action != "compare":
+                # Re-read the credential: report/compare change what may be shown.
+                bound = self._credential(db, attempt_token, actor)
+            return redact_author(result, bound)
 
     def _perform(self, db, card, command, actor, bound, source_commit=None):
         action = command.action
@@ -1213,6 +1307,78 @@ class WorkStore:
                     "at": time.time(),
                 }
                 self._save_attempt(db, bound)
+            elif action == "report":
+                if (
+                    bound is None
+                    or bound["kind"] != "review"
+                    or actor != step["reviewer"]
+                    or not command.note
+                    or not command.evidence
+                ):
+                    raise ValueError(
+                        "Only the bound distinct reviewer may record an independent report with note and evidence"
+                    )
+                if bound.get("protocol") != "independent_first":
+                    raise ValueError("Legacy review attempts have no independent stage")
+                if bound.get("independent_report"):
+                    raise ValueError("Independent report is immutable")
+                if command.resolution not in {"success", "partial", "blocked"}:
+                    raise ValueError(
+                        "Report requires resolution success, partial or blocked"
+                    )
+                if (
+                    not step["submission"]
+                    or command.submission_id != step["submission"]["submission_id"]
+                    or bound["submission"]["submission_id"] != command.submission_id
+                ):
+                    raise WorkConflict(
+                        "Report must reference the exact reviewed submission"
+                    )
+                bound["independent_report"] = {
+                    "outcome": command.resolution,
+                    "answer": command.note,
+                    "evidence": command.evidence,
+                    "submission_id": command.submission_id,
+                    "at": time.time(),
+                }
+                self._save_attempt(db, bound)
+                return self._record(
+                    db,
+                    card,
+                    "independent_report",
+                    actor,
+                    {
+                        "attempt_id": bound["attempt_id"],
+                        "outcome": command.resolution,
+                        "submission_id": command.submission_id,
+                    },
+                )
+            elif action == "compare":
+                if (
+                    bound is None
+                    or bound["kind"] != "review"
+                    or actor != step["reviewer"]
+                ):
+                    raise ValueError(
+                        "Only the bound distinct reviewer may open comparison"
+                    )
+                report = bound.get("independent_report")
+                if not report or report["outcome"] != "success":
+                    raise ValueError(
+                        "Comparison opens only after a complete successful independent report"
+                    )
+                if bound.get("comparison_opened_at"):
+                    raise ValueError("Comparison is opened at most once")
+                bound["comparison_opened_at"] = time.time()
+                bound["review_stage"] = "comparison"
+                self._save_attempt(db, bound)
+                return self._record(
+                    db,
+                    card,
+                    "comparison_opened",
+                    actor,
+                    {"attempt_id": bound["attempt_id"]},
+                )
             elif action in {"accept", "reject"}:
                 if (
                     bound["kind"] != "review"
@@ -1235,6 +1401,16 @@ class WorkStore:
                     )
                 if bound.get("verdict"):
                     raise ValueError("Review verdict is immutable")
+                if bound.get("protocol") == "independent_first":
+                    report = bound.get("independent_report")
+                    if not report:
+                        raise ValueError(
+                            "Record the independent report before deciding"
+                        )
+                    if action == "accept" and report["outcome"] != "success":
+                        raise ValueError(
+                            "A partial or blocked independent report cannot accept; reject, block or reconcile"
+                        )
                 if any(
                     self._step(card, dependency)["state"] != "accepted"
                     for dependency in step["depends_on"]
@@ -1453,6 +1629,18 @@ class WorkStore:
             }
             return self._record(db, card, "authorized", "operator")
 
+    def bind_review(self, attempt_id: str, review_id: str) -> dict:
+        """Pin the immutable snapshot a review attempt reads; set once."""
+        with self._transaction() as db:
+            attempt = self._attempt(db, attempt_id)
+            if attempt["kind"] != "review":
+                raise ValueError("Only review attempts read a pinned snapshot")
+            if attempt.get("review_id") not in (None, review_id):
+                raise ValueError("Review attempt is already bound to another snapshot")
+            attempt["review_id"] = review_id
+            self._save_attempt(db, attempt)
+            return _public_attempt(attempt)
+
     def revoke(self, work_id) -> dict:
         with self._transaction() as db:
             card = self._load(db, work_id)
@@ -1630,7 +1818,24 @@ class WorkStore:
             "native_task_id": None,
             "session_id": None,
             "allow_work": grant["allow_work"] if autonomous else False,
-            "allow_shell": shell_permission(grant) if autonomous else False,
+            "allow_shell": shell_permission(grant)
+            if autonomous and kind != "review"
+            else False,
+            **(
+                {
+                    "protocol": "independent_first",
+                    "review_stage": "independent",
+                    "independent_report": None,
+                    "comparison_opened_at": None,
+                    # Arbitrary shell for a reviewer would bypass the snapshot reader;
+                    # no stage-scoped execution path exists yet, so it is blocked here.
+                    "shell_check_policy": "blocked_no_stage_scoped_execution"
+                    if autonomous and shell_permission(grant)
+                    else "not_granted",
+                }
+                if kind == "review"
+                else {}
+            ),
             **selection,
             "remaining_cost_usd": envelope,
             "reserved_cost_usd": envelope,

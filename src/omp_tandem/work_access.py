@@ -40,6 +40,17 @@ def perform_work(store, request, *, actor, attempt_token=None, claims=None):
     token = attempt_token or (
         claims.get(key) if claims is not None and command.action != "claim" else None
     )
+    inferred = False
+    if token is None and claims and command.action in {"get", "history"}:
+        # A reader that holds exactly one claim on this work reads through it, so
+        # the store can apply the review-stage visibility policy to its view.
+        held = [
+            value
+            for (work_id, _step), value in claims.items()
+            if work_id == command.work_id
+        ]
+        if len(held) == 1:
+            token, inferred = held[0], True
     bound, output = None, None
     if token:
         # Exact receipts may still be read with a retired credential; new effects
@@ -54,7 +65,14 @@ def perform_work(store, request, *, actor, attempt_token=None, claims=None):
         output = WorkWorkspace(store.scope).adopt_submission(
             bound, view["plan"], command.commit
         )
-    result = store.perform(command, actor=actor, attempt_token=token)
+    try:
+        result = store.perform(command, actor=actor, attempt_token=token)
+    except ValueError:
+        if not inferred:
+            raise
+        # The inferred claim is retired; an unbound read is still permitted.
+        token = None
+        result = store.perform(command, actor=actor)
     if claims is not None and result.get("claim", {}).get("token"):
         claim = result["claim"]
         claims[(result["work_id"], claim["step_id"])] = claim["token"]

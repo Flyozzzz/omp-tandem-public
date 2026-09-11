@@ -105,7 +105,8 @@ class NativeWorker:
                         self.messages.reviews.read(
                             task["review_id"],
                             **request.model_dump(),
-                            reveal_author=task["review_stage"] == "comparison",
+                            reveal_author=task["review_stage"] == "comparison"
+                            or self._comparison_open(task_id),
                         ),
                         ensure_ascii=False,
                     ),
@@ -161,6 +162,13 @@ class NativeWorker:
             *work_tools,
         )
 
+    def _comparison_open(self, task_id) -> bool:
+        """Author material for a managed reviewer follows the stored attempt state."""
+        if self.work_items is None:
+            return False
+        attempt = self.work_items.native_attempt(task_id)
+        return bool(attempt and attempt.get("comparison_opened_at"))
+
     def execute(self, task_id):
         client = None
         started = time.monotonic()
@@ -214,13 +222,22 @@ class NativeWorker:
             )
             if managed:
                 self.work_items.authenticate(managed["token"])
-                if "--no-tools" in args:
-                    args.remove("--no-tools")
-                tools = ["read", "grep", "glob"]
-                if managed["kind"] == "implement" and managed["allow_work"]:
-                    tools += ["edit", "write"]
-                if shell_permission(managed):
-                    tools.append("bash")
+                if (
+                    managed["kind"] == "review"
+                    and managed.get("protocol") == "independent_first"
+                ):
+                    # Snapshot-only reviewer: no native filesystem tools at all.
+                    if "--no-tools" not in args:
+                        args.append("--no-tools")
+                    tools = None
+                else:
+                    if "--no-tools" in args:
+                        args.remove("--no-tools")
+                    tools = ["read", "grep", "glob"]
+                    if managed["kind"] == "implement" and managed["allow_work"]:
+                        tools += ["edit", "write"]
+                    if shell_permission(managed):
+                        tools.append("bash")
                 args += ["--no-lsp"]
             host_tools = self.worker_tools(task)
             client = RpcClient(

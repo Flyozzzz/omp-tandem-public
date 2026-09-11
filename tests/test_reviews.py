@@ -716,3 +716,66 @@ class ReviewTests(unittest.TestCase):
             self.store.read(review["review_id"], "selected", "context.txt")["content"],
             "explicit context",
         )
+
+
+class CommitSourceReviewTests(ReviewTests):
+    def test_commit_source_captures_committed_bytes_only(self):
+        self.initialize()
+        (self.root / "module.py").write_text("before\n")
+        self.git("add", "module.py")
+        self.git("commit", "-q", "-m", "base")
+        base = self.git("rev-parse", "HEAD").decode().strip()
+        (self.root / "module.py").write_text("after\n")
+        (self.root / "extra.py").write_text("new\n")
+        self.git("add", "module.py", "extra.py")
+        self.git("commit", "-q", "-m", "change")
+        commit = self.git("rev-parse", "HEAD").decode().strip()
+        # Live edits and index changes must not leak into a commit bundle.
+        (self.root / "module.py").write_text("dirty working tree\n")
+        (self.root / "extra.py").write_text("dirty\n")
+        self.git("add", "extra.py")
+        summary = self.store.create(
+            ReviewRequest(
+                requirements="Review the committed change",
+                source="commit",
+                commit=commit,
+                base=base,
+                author_proposal="author-sentinel-7731",
+            )
+        )
+        self.assertEqual(summary["source"], "commit")
+        self.assertEqual(summary["change_count"], 2)
+        selected = self.store.read(
+            summary["review_id"], section="selected", path="module.py"
+        )
+        self.assertEqual(selected["content"], "after\n")
+        self.assertEqual(
+            self.store.read(summary["review_id"], section="base", path="module.py")[
+                "content"
+            ],
+            "before\n",
+        )
+        self.assertFalse(
+            self.store.read(summary["review_id"], section="staged", path="extra.py")[
+                "exists"
+            ]
+        )
+        with self.assertRaises(ValueError):
+            self.store.read(summary["review_id"], section="author")
+        author = self.store.read(
+            summary["review_id"], section="author", reveal_author=True
+        )
+        self.assertIn("author-sentinel-7731", json.dumps(author))
+        manifest = self.store.read(summary["review_id"], section="manifest")
+        self.assertEqual(json.loads(manifest["content"])["git"]["commit"], commit)
+        assessment = self.store.assess(summary["review_id"])
+        self.assertEqual(assessment["changed_paths"], [])
+        self.assertIn("committed bytes", assessment["scope"])
+        with self.assertRaises(ValueError):
+            ReviewRequest(requirements="x", source="commit")
+        with self.assertRaises(ValueError):
+            self.store.create(
+                ReviewRequest(
+                    requirements="x", source="commit", commit="0" * 40, base=base
+                )
+            )

@@ -175,7 +175,23 @@ class WorkItemsTests(unittest.TestCase):
             cost_usd=cost,
         )
 
-    def verdict(self, attempt, *, action="accept"):
+    def report(self, attempt, *, outcome="success"):
+        return self.change(
+            "report",
+            actor=attempt["actor"],
+            token=attempt["token"],
+            step_id=attempt["step_id"],
+            submission_id=attempt["submission"]["submission_id"],
+            resolution=outcome,
+            note="Independent assessment of the exact snapshot",
+            evidence=["Read selected bytes through the snapshot reader"],
+        )
+
+    def verdict(self, attempt, *, action="accept", report=True):
+        if report and attempt.get("protocol") == "independent_first":
+            current = self.store.attempt(attempt["attempt_id"])
+            if not current.get("independent_report"):
+                self.report(attempt)
         return self.change(
             action,
             actor=attempt["actor"],
@@ -563,6 +579,7 @@ class WorkItemsTests(unittest.TestCase):
         self.agreed()
         self.submit(self.reserve(autonomous=False), cost=None)
         review = self.reserve(actor="claude", kind="review", autonomous=False)
+        self.report(review)
         command = {
             "action": "accept",
             "work_id": self.work_id,
@@ -1275,3 +1292,136 @@ class AttemptBudgetAndShellTests(WorkItemsTests):
                 allow_shell=True,
                 allow_tests=False,
             )
+
+
+class IndependentReviewTests(WorkItemsTests):
+    SENTINEL = "Implemented observable contract"
+
+    def _bound_get(self, review):
+        return self.store.perform(
+            {"action": "get", "work_id": self.work_id},
+            actor=review["actor"],
+            attempt_token=review["token"],
+        )
+
+    def _bound_history(self, review):
+        return self.store.perform(
+            {"action": "history", "work_id": self.work_id},
+            actor=review["actor"],
+            attempt_token=review["token"],
+        )
+
+    def test_author_material_is_withheld_until_comparison_opens(self):
+        self.agreed()
+        self.authorize()
+        self.submit(self.reserve())
+        self.assertIn(self.SENTINEL, json.dumps(self.view()))
+        review = self.reserve(actor="claude", kind="review")
+        self.assertEqual(review["protocol"], "independent_first")
+        self.assertIs(review["allow_shell"], False)
+        hidden = self._bound_get(review)
+        self.assertEqual(hidden["visibility"], "independent_stage")
+        self.assertNotIn(self.SENTINEL, json.dumps(hidden))
+        self.assertIn("withheld", json.dumps(hidden["steps"][0]["submission"]))
+        self.assertEqual(
+            hidden["steps"][0]["submission"]["commit"], "a" * 40
+        )  # raw provenance stays visible
+        self.assertNotIn(self.SENTINEL, json.dumps(self._bound_history(review)))
+        # Unbound coordinator reads are unchanged.
+        self.assertIn(self.SENTINEL, json.dumps(self.view()))
+        with self.assertRaises(ValueError):
+            self.verdict(review, report=False)
+        with self.assertRaises(ValueError):
+            self.change(
+                "compare",
+                actor="claude",
+                token=review["token"],
+                step_id="backend",
+            )
+        self.report(review)
+        with self.assertRaises(ValueError):
+            self.report(review)
+        self.assertNotIn(self.SENTINEL, json.dumps(self._bound_get(review)))
+        opened = self.change(
+            "compare", actor="claude", token=review["token"], step_id="backend"
+        )
+        self.assertNotIn("visibility", opened)
+        self.assertIn(self.SENTINEL, json.dumps(self._bound_get(review)))
+        with self.assertRaises(ValueError):
+            self.change(
+                "compare", actor="claude", token=review["token"], step_id="backend"
+            )
+        self.verdict(review)
+        accepted = self.finish_review(review)
+        self.assertEqual(accepted["steps"][0]["state"], "accepted")
+        stored = self.store.attempt(review["attempt_id"])
+        self.assertEqual(stored["independent_report"]["outcome"], "success")
+        self.assertIsNotNone(stored["comparison_opened_at"])
+        self.assertEqual(stored["verdict"]["verdict"], "accept")
+
+    def test_partial_or_blocked_independent_report_cannot_accept(self):
+        self.agreed()
+        self.authorize()
+        self.submit(self.reserve())
+        review = self.reserve(actor="claude", kind="review")
+        self.report(review, outcome="partial")
+        with self.assertRaises(ValueError):
+            self.verdict(review, report=False)
+        with self.assertRaises(ValueError):
+            self.change(
+                "compare", actor="claude", token=review["token"], step_id="backend"
+            )
+        self.verdict(review, action="reject", report=False)
+        rejected = self.finish_review(review)
+        self.assertIn(rejected["steps"][0]["state"], {"ready", "changes_requested"})
+        stored = self.store.attempt(review["attempt_id"])
+        self.assertEqual(stored["verdict"]["verdict"], "reject")
+        self.assertEqual(stored["independent_report"]["outcome"], "partial")
+
+    def test_report_binds_to_exact_submission_and_reviewer(self):
+        self.agreed()
+        self.authorize()
+        self.submit(self.reserve())
+        review = self.reserve(actor="claude", kind="review")
+        with self.assertRaises(ValueError):
+            self.change(
+                "report",
+                actor="claude",
+                token=review["token"],
+                step_id="backend",
+                submission_id="other-output",
+                resolution="success",
+                note="Wrong target",
+                evidence=["x"],
+            )
+        with self.assertRaises(ValueError):
+            self.change(
+                "report",
+                actor="claude",
+                token=review["token"],
+                step_id="backend",
+                submission_id=review["submission"]["submission_id"],
+                resolution="great",
+                note="Invalid outcome",
+                evidence=["x"],
+            )
+        with self.assertRaises(ValueError):
+            self.change(
+                "report",
+                actor="omp",
+                step_id="backend",
+                submission_id=review["submission"]["submission_id"],
+                resolution="success",
+                note="Unbound principal",
+                evidence=["x"],
+            )
+
+    def test_shell_grant_never_reaches_independent_reviewer(self):
+        self.agreed()
+        self.authorize(allow_shell=True)
+        self.submit(self.reserve())
+        review = self.reserve(actor="claude", kind="review")
+        self.assertIs(review["allow_shell"], False)
+        self.assertEqual(
+            review["shell_check_policy"], "blocked_no_stage_scoped_execution"
+        )

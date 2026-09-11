@@ -437,3 +437,48 @@ class ShellPermissionAdapterTests(WorkAdapterTests):
             )
         )
         self.assertEqual(context, {"allow_work": False, "allow_shell": True})
+
+
+class IndependentReviewAdapterTests(WorkAdapterTests):
+    SENTINEL = "author-interpretation-sentinel-9f31"
+
+    def _review_attempt(self):
+        self.attempt.update(
+            kind="review",
+            allow_work=False,
+            allow_shell=True,  # a shell grant must not leak into the reviewer
+            protocol="independent_first",
+            review_stage="independent",
+            independent_report=None,
+            comparison_opened_at=None,
+            review_id="fixture-review",
+            submission={
+                "submission_id": "sub-1",
+                "commit": "b" * 40,
+                "base_commit": "saved",
+                "tree_hash": "c" * 40,
+                "changed_files": ["code.py"],
+                "answer": self.SENTINEL,
+                "evidence": [self.SENTINEL + " evidence"],
+            },
+            dependencies=[{"submission_id": "dep", "answer": self.SENTINEL}],
+        )
+        self.attempt.pop("allow_tests", None)
+
+    def test_review_launch_reads_snapshot_only_and_hides_author_material(self):
+        self._review_attempt()
+        adapter = self.adapter(self.result_program())
+        handle = self.launch(adapter)
+        self.finish(adapter, handle)
+        private = self.state / "work-adapters" / self.attempt["attempt_id"]
+        context = (private / "context.txt").read_text()
+        self.assertNotIn(self.SENTINEL, context)
+        self.assertIn("fixture-review", context)
+        self.assertIn("tandem_review_read", context)
+        self.assertIn('"commit": "' + "b" * 40, context)
+        argv = json.loads((private / "launch.json").read_text())["argv"]
+        self.assertEqual(argv[argv.index("--tools") + 1], "")
+        allowed = argv[argv.index("--allowedTools") + 1].split(",")
+        self.assertIn("mcp__tandem_work__tandem_review_read", allowed)
+        self.assertNotIn("Bash", allowed)
+        self.assertNotIn("Read", allowed)

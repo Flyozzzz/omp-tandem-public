@@ -113,6 +113,49 @@ def build_server(configuration: Bridge | RuntimeOptions):
         return result
 
     if restricted_work:
+
+        @mcp.tool()
+        async def tandem_review_read(
+            ctx: Context,
+            section: Literal[
+                "manifest",
+                "requirements",
+                "criteria",
+                "diff",
+                "selected",
+                "base",
+                "staged",
+                "checks",
+                "author",
+            ] = "manifest",
+            path: str | None = None,
+            offset: Annotated[int, Field(ge=0)] = 0,
+            limit: Annotated[int, Field(ge=1, le=50000)] = 16000,
+        ) -> dict:
+            """Read the immutable snapshot pinned to this review attempt, never live files.
+
+            The author section opens only after the attempt's independent report was
+            recorded and comparison was opened through tandem_work; the stage is taken
+            from the stored attempt, not from a request argument.
+            """
+            bridge = await runtime.get(ctx)
+            attempt = await asyncio.to_thread(
+                bridge.work_items.authenticate, bridge.work_token
+            )
+            review_id = attempt.get("review_id")
+            if attempt.get("kind") != "review" or not review_id:
+                raise ValueError("This attempt has no pinned review snapshot")
+            reveal = bool(attempt.get("comparison_opened_at"))
+            return await asyncio.to_thread(
+                bridge.reviews.read,
+                review_id,
+                section=section,
+                path=path,
+                offset=offset,
+                limit=limit,
+                reveal_author=reveal,
+            )
+
         return mcp
 
     @mcp.tool()

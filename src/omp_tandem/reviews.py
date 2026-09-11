@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .artifacts import ArtifactStore, _canonical_id
 from .workspace import ProjectScope
@@ -75,9 +75,15 @@ class ReviewRequest(BaseModel):
     requirements: str = Field(min_length=1, max_length=200000)
     criteria: list[str] = Field(default_factory=list, max_length=100)
     base: str = Field(default="HEAD", min_length=1, max_length=200)
-    source: Literal["worktree", "staged"] = Field(
+    source: Literal["worktree", "staged", "commit"] = Field(
         default="worktree",
-        description="Select worktree bytes or Git index bytes compared with base. Staged capture never reads live files.",
+        description="Select worktree bytes, Git index bytes, or the tree of an existing commit compared with base. Staged and commit captures never read live files.",
+    )
+    commit: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description="Required with source=commit: the exact committed snapshot to review against base.",
     )
     paths: list[str] | None = Field(default=None, min_length=1, max_length=_MAX_FILES)
     context_paths: list[str] = Field(
@@ -103,6 +109,14 @@ class ReviewRequest(BaseModel):
         if not value.strip():
             raise ValueError("requirements must be nonblank")
         return value
+
+    @model_validator(mode="after")
+    def commit_source_requires_commit(self) -> ReviewRequest:
+        if (self.source == "commit") != (self.commit is not None):
+            raise ValueError(
+                "source=commit requires commit; other sources must not set it"
+            )
+        return self
 
 
 @dataclass(frozen=True)
@@ -320,6 +334,19 @@ class ReviewStore:
             "prefix": prefix,
         }
 
+    def _commit_identity(self, identity: dict, commit: str | None) -> dict:
+        """Resolve the reviewed commit; the bundle stays immutable if it exists."""
+        resolved = self._git(
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            str(commit) + "^{commit}",
+            allow_failure=True,
+        )
+        if resolved is None:
+            raise ValueError("Review commit must resolve to an existing Git commit")
+        return {**identity, "base_commit": resolved.decode().strip()}
+
     def _index(self) -> dict:
         entries = {}
         for row in self._git("ls-files", "--stage", "-z").split(b"\0"):
@@ -361,10 +388,23 @@ class ReviewStore:
     ) -> list[str]:
         if request.source == "staged" and identity["kind"] != "git":
             raise ValueError("Staged reviews require a Git repository")
+        if request.source == "commit" and identity["kind"] != "git":
+            raise ValueError("Commit reviews require a Git repository")
         if request.paths is not None:
             return sorted({_path(path) for path in request.paths})
         if identity["kind"] != "git":
             raise ValueError("Non-Git reviews require explicit file paths")
+        if request.source == "commit":
+            target = self._tree(self._commit_identity(identity, request.commit))
+            paths = {
+                path
+                for path in target.keys() | tree.keys()
+                if (target.get(path) or (None,))[:2] != (tree.get(path) or (None,))[:2]
+            }
+            selected = sorted({_path(path) for path in paths})
+            if len(selected) > _MAX_FILES:
+                raise ValueError("Review selects more than 256 files; specify paths")
+            return selected
         # Compare object IDs and modes without invoking diff or content filters.
         paths = {
             path
@@ -415,17 +455,24 @@ class ReviewStore:
         files, contents, observed = [], [], {}
         total = 0
         diff = []
+        commit_tree = (
+            self._tree(self._commit_identity(identity, request.commit))
+            if request.source == "commit"
+            else {}
+        )
         for path in paths:
             if request.source == "worktree":
                 selected, mode, signature = self._working(path)
                 observed[path] = (selected, mode, signature)
             base, base_mode = self._blob(tree.get(path))
-            stages = index.get(path, [])
+            stages = index.get(path, []) if request.source != "commit" else []
             if len(stages) > 1 or (stages and stages[0][2] != "0"):
                 raise ValueError(f"Unmerged index entry cannot be certified: {path}")
             staged, staged_mode = self._blob(stages[0] if stages else None)
             if request.source == "staged":
                 selected, mode = staged, staged_mode
+            if request.source == "commit":
+                selected, mode = self._blob(commit_tree.get(path))
             if path in context_paths and selected is None:
                 raise ValueError(
                     f"Required context is missing from the {request.source} source: {path}; "
@@ -509,12 +556,21 @@ class ReviewStore:
             or self._selection(request, identity, current_index, tree) != selected_paths
         ):
             raise _Mutation("Git identity or selected paths changed during capture")
-        if any(current_index.get(path) != index.get(path) for path in paths):
+        if request.source != "commit" and any(
+            current_index.get(path) != index.get(path) for path in paths
+        ):
             raise _Mutation("Selected Git index changed during capture")
         if request.source == "worktree":
             for path in paths:
                 if self._working(path) != observed[path]:
                     raise _Mutation(f"Selected file changed during capture: {path}")
+        if request.source == "commit":
+            identity = {
+                **identity,
+                "commit": self._commit_identity(identity, request.commit)[
+                    "base_commit"
+                ],
+            }
         fingerprint = _sha(
             _json({"files": files, "git": identity, "source": request.source}).encode()
         )
@@ -542,6 +598,8 @@ class ReviewStore:
             if request.paths is not None
             else "staged_changes"
             if request.source == "staged"
+            else "commit_changes"
+            if request.source == "commit"
             else "current_changes",
             "requested_base": request.base,
             "git": identity,
@@ -564,10 +622,16 @@ class ReviewStore:
                 ],
                 "observed": [
                     "Git HEAD/base identity",
-                    "selected index entries",
-                    "selected index entries stable across two reads"
-                    if request.source == "staged"
-                    else "selected files stable across two reads",
+                    *(
+                        ["reviewed commit object identity"]
+                        if request.source == "commit"
+                        else [
+                            "selected index entries",
+                            "selected index entries stable across two reads"
+                            if request.source == "staged"
+                            else "selected files stable across two reads",
+                        ]
+                    ),
                 ],
                 "external": [
                     "unselected files",
@@ -877,6 +941,8 @@ class ReviewStore:
             unknown.append(str(exc))
         for row in manifest["files"]:
             path = row["path"]
+            if source == "commit":
+                break  # committed bytes cannot drift; only the commit's existence matters
             try:
                 if source == "worktree":
                     data, mode, _ = self._working(path)
@@ -899,6 +965,15 @@ class ReviewStore:
                             index_changed.append(path)
             except ValueError as exc:
                 unknown.append(f"{path}: {exc}")
+        if source == "commit" and identity is not None:
+            exists = self._git(
+                "cat-file",
+                "-e",
+                manifest["git"]["commit"] + "^{commit}",
+                allow_failure=True,
+            )
+            if exists is None:
+                unknown.append("Reviewed commit object is no longer reachable")
         previous = identity is not None and identity["head"] != manifest["git"]["head"]
         base_changed = (
             identity is not None
@@ -930,6 +1005,9 @@ class ReviewStore:
                 "selected index paths and captured Git identity only; working tree, "
                 "unselected staged paths and external boundaries remain outside this review"
                 if source == "staged"
+                else "immutable committed bytes compared with the base commit; working "
+                "tree, index and external boundaries remain outside this review"
+                if source == "commit"
                 else "selected files and captured Git identity only; external boundaries remain unknown"
             ),
         }
