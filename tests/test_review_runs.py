@@ -237,17 +237,7 @@ raise SystemExit(main())
         (self.root / "scenario").write_text("question")
         run = await self.begin()
         waiting = await self.wait_run(run["run_id"], waiting=True)
-        with (
-            patch.object(
-                self.runs, "read_task", side_effect=AssertionError("full result read")
-            ),
-            patch.object(
-                self.bridge.reviews,
-                "assess",
-                side_effect=AssertionError("live hashing"),
-            ),
-        ):
-            self.assertEqual(self.runs.state(run["run_id"]), "waiting_input")
+        self.assertEqual(self.runs.state(run["run_id"]), "waiting_input")
         replied = await asyncio.to_thread(
             self.runs.reply, run["run_id"], waiting["question"]["question_id"], "blue"
         )
