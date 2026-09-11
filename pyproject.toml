@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "omp-tandem"
-version = "3.4.0"
+version = "3.5.0"
 description = "Project-isolated AI peer collaboration through Oh My Pi, MCP, and agent plugins"
 readme = "README.md"
 license = "MIT"

@@ -1,6 +1,6 @@
 {
   "name": "omp-tandem",
-  "version": "3.4.0",
+  "version": "3.5.0",
   "description": "Project-isolated AI peer collaboration through Oh My Pi, MCP, and agent plugins.",
   "owner": {
     "name": "Flyozzzz",
@@ -10,7 +10,7 @@
     {
       "name": "omp-tandem",
       "source": "./",
-      "version": "3.4.0",
+      "version": "3.5.0",
       "description": "Project-scoped collaboration with Oh My Pi through MCP.",
       "license": "MIT",
       "author": {

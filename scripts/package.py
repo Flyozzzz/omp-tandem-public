@@ -16,6 +16,7 @@ ROOT_FILES = (
     "LICENSE",
     "CONTRIBUTING.md",
     "SECURITY.md",
+    "CHANGELOG.md",
     "README.md",
     "README.ru.md",
     "README.zh-CN.md",

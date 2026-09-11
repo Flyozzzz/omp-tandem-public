@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "omp-tandem",
-  "version": "3.4.0",
+  "version": "3.5.0",
   "description": "Reciprocal consultation, design, implementation, and review with Oh My Pi through project-scoped MCP tools.",
   "author": {
     "name": "Flyozzzz",
