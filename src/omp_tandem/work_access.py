@@ -65,14 +65,14 @@ def perform_work(store, request, *, actor, attempt_token=None, claims=None):
         output = WorkWorkspace(store.scope).adopt_submission(
             bound, view["plan"], command.commit
         )
-    try:
-        result = store.perform(command, actor=actor, attempt_token=token)
-    except ValueError:
-        if not inferred:
-            raise
-        # The inferred claim is retired; an unbound read is still permitted.
-        token = None
-        result = store.perform(command, actor=actor)
+    if inferred:
+        try:
+            store.authenticate(token)
+        except ValueError:
+            # Only a retired inferred credential falls back to an unbound read;
+            # a refusal of the bound read itself must not fail open.
+            token = None
+    result = store.perform(command, actor=actor, attempt_token=token)
     if claims is not None and result.get("claim", {}).get("token"):
         claim = result["claim"]
         claims[(result["work_id"], claim["step_id"])] = claim["token"]

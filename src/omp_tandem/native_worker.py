@@ -155,12 +155,29 @@ class NativeWorker:
                 parameters=ArtifactReadRequest.model_json_schema(),
                 decode=ArtifactReadRequest.model_validate,
                 execute=lambda request, _: json.dumps(
-                    self.artifacts.read(**request.model_dump()), ensure_ascii=False
+                    self._read_artifact(task_id, request), ensure_ascii=False
                 ),
             ),
             *review_tools,
             *work_tools,
         )
+
+    def _read_artifact(self, task_id, request):
+        """Arbitrary artifact reads are author-material channels for a reviewer."""
+        if self.work_items is not None:
+            attempt = self.work_items.native_attempt(task_id)
+            if (
+                attempt
+                and attempt.get("kind") == "review"
+                and attempt.get("protocol") == "independent_first"
+                and not attempt.get("comparison_opened_at")
+            ):
+                raise ValueError(
+                    "Shared artifacts are withheld during the independent review stage; "
+                    "read the pinned snapshot through tandem_review_read, record the report, "
+                    "then open comparison"
+                )
+        return self.artifacts.read(**request.model_dump())
 
     def _comparison_open(self, task_id) -> bool:
         """Author material for a managed reviewer follows the stored attempt state."""

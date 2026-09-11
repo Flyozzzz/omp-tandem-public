@@ -1416,12 +1416,120 @@ class IndependentReviewTests(WorkItemsTests):
                 evidence=["x"],
             )
 
-    def test_shell_grant_never_reaches_independent_reviewer(self):
+    def test_shell_grant_blocks_independent_review_before_launch(self):
         self.agreed()
         self.authorize(allow_shell=True)
         self.submit(self.reserve())
+        with self.assertRaises(ValueError):
+            self.reserve(actor="claude", kind="review")
+        step = self.view()["steps"][0]
+        self.assertEqual(step["state"], "blocked")
+        blocker = step["blockers"][0]
+        self.assertEqual(blocker["note"], WorkStore.SHELL_REVIEW_BLOCK)
+        self.assertEqual(blocker["actor"], "operator")
+        with self.assertRaises(ValueError):
+            self.reserve(actor="claude", kind="review")
+        with self.assertRaises(ValueError):  # not the author, not the operator
+            self.change(
+                "unblock",
+                actor="claude",
+                step_id="backend",
+                blocker_id=blocker["blocker_id"],
+                resolution="resolved",
+                note="Reviewer cannot lift it",
+                evidence=["none"],
+            )
+        self.change(
+            "unblock",
+            actor="operator",
+            step_id="backend",
+            blocker_id=blocker["blocker_id"],
+            resolution="not_applicable",
+            note="Review proceeds without shell checks",
+            evidence=["operator decision"],
+        )
         review = self.reserve(actor="claude", kind="review")
         self.assertIs(review["allow_shell"], False)
         self.assertEqual(
             review["shell_check_policy"], "blocked_no_stage_scoped_execution"
+        )
+
+    def test_claim_response_and_replay_are_projected_for_the_reviewer(self):
+        self.agreed()
+        self.submit(self.reserve(autonomous=False), cost=None)
+        command = {
+            "action": "claim",
+            "work_id": self.work_id,
+            "step_id": "backend",
+            "expected_revision": self.view()["revision"],
+            "operation_id": "manual-review-claim",
+        }
+        first = self.store.perform(command, actor="claude")
+        self.assertEqual(first["claim"]["protocol"], "independent_first")
+        self.assertIn("token", first["claim"])
+        self.assertNotIn(self.SENTINEL, json.dumps(first))
+        self.assertEqual(first["claim"]["submission"]["commit"], "a" * 40)
+        replay = self.store.perform(command, actor="claude")
+        self.assertNotIn(self.SENTINEL, json.dumps(replay))
+        self.assertEqual(replay["claim"]["token"], first["claim"]["token"])
+
+    def test_inferred_reader_never_fails_open(self):
+        from omp_tandem.work_access import perform_work
+
+        self.agreed()
+        self.authorize()
+        self.submit(self.reserve())
+        review = self.reserve(actor="claude", kind="review")
+        claims = {(self.work_id, "backend"): review["token"]}
+        bound = perform_work(
+            self.store,
+            {"action": "get", "work_id": self.work_id},
+            actor="claude",
+            claims=claims,
+        )
+        self.assertNotIn(self.SENTINEL, json.dumps(bound))
+        with self.assertRaises(ValueError):
+            perform_work(
+                self.store,
+                {"action": "get", "work_id": self.work_id, "step_id": "integration"},
+                actor="claude",
+                claims=claims,
+            )
+        with self.assertRaises(ValueError):
+            perform_work(
+                self.store,
+                {
+                    "action": "history",
+                    "work_id": self.work_id,
+                    "step_id": "integration",
+                },
+                actor="claude",
+                claims=claims,
+            )
+
+    def test_native_artifact_reader_is_withheld_until_comparison(self):
+        from types import SimpleNamespace
+
+        from omp_tandem.native_worker import NativeWorker
+        from omp_tandem.runtime_models import ArtifactReadRequest
+
+        self.agreed()
+        self.authorize()
+        self.submit(self.reserve())
+        review = self.reserve(actor="claude", kind="review")
+        self.store.started(
+            review["attempt_id"], native_task_id="native-review", workspace="/tmp"
+        )
+        worker = NativeWorker.__new__(NativeWorker)
+        worker.work_items = self.store
+        worker.artifacts = SimpleNamespace(read=lambda **_: {"content": self.SENTINEL})
+        request = ArtifactReadRequest(artifact_id=str(uuid4()))
+        with self.assertRaises(ValueError):
+            worker._read_artifact("native-review", request)
+        self.report(review)
+        with self.assertRaises(ValueError):
+            worker._read_artifact("native-review", request)
+        self.change("compare", actor="claude", token=review["token"], step_id="backend")
+        self.assertEqual(
+            worker._read_artifact("native-review", request)["content"], self.SENTINEL
         )

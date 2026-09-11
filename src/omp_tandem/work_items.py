@@ -124,6 +124,22 @@ def _withhold(record):
     return record
 
 
+def _project_claim(response, attempt):
+    """Project a claim response through the freshly created attempt's stage."""
+    if not independent_stage(attempt):
+        return response
+    projected = redact_author(response, attempt)
+    claim = dict(projected.get("claim") or {})
+    if claim:
+        claim = _withhold(claim)
+        claim["submission"] = _withhold(claim.get("submission"))
+        claim["dependencies"] = [
+            _withhold(item) for item in claim.get("dependencies") or []
+        ]
+        projected["claim"] = claim
+    return projected
+
+
 def redact_author(payload, bound: dict | None):
     """One server-side visibility policy for every channel a reviewer can read.
 
@@ -1005,6 +1021,7 @@ class WorkStore:
                     attempt = self._attempt(db, response["claim"]["attempt_id"])
                     if attempt["state"] in _ACTIVE:
                         response["claim"]["token"] = attempt["token"]
+                    return _project_claim(response, attempt)
                 return redact_author(response, bound)
             if bound:
                 self._authenticate(db, attempt_token, actor)
@@ -1031,6 +1048,12 @@ class WorkStore:
                         f"Expected revision {command.expected_revision}; current revision is {card['revision']}"
                     )
                 result = self._perform(db, card, command, actor, bound, source_commit)
+            if command.action == "claim":
+                # The claimant becomes a bound reviewer at this moment: its own claim
+                # response (and any exact replay of it) must already be projected.
+                result = _project_claim(
+                    result, self._attempt(db, result["claim"]["attempt_id"])
+                )
             saved = json.loads(_json(result))
             if "claim" in saved:
                 saved["claim"].pop("token", None)
@@ -1856,11 +1879,67 @@ class WorkStore:
         step.update(state="running", attempt=attempt["attempt_id"])
         return attempt
 
+    SHELL_REVIEW_BLOCK = (
+        "Independent-first review cannot execute the granted shell checks: no "
+        "stage-scoped execution path exists"
+    )
+
+    def _block_shell_review(self, work_id, step_id):
+        """Record an explicit pre-launch blocker instead of silently dropping shell."""
+        with self._transaction() as db:
+            card = self._load(db, work_id)
+            grant = card["authorization"]
+            if not grant or not shell_permission(grant):
+                return None
+            step = self._step(card, step_id)
+            recorded = [
+                blocker
+                for blocker in step["blockers"]
+                if blocker["note"] == self.SHELL_REVIEW_BLOCK
+            ]
+            if recorded:
+                if any(blocker["resolved_at"] is None for blocker in recorded):
+                    return (
+                        "Review launch is blocked until the operator resolves the "
+                        "recorded shell-check blocker"
+                    )
+                # The operator explicitly decided; the review proceeds without shell.
+                return None
+            step["blockers"].append(
+                self._blocker(
+                    "operator",
+                    self.SHELL_REVIEW_BLOCK,
+                    "Operator resolves the blocker after re-authorizing without "
+                    "--allow-shell, or after a stage-scoped check execution path exists",
+                    card["plan_revision"],
+                    step["id"],
+                )
+            )
+            self._record(
+                db,
+                card,
+                "blocked",
+                "operator",
+                {
+                    "step_id": step["id"],
+                    "reason": "shell grant meets independent review",
+                },
+            )
+            return (
+                "Review launch blocked before start: "
+                + self.SHELL_REVIEW_BLOCK
+                + "; resolve the recorded blocker"
+            )
+
     def reserve(
         self, work_id, step_id, *, actor, kind, owner_id, autonomous=True
     ) -> dict:
         self._maintenance()
         source_commit = None if autonomous else self._head()
+        if autonomous and kind == "review":
+            blocked = self._block_shell_review(work_id, step_id)
+            if blocked:
+                raise ValueError(blocked)
         with self._transaction() as db:
             card = self._load(db, work_id)
             attempt = self._reserve(
