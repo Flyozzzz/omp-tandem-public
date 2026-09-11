@@ -149,6 +149,48 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             timeout=30,
         )
 
+    async def test_mcp_orphan_blocker_survives_replan_and_cli_show(self):
+        identifier = await self.create()
+        blocked = await self.mutate(
+            self.omp,
+            identifier,
+            "block",
+            step_id="change",
+            note="Required fixture unavailable",
+            condition="Restore fixture or justify inapplicability",
+        )
+        original = blocked["steps"][0]["blockers"][0]
+        replacement = blocked["plan"]
+        replacement["steps"][0]["id"] = "replacement"
+        await self.mutate(self.claude, identifier, "propose", plan=replacement)
+        await self.mutate(self.claude, identifier, "agree")
+        await self.mutate(self.omp, identifier, "agree")
+        shown = await self.daemon("show", identifier)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        card = json.loads(shown.stdout)
+        orphan = card["blockers"][0]
+        self.assertEqual(orphan["blocker_id"], original["blocker_id"])
+        self.assertEqual(orphan["origin"], {"plan_revision": 1, "step_id": "change"})
+        self.assertIn(original["blocker_id"], card["markdown"])
+        self.assertIn(original["condition"], card["markdown"])
+        self.assertEqual(card["steps"][0]["state"], "blocked")
+        with self.assertRaises(ToolError):
+            await self.mutate(self.claude, identifier, "claim", step_id="replacement")
+        resolution = {
+            "blocker_id": orphan["blocker_id"],
+            "resolution": "not_applicable",
+            "note": "Replacement contract no longer requires fixture",
+            "evidence": ["Approved replacement criteria"],
+        }
+        with self.assertRaises(ToolError):
+            await self.mutate(self.claude, identifier, "unblock", **resolution)
+        await self.mutate(self.omp, identifier, "unblock", **resolution)
+        claim = await self.mutate(
+            self.claude, identifier, "claim", step_id="replacement"
+        )
+        self.assertEqual(claim["claim"]["step_id"], "replacement")
+        self.assertEqual(claim["blockers"][0]["resolution_history"][0]["actor"], "omp")
+
     async def test_cli_authorize_show_and_model_alias_pin_selections(self):
         for alias in ("--model", "--omp-model"):
             identifier = await self.create()

@@ -287,7 +287,10 @@ class WorkCommand(_Model):
     note: _NonBlank | None = None
     blocker_id: str | None = None
     condition: _NonBlank | None = None
-    resolution: _NonBlank | None = None
+    resolution: _NonBlank | None = Field(
+        default=None,
+        description="For unblock: resolved or not_applicable with note and evidence, or a legacy free-text resolution reason with evidence. For reconcile: retry or abandon.",
+    )
     evidence: list[_NonBlank] = Field(default_factory=list, max_length=100)
     submission_id: str | None = None
     commit: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40,64}$")] | None = (
@@ -462,7 +465,50 @@ class WorkStore:
         ).fetchone()
         if row is None:
             raise ValueError("Unknown work item")
-        return json.loads(row["card"])
+        card = json.loads(row["card"])
+        card.setdefault("blockers", [])
+        legacy = [
+            (blocker, step["id"] if step else None)
+            for step in [None, *card["steps"]]
+            for blocker in (step["blockers"] if step else card["blockers"])
+            if "origin" not in blocker
+        ]
+        if legacy:
+            origins = {}
+            for row in db.execute(
+                "SELECT event FROM work_events WHERE work_id=? ORDER BY revision",
+                (work_id,),
+            ):
+                snapshot = json.loads(row["event"])["snapshot"]
+                for step in snapshot["steps"]:
+                    for blocker in step["blockers"]:
+                        origins.setdefault(
+                            blocker["blocker_id"],
+                            {
+                                "plan_revision": snapshot["plan_revision"],
+                                "step_id": step["id"],
+                            },
+                        )
+            for blocker, step_id in legacy:
+                blocker["origin"] = origins.get(
+                    blocker["blocker_id"],
+                    {"plan_revision": card["plan_revision"], "step_id": step_id},
+                )
+                blocker["carried_from"] = []
+                blocker["resolution_history"] = (
+                    [
+                        {
+                            "kind": "resolved",
+                            "note": blocker["resolution"],
+                            "evidence": blocker["evidence"],
+                            "actor": blocker["resolved_by"],
+                            "at": blocker["resolved_at"],
+                        }
+                    ]
+                    if blocker["resolved_at"] is not None
+                    else []
+                )
+        return card
 
     def _attempt(self, db, attempt_id):
         row = db.execute(
@@ -507,12 +553,21 @@ class WorkStore:
             for actor in ("claude", "omp")
         )
 
+    @staticmethod
+    def _unresolved(card, step=None):
+        return [
+            blocker
+            for blockers in (card["blockers"], step["blockers"] if step else [])
+            for blocker in blockers
+            if blocker["resolved_at"] is None
+        ]
+
     def _refresh(self, card):
         steps = {step["id"]: step for step in card["steps"]}
         for step in card["steps"]:
             if step["state"] in {"running", "recovery_required", "accepted"}:
                 continue
-            if any(blocker["resolved_at"] is None for blocker in step["blockers"]):
+            if self._unresolved(card, step):
                 step["state"] = "blocked"
             elif step["submission"] is not None:
                 step["state"] = "review"
@@ -524,6 +579,7 @@ class WorkStore:
             card["status"] = (
                 "completed"
                 if all(step["state"] == "accepted" for step in card["steps"])
+                and not self._unresolved(card)
                 else "active"
                 if self._agreed(card)
                 else "draft"
@@ -594,6 +650,13 @@ class WorkStore:
             ("Global acceptance", plan["acceptance"]),
         ):
             lines.extend(["", "## " + title, *("- " + item for item in items)])
+        if view["blockers"]:
+            lines.extend(["", "## Card blockers (apply to every step)"])
+            lines.extend(
+                "- " + WorkStore._blocker_markdown(blocker)
+                for blocker in view["blockers"]
+                if blocker["resolved_at"] is None
+            )
         lines.extend(["", "## Checklist"])
         for step in view["steps"]:
             spec = next(item for item in plan["steps"] if item["id"] == step["id"])
@@ -609,10 +672,7 @@ class WorkStore:
                 "  - Acceptance: " + criterion for criterion in spec["acceptance"]
             )
             lines.extend(
-                "  - Blocker: "
-                + blocker["note"]
-                + "; condition: "
-                + blocker["condition"]
+                "  - " + WorkStore._blocker_markdown(blocker)
                 for blocker in step["blockers"]
                 if blocker["resolved_at"] is None
             )
@@ -686,6 +746,16 @@ class WorkStore:
             }
             for step in plan["steps"]
         ]
+
+    @staticmethod
+    def _blocker_markdown(blocker):
+        origin = blocker["origin"]
+        return (
+            f"Blocker {blocker['blocker_id']}: {blocker['note']}; "
+            f"condition: {blocker['condition']}; "
+            f"origin: plan {origin['plan_revision']}, step {origin['step_id']}; "
+            f"may resolve: {blocker['actor']} or operator"
+        )
 
     def _fence(self, db, card, reason):
         for attempt in self._attempts(db, card["work_id"]):
@@ -797,9 +867,9 @@ class WorkStore:
             if command.action == "list":
                 return {
                     "items": [
-                        self._view(db, json.loads(row["card"]))
+                        self._view(db, self._load(db, row["work_id"]))
                         for row in db.execute(
-                            "SELECT card FROM work_cards ORDER BY work_id"
+                            "SELECT work_id FROM work_cards ORDER BY work_id"
                         )
                     ]
                 }
@@ -857,6 +927,7 @@ class WorkStore:
                     "plan": plan,
                     "agreements": {},
                     "steps": self._new_steps(plan),
+                    "blockers": [],
                     "authorization": None,
                     "created_at": time.time(),
                     "updated_at": time.time(),
@@ -896,16 +967,32 @@ class WorkStore:
                     )
                 self._fence(db, card, "Plan changed; old attempt cannot publish")
                 previous = {step["id"]: step for step in card["steps"]}
+                old_revision = card["plan_revision"]
                 card.update(
                     plan=plan,
                     plan_revision=card["plan_revision"] + 1,
                     agreements={},
                     steps=self._new_steps(plan),
                 )
-                for step in card["steps"]:
-                    old = previous.get(step["id"])
-                    if old and old["state"] == "recovery_required":
-                        step.update(state="recovery_required", attempt=old["attempt"])
+                current = {step["id"]: step for step in card["steps"]}
+                for old in [None, *previous.values()]:
+                    blockers = old["blockers"] if old else list(card["blockers"])
+                    target = current.get(old["id"]) if old else None
+                    for blocker in blockers:
+                        blocker["carried_from"].append(
+                            {
+                                "plan_revision": old_revision,
+                                "step_id": old["id"] if old else None,
+                                "to_plan_revision": card["plan_revision"],
+                                "step_id_after": target["id"] if target else None,
+                            }
+                        )
+                    if old:
+                        (target["blockers"] if target else card["blockers"]).extend(
+                            blockers
+                        )
+                    if target and old["state"] == "recovery_required":
+                        target.update(state="recovery_required", attempt=old["attempt"])
                 if card["authorization"]:
                     card["authorization"]["revoked_at"] = time.time()
             return self._record(db, card, "proposed", actor, {"note": command.note})
@@ -981,10 +1068,58 @@ class WorkStore:
                                     actor,
                                     command.note,
                                     "Operator must explicitly resolve abandonment before continuing",
+                                    card["plan_revision"],
+                                    step["id"],
                                 )
                             )
             if command.resolution == "abandon":
                 card["status"] = "paused"
+        elif action == "unblock":
+            if not command.resolution or not command.evidence:
+                raise ValueError("Unblock requires resolution and evidence")
+            kind = (
+                command.resolution
+                if command.resolution in {"resolved", "not_applicable"}
+                else "resolved"
+            )
+            reason = (
+                command.note
+                if command.resolution in {"resolved", "not_applicable"}
+                else command.resolution
+            )
+            if not reason:
+                raise ValueError("Unblock resolution kind requires a reason in note")
+            step = self._step(card, command.step_id) if command.step_id else None
+            blocker = next(
+                (
+                    item
+                    for item in self._unresolved(card, step)
+                    if item["blocker_id"] == command.blocker_id
+                ),
+                None,
+            )
+            if blocker is None:
+                raise ValueError("Unknown unresolved blocker")
+            if actor not in {blocker["actor"], "operator"}:
+                raise ValueError("Only blocker author or operator may resolve it")
+            now = time.time()
+            blocker["resolution_history"].append(
+                {
+                    "kind": kind,
+                    "note": reason,
+                    "evidence": command.evidence,
+                    "actor": actor,
+                    "at": now,
+                    "plan_revision": card["plan_revision"],
+                }
+            )
+            blocker.update(
+                resolved_at=now,
+                resolution=reason,
+                resolution_kind=kind,
+                evidence=command.evidence,
+                resolved_by=actor,
+            )
         elif action == "claim":
             step = self._step(card, command.step_id)
             kind = "review" if step["submission"] is not None else "implement"
@@ -1012,8 +1147,8 @@ class WorkStore:
                     )
                 if bound["step_id"] != step["id"]:
                     raise ValueError("Attempt is bound to another step")
-            if action in {"submit", "accept", "reject"} and any(
-                blocker["resolved_at"] is None for blocker in step["blockers"]
+            if action in {"submit", "accept", "reject"} and self._unresolved(
+                card, step
             ):
                 raise ValueError(
                     "Resolve outstanding blockers before submitting or deciding acceptance"
@@ -1030,7 +1165,13 @@ class WorkStore:
                     raise ValueError(
                         "Revise the plan before reopening an accepted output"
                     )
-                blocker = self._blocker(actor, command.note, command.condition)
+                blocker = self._blocker(
+                    actor,
+                    command.note,
+                    command.condition,
+                    card["plan_revision"],
+                    step["id"],
+                )
                 step["blockers"].append(blocker)
                 if bound and bound["attempt_id"] == step["attempt"]:
                     intent = bound.get("block_intent") or {
@@ -1042,30 +1183,6 @@ class WorkStore:
                     self._save_attempt(db, bound)
                 else:
                     self._fence_step(db, step, "Step externally blocked")
-            elif action == "unblock":
-                if not command.resolution or not command.evidence:
-                    raise ValueError("Unblock requires resolution and evidence")
-                blocker = next(
-                    (
-                        item
-                        for item in step["blockers"]
-                        if item["blocker_id"] == command.blocker_id
-                        and item["resolved_at"] is None
-                    ),
-                    None,
-                )
-                if blocker is None:
-                    raise ValueError("Unknown unresolved blocker")
-                if actor not in {blocker["actor"], "operator"}:
-                    raise ValueError("Only blocker author or operator may resolve it")
-                blocker.update(
-                    resolved_at=time.time(),
-                    resolution=command.resolution,
-                    evidence=command.evidence,
-                    resolved_by=actor,
-                )
-                if step["state"] == "blocked":
-                    step["state"] = "todo"
             elif action == "submit":
                 if (
                     bound["kind"] != "implement"
@@ -1177,7 +1294,7 @@ class WorkStore:
         )
 
     @staticmethod
-    def _blocker(actor, note, condition):
+    def _blocker(actor, note, condition, plan_revision, step_id):
         return {
             "blocker_id": str(uuid4()),
             "actor": actor,
@@ -1185,6 +1302,9 @@ class WorkStore:
             "condition": condition,
             "created_at": time.time(),
             "resolved_at": None,
+            "origin": {"plan_revision": plan_revision, "step_id": step_id},
+            "carried_from": [],
+            "resolution_history": [],
         }
 
     def _fence_step(self, db, step, reason):
@@ -1342,7 +1462,11 @@ class WorkStore:
             return self._record(db, card, "revoked", "operator")
 
     def _ready(self, db, card):
-        if card["status"] != "active" or not self._agreed(card):
+        if (
+            card["status"] != "active"
+            or not self._agreed(card)
+            or self._unresolved(card)
+        ):
             return []
         attempts = self._attempts(db, card["work_id"])
         if any(
@@ -1383,9 +1507,9 @@ class WorkStore:
                 [self._load(db, work_id)]
                 if work_id
                 else [
-                    json.loads(row["card"])
+                    self._load(db, row["work_id"])
                     for row in db.execute(
-                        "SELECT card FROM work_cards ORDER BY work_id"
+                        "SELECT work_id FROM work_cards ORDER BY work_id"
                     )
                 ]
             )
@@ -1754,15 +1878,7 @@ class WorkStore:
                 (item for item in card["steps"] if item["id"] == attempt["step_id"]),
                 None,
             )
-            unresolved = (
-                [
-                    blocker
-                    for blocker in step["blockers"]
-                    if blocker["resolved_at"] is None
-                ]
-                if step
-                else []
-            )
+            unresolved = self._unresolved(card, step)
             cooperative_block = (
                 current
                 and outcome == "blocked"

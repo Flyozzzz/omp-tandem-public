@@ -615,6 +615,307 @@ class WorkItemsTests(unittest.TestCase):
         )
         self.assertEqual(self.store.ready(self.work_id)[0]["step_id"], "backend")
 
+    def test_corrective_plan_preserves_operational_block_and_resolution_history(self):
+        self.agreed()
+        self.authorize()
+        attempt = self.reserve()
+        output = self.output(attempt)
+        blocked = self.change(
+            "block",
+            actor="omp",
+            token=attempt["token"],
+            note="Schema unavailable",
+            condition="Approved schema supplied",
+        )
+        original = blocked["steps"][0]["blockers"][0]
+        self.store.confirm_stopped(attempt["attempt_id"])
+        self.store.finish_attempt(
+            attempt["attempt_id"],
+            outcome="blocked",
+            answer="Saved parser pending schema",
+            evidence=["Parser checkpoint"],
+            output=output,
+            cost_usd=0.25,
+        )
+        corrected = plan()
+        corrected["steps"][0]["goal"] = "Implement backend using corrected schema"
+        proposed = self.change("propose", plan=corrected)
+        carried = proposed["steps"][0]["blockers"][0]
+        self.assertEqual(carried["blocker_id"], original["blocker_id"])
+        self.assertEqual(carried["origin"], {"plan_revision": 1, "step_id": "backend"})
+        self.assertIsNone(carried["resolved_at"])
+        self.assertEqual(proposed["agreements"], {})
+        self.assertIsNotNone(proposed["authorization"]["revoked_at"])
+        self.assertIsNone(proposed["steps"][0]["checkpoint"])
+        self.agreed()
+        self.assertEqual(self.store.ready(self.work_id), [])
+        self.assertEqual(self.store.ready(), [])
+        self.authorize()
+        with self.assertRaises(WorkConflict):
+            self.reserve()
+        with self.assertRaises(WorkConflict):
+            self.change("claim", actor="omp", step_id="backend")
+        self.assertEqual(self.view()["authorization"]["launches"], 0)
+        with self.assertRaises(ValueError):
+            self.change(
+                "unblock",
+                actor="claude",
+                step_id="backend",
+                blocker_id=carried["blocker_id"],
+                resolution="not_applicable",
+                note="Agreed to a correction",
+                evidence=["New plan"],
+            )
+        resolved = self.change(
+            "unblock",
+            actor="omp",
+            step_id="backend",
+            blocker_id=carried["blocker_id"],
+            resolution="resolved",
+            note="Approved schema supplied",
+            evidence=["schema.json"],
+        )["steps"][0]["blockers"][0]
+        self.assertEqual(resolved["resolution_history"][0]["kind"], "resolved")
+        self.assertEqual(
+            resolved["resolution_history"][0]["note"], "Approved schema supplied"
+        )
+        corrected["goal"] = "Deliver revised independently reviewed output"
+        revised = self.change("propose", plan=corrected)["steps"][0]["blockers"][0]
+        self.assertEqual(revised["origin"], original["origin"])
+        self.assertEqual(revised["resolution_history"], resolved["resolution_history"])
+        self.assertEqual(revised["carried_from"][:1], carried["carried_from"])
+        self.assertEqual(len(revised["carried_from"]), 2)
+        with self.assertRaises(ValueError):
+            self.change(
+                "unblock",
+                actor="operator",
+                step_id="backend",
+                blocker_id=carried["blocker_id"],
+                resolution="Rewrite resolution",
+                evidence=["Replacement"],
+            )
+
+    def test_removed_step_blocker_blocks_entire_card_until_authorized_inapplicability(
+        self,
+    ):
+        self.agreed()
+        original = self.change(
+            "block",
+            actor="omp",
+            step_id="backend",
+            note="Missing service contract",
+            condition="Supply contract or justify removing service",
+        )["steps"][0]["blockers"][0]
+        replacement = plan()
+        replacement["steps"] = replacement["steps"][1:]
+        replacement["steps"][0]["depends_on"] = []
+        proposed = self.change("propose", plan=replacement)
+        self.assertEqual(proposed["blockers"][0]["blocker_id"], original["blocker_id"])
+        self.assertEqual(proposed["blockers"][0]["origin"], original["origin"])
+        self.assertIn(original["blocker_id"], proposed["markdown"])
+        self.assertIn("omp or operator", proposed["markdown"])
+        self.agreed()
+        self.authorize()
+        self.assertEqual(self.store.ready(self.work_id), [])
+        with self.assertRaises(WorkConflict):
+            self.reserve("integration", actor="claude")
+        with self.assertRaises(WorkConflict):
+            self.change("claim", step_id="integration")
+        replacement["goal"] = "Corrective replacement without service"
+        self.change("propose", plan=replacement)
+        self.change("propose", plan=replacement)
+        orphan = self.view()["blockers"][0]
+        self.assertEqual(len(self.view()["blockers"]), 1)
+        self.assertEqual(len(orphan["carried_from"]), 2)
+        self.assertIsNone(orphan["carried_from"][-1]["step_id"])
+        self.assertEqual(orphan["origin"], original["origin"])
+        request = {
+            "blocker_id": orphan["blocker_id"],
+            "resolution": "not_applicable",
+            "note": "Replacement has no service dependency",
+            "evidence": ["Dependency audit"],
+        }
+        with self.assertRaises(ValueError):
+            self.change("unblock", actor="claude", **request)
+        with self.assertRaises(ValueError):
+            self.change("unblock", actor="operator", **{**request, "evidence": []})
+        with self.assertRaises(ValueError):
+            self.change("unblock", actor="omp", **{**request, "note": None})
+        resolved = self.change("unblock", actor="operator", **request)["blockers"][0]
+        self.assertEqual(resolved["resolution_kind"], "not_applicable")
+        self.assertEqual(resolved["resolution_history"][0]["actor"], "operator")
+        self.agreed()
+        claim = self.change("claim", step_id="integration")["claim"]
+        self.assertEqual(claim["step_id"], "integration")
+        with self.assertRaises(ValueError):
+            self.change("unblock", actor="operator", **request)
+        self.assertEqual(
+            self.view()["blockers"][0]["resolution_history"],
+            resolved["resolution_history"],
+        )
+
+    def test_active_publication_enforces_step_and_card_blockers(self):
+        for kind in ("implement", "review"):
+            for card_scope in (False, True):
+                with self.subTest(kind=kind, card_scope=card_scope):
+                    self.work_id = self.store.perform(
+                        {
+                            "action": "create",
+                            "plan": plan(),
+                            "expected_revision": 0,
+                            "operation_id": str(uuid4()),
+                        },
+                        actor="claude",
+                    )["work_id"]
+                    self.agreed()
+                    self.authorize()
+                    if kind == "review":
+                        self.submit(self.reserve())
+                    actor = "omp" if kind == "implement" else "claude"
+                    attempt = self.reserve(actor=actor, kind=kind)
+                    output = self.output(attempt) if kind == "implement" else None
+                    self.change(
+                        "block",
+                        actor=actor,
+                        token=attempt["token"],
+                        note="Required verification unavailable",
+                        condition="Restore verification",
+                    )
+                    if card_scope:
+                        # Persist a card-level blocker alongside an active attempt
+                        # to exercise publication independently of scheduler gates.
+                        with sqlite3.connect(self.store.database) as db:
+                            card = json.loads(
+                                db.execute(
+                                    "SELECT card FROM work_cards WHERE work_id=?",
+                                    (self.work_id,),
+                                ).fetchone()[0]
+                            )
+                            card["blockers"] = card["steps"][0]["blockers"]
+                            card["steps"][0]["blockers"] = []
+                            db.execute(
+                                "UPDATE work_cards SET card=? WHERE work_id=?",
+                                (json.dumps(card), self.work_id),
+                            )
+                    self.agreed()
+                    with self.assertRaises(ValueError):
+                        if kind == "implement":
+                            self.change(
+                                "submit",
+                                actor=actor,
+                                token=attempt["token"],
+                                note="Claimed complete",
+                                evidence=["Insufficient check"],
+                            )
+                        else:
+                            self.verdict(attempt)
+                    finished = self.store.finish_attempt(
+                        attempt["attempt_id"],
+                        outcome="success",
+                        answer="Claimed success cannot override blocker",
+                        evidence=["Insufficient check"],
+                        output=output,
+                        cost_usd=0.25,
+                    )
+                    self.assertEqual(finished["steps"][0]["state"], "recovery_required")
+                    self.assertIsNone(finished["steps"][0]["acceptance"])
+                    if kind == "implement":
+                        self.assertIsNone(finished["steps"][0]["submission"])
+                    blockers = (
+                        finished["blockers"]
+                        if card_scope
+                        else finished["steps"][0]["blockers"]
+                    )
+                    self.assertIsNone(blockers[0]["resolved_at"])
+
+    def test_legacy_blockers_migrate_without_restarting_or_rewriting_history(self):
+        self.agreed()
+        self.authorize()
+        resolved = self.change(
+            "block",
+            actor="omp",
+            step_id="backend",
+            note="Previous input absent",
+            condition="Input supplied",
+        )["steps"][0]["blockers"][0]
+        self.change(
+            "unblock",
+            actor="omp",
+            step_id="backend",
+            blocker_id=resolved["blocker_id"],
+            resolution="Input supplied",
+            evidence=["input.json"],
+        )
+        attempt = self.reserve()
+        blocked = self.change(
+            "block",
+            actor="claude",
+            step_id="backend",
+            note="Stop for inspection",
+            condition="Inspection complete",
+        )
+        changed = plan()
+        changed["goal"] = "Corrected plan awaiting inspection"
+        self.change("propose", plan=changed)
+        with sqlite3.connect(self.store.database) as db:
+            card = json.loads(
+                db.execute(
+                    "SELECT card FROM work_cards WHERE work_id=?", (self.work_id,)
+                ).fetchone()[0]
+            )
+            card.pop("blockers")
+            for blocker in card["steps"][0]["blockers"]:
+                for key in (
+                    "origin",
+                    "carried_from",
+                    "resolution_history",
+                    "resolution_kind",
+                ):
+                    blocker.pop(key, None)
+            db.execute(
+                "UPDATE work_cards SET card=? WHERE work_id=?",
+                (json.dumps(card), self.work_id),
+            )
+            before = list(db.iterdump())
+        self.store = WorkStore(self.store.database, self.scope)
+        migrated = self.view()
+        self.assertEqual(migrated["blockers"], [])
+        self.assertEqual(migrated["steps"][0]["state"], "recovery_required")
+        self.assertEqual(
+            migrated["authorization"],
+            blocked["authorization"]
+            | {"revoked_at": migrated["authorization"]["revoked_at"]},
+        )
+        history = migrated["steps"][0]["blockers"][0]["resolution_history"]
+        self.assertEqual(history[0]["note"], "Input supplied")
+        self.assertEqual(history[0]["evidence"], ["input.json"])
+        for blocker in migrated["steps"][0]["blockers"]:
+            self.assertEqual(
+                blocker["origin"], {"plan_revision": 1, "step_id": "backend"}
+            )
+        self.assertIsNone(migrated["steps"][0]["blockers"][1]["resolved_at"])
+        self.assertEqual(self.store.ready(), [])
+        listed = self.store.perform({"action": "list"}, actor="claude")["items"][0]
+        self.assertEqual(
+            listed["steps"][0]["blockers"], migrated["steps"][0]["blockers"]
+        )
+        with sqlite3.connect(self.store.database) as db:
+            self.assertEqual(list(db.iterdump()), before)
+        self.store.confirm_stopped(attempt["attempt_id"])
+        self.change(
+            "reconcile",
+            actor="operator",
+            step_id="backend",
+            resolution="retry",
+            note="Process stopped",
+            evidence=["Exit observed"],
+        )
+        self.agreed()
+        self.assertEqual(self.store.ready(self.work_id), [])
+        self.assertEqual(
+            self.view()["steps"][0]["blockers"][0]["resolution_history"], history
+        )
+
     def test_event_cursor_survives_other_store_and_credential_echo_is_redacted(self):
         self.agreed()
         attempt = self.reserve(autonomous=False)
