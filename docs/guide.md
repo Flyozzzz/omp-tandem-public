@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Version: 3.3.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Version: 3.4.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -30,6 +30,7 @@ This repository starts from a reviewed snapshot of earlier private development; 
 - [Hooks and skills](#hooks-and-skills)
 - [Working with a peer](#working-with-a-peer)
 - [One read-only review scenario](#one-read-only-review-scenario)
+- [Shared tasks and autonomous execution](#shared-tasks)
 - [Tasks and execution modes](#tasks-and-execution-modes)
 - [Immutable review bundles](#immutable-review-bundles)
 - [Live diagnostics](#live-diagnostics)
@@ -384,6 +385,158 @@ If snapshot publication temporarily owns the shared write gate, cancellation can
 
 The scenario never edits files, executes supplied test commands, approves permissions or applies results. A later result-driven action still needs its existing authorization and receipt protocol. `completed` is not proof that the reviewed code is correct.
 
+<a id="shared-tasks"></a>
+## Shared tasks and autonomous execution
+
+`tandem_work` maintains a project-scoped task independently of individual conversations and native turns. Its `get` result includes the agreed plan, versioned checklist, roles, dependencies, blockers, submissions, acceptance evidence, authorization summary and a `markdown` rendering of that same state. SQLite is authoritative; two agents do not overwrite a shared Markdown file.
+
+The two participant seats are `claude` and `omp`. The host MCP seat defaults to `claude`; an operator configuring a second peer client can set `--work-participant omp`. Native OMP host tools use `omp`. These are attributed participant seats, not cryptographic model-identity claims. Managed workers instead receive an attempt-bound capability: they cannot choose their identity or act on unrelated assignments. Capabilities and provider configuration must never be published.
+
+### Agree one plan, then divide the work
+
+Illustrative creation arguments for **`tandem_work`**; replace the teaching goals and files with the actual task:
+
+```json
+{
+  "request": {
+    "action": "create",
+    "expected_revision": 0,
+    "operation_id": "create-feature-42",
+    "plan": {
+      "title": "Implement the agreed feature",
+      "goal": "Deliver the backend and frontend together.",
+      "context": "Include the actual agreed API contract and relevant requirements.",
+      "constraints": ["Preserve existing public behaviour outside this feature."],
+      "acceptance": ["The integrated feature meets the recorded end-to-end requirement."],
+      "steps": [
+        {
+          "id": "backend",
+          "title": "Backend module",
+          "goal": "Implement the agreed server contract.",
+          "owner": "omp",
+          "reviewer": "claude",
+          "owned_files": ["src/backend.py"],
+          "depends_on": [],
+          "acceptance": ["The module implements the agreed request and response contract."]
+        },
+        {
+          "id": "frontend",
+          "title": "Frontend module",
+          "goal": "Implement the client of the agreed server contract.",
+          "owner": "claude",
+          "reviewer": "omp",
+          "owned_files": ["src/frontend.ts"],
+          "depends_on": [],
+          "acceptance": ["The client handles the agreed success and error responses."]
+        },
+        {
+          "id": "integration",
+          "title": "Integrated acceptance",
+          "goal": "Check the combined modules against the original requirement.",
+          "owner": "claude",
+          "reviewer": "omp",
+          "owned_files": ["tests/feature.test.ts"],
+          "depends_on": ["backend", "frontend"],
+          "acceptance": ["Record the actual integrated check and its result."]
+        }
+      ]
+    }
+  }
+}
+```
+
+The graph rejects missing/self/cyclic dependencies, duplicate step IDs, identical owner/reviewer, unsafe paths and overlapping ownership without an ancestor relationship. One final integration sink must depend transitively on every other step; independent accepted branches alone do not certify their combined result. A one-step task is valid.
+
+Both participants read and agree to the exact plan revision:
+
+```json
+{"request": {"action": "get", "work_id": "<work-id>"}}
+```
+
+```json
+{"request": {"action": "agree", "work_id": "<work-id>", "expected_revision": 1, "operation_id": "claude-agrees-feature-42", "note": "The recorded scope and criteria match our chosen approach."}}
+```
+
+The other participant uses **its own seat** and a freshly read `revision`; a caller cannot supply `actor` in tool arguments. Every mutation needs the current `expected_revision` and a stable `operation_id`. Repeating exactly the same operation recovers its receipt; reusing its ID with different content is a conflict. Progress changes `revision`; substantive `propose` changes `plan_revision`, invalidates agreements/current acceptance, revokes the old execution grant and fences old attempts. Historical reports remain available through `history`. No silent merging of conflicting plans or expansion of permissions.
+
+### Attached/manual work
+
+The assigned participant uses `claim` with `work_id`, `step_id`, current revision and operation ID. The claim is atomic with dependency/role checks and returns an attempt capability; the current MCP or native-tool session retains it for subsequent step operations. A claim does not launch a model, authorize shell, or edit the project.
+
+Manual implementation happens under the host's existing permissions. Submit an **already committed, full Git hash** through `submit`, with `commit`, `note` and nonempty `evidence`. The bridge verifies ancestry and exact declared changed-file ownership before retaining the immutable result; it does not run tests because their names appear in evidence. A different participant claims the review and uses `accept` or `reject` with the exact `submission_id`, current revision, note and evidence. Acceptance is an attributed assessment of that output and plan, not an exit-code inference or guarantee of correctness. Final acceptance also attests the task's global criteria.
+
+Manual claim lifetime is bounded; reconnecting does not silently take it over. A still-active claim can be recovered by its **exact original claim operation**, including original revision/operation ID. Otherwise inspect and reconcile it explicitly. Never paste capabilities into project documentation or use another participant's token.
+
+### Explicitly authorize unattended work
+
+Autonomous authority is **not an MCP operation**. The operator runs these commands from an installed environment/check-out after the plan is agreed. Models may explain a command but must not execute it without the user's explicit approval.
+
+```sh
+python -m omp_tandem.work_daemon --project-root /absolute/project \
+  authorize <work-id> --budget-seconds 1800 --max-launches 12 \
+  --max-cost-usd 6 --allow-work
+```
+
+The `python` below must come from an environment with this Tandem version installed. In a source checkout use `uv run --frozen python ...`; from another directory use `uv run --project /absolute/path/to/omp-tandem --frozen python ...`. A plugin's private runtime is not a global Python installation. Its `server.py --prepare` command reports the prepared interpreter in the `python` field; do not guess cache paths.
+
+This pins the source commit, plan revision, deadline, launch count and reported-cost budget. `--allow-work` permits managed implementation edits; **only `--allow-tests` additionally exposes shell**, which permits arbitrary code execution and is **not an OS sandbox**. No permission-bypass flag is added. There is no default paid/background launch, global service installation or account switch.
+
+```sh
+# Foreground, supervised and interruptible:
+python -m omp_tandem.work_daemon --project-root /absolute/project \
+  run --work-id <work-id> --concurrency 2
+
+# Explicit detached controller, independent of the interactive client:
+python -m omp_tandem.work_daemon --project-root /absolute/project \
+  start --work-id <work-id> --concurrency 2
+
+python -m omp_tandem.work_daemon --project-root /absolute/project status
+python -m omp_tandem.work_daemon --project-root /absolute/project show <work-id>
+python -m omp_tandem.work_daemon --project-root /absolute/project stop
+python -m omp_tandem.work_daemon --project-root /absolute/project revoke <work-id>
+```
+
+Place an explicit `--state-dir` before the subcommand if the MCP client uses a nondefault state base; it must identify the same task store. `--omp`, `--claude` and `--model` are operator executable/OMP-model overrides, also before the subcommand. `--once` exits when no currently runnable/active work remains; omit it to wait for resolvable blockers within the grant deadline.
+
+The controller holds one kernel project lease, reserves ready assignments once, and launches dedicated attempts in separate detached Git worktrees. Claude uses a new bounded headless session with a restricted task-only MCP connection; OMP uses the existing native RPC runtime and shared host tool. Neither adapter attaches to the user's open terminal, selects the newest conversation or resumes possibly running work. Independent steps in the same task can run concurrently; the default is two, maximum four. Monetary envelopes are reserved before launch, so parallel workers cannot each treat the whole remaining budget as their own.
+
+Managed snapshots use exact committed bytes, including repositories with line-ending/`ident` attributes. Safety limits are 16 MiB per file, 256 MiB per snapshot and 20,000 files; tracked symlinks, submodules and configured Git filters are refused rather than silently omitted. Keep the shared state directory outside the active checkout. Rejected output and cleanly blocked work retain a checkpoint for targeted continuation; conflicting dependency blobs remain in the retained worktree's Git index for inspection.
+
+Each worker must acknowledge its assignment through `heartbeat` before work. A launched process or sent notification alone is not that acknowledgement. Native outcomes, immutable implementation snapshots and the distinct review verdict are recorded separately; an autonomous review only releases dependencies after successful worker completion and snapshot integrity verification. The final accepted result remains in a retained worktree/commit until explicitly applied.
+
+### Blockers, wake and recovery
+
+`block` records a note and a specific resolution condition; `unblock` requires the blocker ID, actual resolution and evidence. Dependencies open only after current prerequisite submissions are accepted—not merely when a native task exits. Cooperative blocked work can finish cleanly, retain its partial source checkpoint, release execution capacity and continue from that checkpoint after an evidenced unblock under the same still-valid grant. A checkpoint is not an accepted submission. Unknown termination, failed dispatch acknowledgement or possible unfinished external effects instead require reconciliation; they never become automatic retries.
+
+Attached clients receive best-effort shared-work change hints through an already functioning channel. Read current state on wake, or use bounded waiting:
+
+```json
+{"request": {"action": "get", "work_id": "<work-id>"}, "wait_seconds": 25}
+```
+
+Events do not grant permission and are not the scheduling source of truth. The detached controller reads durable readiness, so a lost client notification does not strand eligible work. It does not keep a model running just to wait for a dependency. Closing an interactive client stops its own native turns but not a separately authorized controller. A local controller cannot execute while its machine is asleep/offline; on return it checks deadlines and ownership rather than replaying missed events.
+
+`pause` is sticky across reconnection. `resume` clears that desired pause but does not reconcile an interrupted writer or grant new permissions. Revocation, expiry and unknown reported cost prevent further autonomous launches. Failed attempts preserve evidence/workspaces; a replacement cannot claim the same step until its old execution and possible effects have been inspected.
+
+```sh
+python -m omp_tandem.work_daemon --project-root /absolute/project \
+  reconcile <work-id> <step-id> --resolution retry \
+  --note "Explain the observed old execution and inspected side effects." \
+  --evidence "Reference the actual process/output/effect inspection." \
+  --confirm-stopped
+```
+
+`--confirm-stopped` is an explicit operator attestation, **not** proof inferred from a missing heartbeat. Reconciliation never rolls back remote effects or silently replays commands. Reauthorize if the old grant was revoked/changed/exhausted. Reported USD ceilings are cooperative/provider-estimate limits, not an invoice-level hard spending guarantee; an in-flight request can overshoot, and unknown usage pauses the work rather than counting it as zero.
+
+### Apply only the accepted combined result
+
+```sh
+python -m omp_tandem.work_daemon --project-root /absolute/project \
+  apply <work-id> --expected-head <full-current-head>
+```
+
+This is operator-only, requires a completed task with a current final acceptance, and fast-forwards only a clean tracked/nonignored checkout whose HEAD still matches. It rejects ignored-file collisions, conflicts and unexpected changes; there is no forced reset, autostash or implicit merge into user work. Worktrees isolate edits, **not arbitrary filesystem/network effects** from authorized shell. Check outputs can create ignored artifacts in their isolated workspace, but those artifacts are not silently promoted into the source result.
+
 ## Tasks and execution modes
 
 | Mode | OMP tools | Typical use |
@@ -637,7 +790,7 @@ This mechanism is local to the same state-base. Transfer packages persist until 
 
 ## MCP tools
 
-There are 19 MCP tools. The compact review scenario is the default entry for changes review; the others remain explicit low-level controls. Host prefixes vary; `Context` is injected, not a user argument.
+The compact review scenario is the default entry for changes review; `tandem_work` coordinates longer shared tasks, while the other tools remain explicit low-level controls. Host prefixes vary; `Context` is injected, not a user argument.
 
 | Tool | Main inputs | Purpose |
 |---|---|---|
@@ -657,6 +810,7 @@ There are 19 MCP tools. The compact review scenario is the default entry for cha
 | `tandem_channel` | `action=status/probe/ack/pending/recover`, relevant IDs/token, `include_previous`, `limit` | Manage optional delivery |
 | `tandem_review` | `action=create/read/assess`, request or review ID, section/path, paging | Immutable review materials and current applicability |
 | `tandem_review_run` | `action=start/status/reply/cancel`, request/key or run ID, total budget, execution, bounded wait | Capture and orchestrate a complete read-only review |
+| `tandem_work` | `request: WorkCommand`, bounded `wait_seconds` | Shared plan/checklist, role-bound claims, blockers, immutable submissions and acceptance; no autonomous permission grants |
 | `tandem_findings` | `action=create/update/get/list`, IDs, draft/change, revision, paging | Snapshot-bound findings and append-only history |
 | `tandem_diagnose` | `live`, existing diagnostic `task_id`, expected project, bounded wait | Explicit current-client connectivity check |
 | `tandem_receipt` | `task_id`, `action=status/claim/complete`, claim token | Gate result application separately from notification acknowledgment |

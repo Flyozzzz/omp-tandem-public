@@ -11,6 +11,8 @@ OMP Tandem is MIT-licensed in the public `Flyozzzz/omp-tandem-public` repository
 
 The first-run goal is one useful task, not learning every MCP tool. Guide the user through **installation/provider setup → correct project and local diagnosis → first read-only review**. A separate paid live check is optional and requires explicit approval; do not force it before an already requested useful provider task.
 
+Shared tasks use the same project-bound MCP connection through `tandem_work`; they do not require an autonomous service just to create or inspect a card. Unattended work additionally needs Git and both configured Claude/OMP executables. Explain the exact task's time/launch/reported-cost and edit/shell grants before the operator uses `omp_tandem.work_daemon authorize` and `run`/`start`. Never grant autonomy, install a global service, resume a user terminal, or bypass permissions merely to diagnose setup. For operator commands use this package's prepared interpreter (`server.py --prepare` reports `python`) or `uv run --project <package> --frozen python`, not an assumed global module installation.
+
 ## 1. Inspect without changing state
 
 Determine the actual package directory from this skill's installed location: it is two directories above `skills/setup/`. Do not confuse a cached installation with the user's working project. In the examples, replace the path with that package directory:

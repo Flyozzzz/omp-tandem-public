@@ -22,6 +22,7 @@
 - **隔离的知识。** 分离项目历史，可选用版本化产品规则，并显式共享上下文。
 - **诚实的结果。** 结构化结果、带期限的问题，以及可恢复的中间产物。
 - **可移植集成。** Claude Code 插件、面向 Codex 的 Agent Plugins 包，以及适用于其他宿主的本地 stdio MCP。
+- **共享任务与可选自主执行。** [双方确认同一版本的计划，按文件拆分、交叉验收并最终集成](docs/guide.zh-CN.md#shared-work)；只有操作者明确授权后，本地控制器才可在客户端断开后继续运行。
 - **可选择来源的快照审查。** [选择 worktree 或仅 staged，先独立判断再比较作者方案](docs/guide.zh-CN.md#snapshot-reviews)，并[追踪问题的确认与修复验证](docs/guide.zh-CN.md#finding-lifecycle)。
 - **可解释的执行。** [逐轮选择计算配置，分别查看实际模型、令牌与已知费用](docs/guide.zh-CN.md#execution-and-accounting)。
 - **可靠接收。** [可选看门狗与有界轮询](docs/guide.zh-CN.md#polling-channels-and-webhooks)、[结果处理凭据](docs/guide.zh-CN.md#result-receipts)和[当前客户端诊断](docs/guide.zh-CN.md#live-diagnostics)明确区分投递、处理与验证。
@@ -80,6 +81,12 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 
 开发规划应与不确定性相称：已知原因的局部修复只需简短检查风险和验收标准，再形成小范围计划，不必重新审计整个项目或重复证明用户已确认的事实。一次独立评估和一次比较后，应选择方案、进行能区分方案的实验，或向用户明确提出尚未解决的问题。不要为了让智能体达成一致而不断追加轮次。
 
+### 5. 需要共同实现时，创建共享任务
+
+> 使用 `tandem_work` 创建共享任务。先记录目标、约束、上下文和验收标准，将独立模块分给 `claude` 和 `omp`，互为审查者，最后增加依赖所有模块的集成步骤。双方确认同一计划版本后，再领取步骤。先保持在线手动模式；不要批准自主执行、启动后台进程或自动应用结果。
+
+`tandem_work` 是宿主与 OMP 共用的持久任务卡，不是普通对话或一次性审查的替代品。`claim` 只领取工作，不启动模型、不编辑文件；手动提交必须引用真实的完整 Git 提交哈希及证据。若要在关闭客户端后继续工作，需要用户另行批准并执行操作者 CLI 的有界授权与 `run`／`start`。在线唤醒通知不会启动已退出的客户端，机器关机时不会执行。完整的 JSON、授权、停止、异常恢复和显式应用命令见[共享任务指南](docs/guide.zh-CN.md#shared-work)。
+
 ## 工作原理
 
 ```mermaid
@@ -124,6 +131,7 @@ flowchart LR
 | 安装、提供商和客户端 | [完整指南](docs/guide.zh-CN.md) |
 | 用一条简短命令启动 Claude 和 Webhook | [设置 `claude-tandem`](docs/guide.zh-CN.md#one-command-launch) |
 | 任务、模式、结果、问题和产物 | [任务流程](docs/guide.zh-CN.md#tasks-and-execution-modes) |
+| 共享计划、交叉验收与自主控制器 | [共享任务与自主执行](docs/guide.zh-CN.md#shared-work) |
 | 产品规则和决策 | [产品知识](docs/guide.zh-CN.md#product-knowledge-and-decisions) |
 | 工作区隔离和显式共享 | [项目隔离](docs/guide.zh-CN.md#project-isolation) |
 | 全部 MCP 工具和限制 | [API 参考](docs/guide.zh-CN.md#mcp-tools) |

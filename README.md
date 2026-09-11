@@ -79,6 +79,12 @@ The review uses a saved **staged/index snapshot**, not unstaged working files. I
 
 For development, scale planning to uncertainty: a known local fix needs a brief risk/criteria check and a small plan, not a new audit of the whole project or a re-proof of user-confirmed facts. After one independent assessment and one comparison, choose an approach, run a distinguishing experiment, or state the unresolved question for the user. Do not loop until the agents agree.
 
+### 5. Give both agents one shared task
+
+> Use OMP Tandem to agree a shared task for this feature. Record the goal, constraints, acceptance criteria, module owners and distinct reviewers. Split independent modules, add a final integration step, and keep the checklist and blockers current. Do not launch unattended work until I grant its limits.
+
+`tandem_work` exposes the same durable card to both participants, including a readable Markdown view. Work survives a conversation ending; **a saved task is not a running agent**. Existing-client work is manual; opt-in unattended execution uses a separate bounded controller, dedicated Claude/OMP attempts and isolated Git worktrees. Accepted results are not silently merged into your current branch. [Shared-task workflow and operator commands](docs/guide.md#shared-tasks).
+
 ## How it works
 
 ```mermaid

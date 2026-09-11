@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from .bridge import Bridge
+from .work_notifications import WorkNotifications
 from .workspace import client_root_paths
 
 CODEX_SCOPE_CAPABILITY = "codex/sandbox-state-meta"
@@ -50,6 +51,8 @@ class RuntimeOptions:
     webhook_enabled: bool = True
     webhook_port: int = 0
     migrate_legacy: bool = True
+    work_participant: str = "claude"
+    work_token_file: Path | None = None
 
 
 class BridgeBinding:
@@ -71,11 +74,14 @@ class BridgeBinding:
         self.lock = asyncio.Lock()
         self.started = False
         self.closed = False
+        self.work_notifications = None
 
     async def start(self):
         if self.bridge is not None and not self.started:
             await self.bridge.channel.start()
             self.started = True
+            self.work_notifications = WorkNotifications(self.bridge)
+            await self.work_notifications.start()
 
     async def _create(self, root: Path, source: str):
         options = self.options
@@ -90,6 +96,8 @@ class BridgeBinding:
             webhook_enabled=options.webhook_enabled,
             webhook_port=options.webhook_port,
             migrate_legacy=options.migrate_legacy,
+            work_participant=options.work_participant,
+            work_token_file=options.work_token_file,
         )
         self.bridge = bridge
         self.source = source
@@ -174,6 +182,8 @@ class BridgeBinding:
     async def close(self):
         async with self.lock:
             self.closed = True
+            if self.work_notifications is not None:
+                await self.work_notifications.close()
             if self.bridge is not None:
                 try:
                     await asyncio.to_thread(self.bridge.shutdown)

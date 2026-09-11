@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**版本：3.3.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**版本：3.4.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -31,6 +31,7 @@ OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Co
 - [自动准备运行环境](#automatic-runtime-preparation)
 - [钩子与技能](#hooks-and-skills)
 - [与协作者共同工作](#working-with-a-peer)
+- [共享任务与自主执行](#shared-work)
 - [任务与执行模式](#tasks-and-execution-modes)
 - [执行配置与用量](#execution-and-accounting)
 - [不可变快照审查](#snapshot-reviews)
@@ -67,6 +68,8 @@ OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Co
 | 原生对话历史 | 继续已有的 OMP 对话，而不是悄悄开启另一个会话 |
 | 每轮目标 | 替换当前目标，而不是重复之前的整轮审计 |
 | 结构化契约 | 指定约束、文件归属、上下文和验收标准 |
+| 共享任务卡 | 双方确认同一计划版本、依赖图、精确文件归属和独立验收 |
+| 可选自主控制器 | 操作者明确授权后，在客户端断开时按预算继续执行；不确定的执行不自动重放 |
 | 不可变审查包 | 固定需求、代码字节和证据，先独立判断，再比较作者方案 |
 | 有界审查场景 | 一次启动捕获快照，独立审查后按条件比较一次；统一读取、回复和取消 |
 | 问题生命周期 | 稳定编号与只追加历史，分开记录问题有效性和修复状态 |
@@ -337,7 +340,7 @@ Claude 插件提供轻量前置工具诊断，以及可选的独立看门狗：
 
 只有不涉及实质设计／行为选择的机械修改，或范围和前提未变且用户已明确批准的计划，才可走简化流程；需说明例外及检查方式。目标明确或 diff 很小本身不是例外。不要让用户逐项批准普通技术细节。只读规划会话不能通过继续对话获得写权限：另开获准的 `work` 会话并传递已确定的计划。仅分析的请求不授权实现。
 
-这些规划与停止规则是**技能／提示词中的协调策略，不是运行时的“计划批准”权限门**。它们不能自动证明宿主已完成规划，也不能批准写入。相比之下，快照阶段的访问限制和高层场景的最多两轮编排由代码执行，详见下文。
+这些一般规划与停止规则是**技能／提示词中的协调策略，不是运行时的“计划批准”权限门**。它们不能自动证明宿主已完成规划，也不能批准写入。下文的共享任务另外通过代码要求双方确认同一计划版本，但计划共识仍不等于自主执行授权。快照阶段的访问限制和高层场景的最多两轮编排也由代码执行。
 
 好的请求会拆分互补的工作，而不是重复劳动：
 
@@ -352,6 +355,260 @@ Claude 插件提供轻量前置工具诊断，以及可选的独立看门狗：
 用户已确认的观察结果与协作者的假设不同。不要仅仅为了再次确认用户的观察而重跑已确认的实验；应调查新的断言或发生变化的代码。任何一方都不应只负责无条件认可另一方。
 
 一般规划可使用 `tandem_start` 获取独立判断，再通过 `tandem_continue` 比较协调者方案；已有变更的只读快照审查优先使用[高层场景](#review-run)，无需手动串联工具。保留用户已确认的事实；若代码、历史或共享上下文已经暴露方案，应承认其影响，而不是声称盲审。重要前提变化时有意重新规划，不暗中扩大任务或开启循环审计。
+
+<a id="shared-work"></a>
+## 共享任务与自主执行
+
+`tandem_work(request: WorkCommand, wait_seconds=0)` 是宿主和 OMP 共用的入口。它保存一张项目内持久任务卡：目标、版本化计划、双方共识、步骤依赖、领取记录、阻塞、不可变提交和独立验收。原有 `tandem_start`／`tandem_continue` 对话以及只读 `tandem_review_run` 保持不变；共享任务不是把一次审查变成后台实现。
+
+### 先区分身份、共识与权限
+
+- `claude` 和 `omp` 是**参与者席位**，不是模型自行声明的身份。普通宿主服务器默认使用 `claude`；OMP 原生协作工具使用 `omp`。受信任的独立同伴客户端可由操作者在 MCP 服务器启动参数中配置 `--work-participant omp`，绑定同一 `--project-root` 和 `--state-dir`。不要为凑齐共识让同一智能体冒充另一方。
+- `WorkCommand` 不接受 `actor`、权限或任意尝试令牌字段。受管工作进程由服务器验证的私有令牌绑定到参与者、任务、步骤及实现／审查角色，不能越权领取其他步骤或为自己授权。
+- 双方 `agree` 只确认**同一个 `plan_revision`**。在线手动模式下，`claim` 仅锁定可执行步骤；它不会创建执行进程、自动编辑或替用户运行测试。领取凭据由原 MCP／OMP 会话保留，之后的提交和审查必须通过该会话进行；断线重启不等于可重新领取。
+- 自主执行另需用户明确批准并执行**操作者 shell CLI** 的 `authorize`。这不是模型可通过 MCP 批准的权限。没有授权时不默认产生后台执行或其模型费用；手动启动的模型调用仍可能收费。
+
+### 创建计划：两个并行模块，一个最终集成
+
+以下都是 `tandem_work` 的参数 JSON，不是已经运行的案例。请替换教学路径、需求和证据。`plan` 的准确字段为 `title`、`goal`、`constraints`、`context`、`acceptance`、`steps`；每个步骤包含下例所示的八个字段。不接受额外字段。`owned_files` 必须是项目内精确相对路径，不能使用目录通配、绝对路径或 `..`。
+
+```json
+{
+  "request": {
+    "action": "create",
+    "expected_revision": 0,
+    "operation_id": "csv-create-001",
+    "plan": {
+      "title": "CSV 导入与结果展示",
+      "goal": "提供可观察、可交叉审查的 CSV 导入流程",
+      "constraints": [
+        "保持现有公开 API",
+        "只修改各步骤声明的文件",
+        "没有 shell 授权时不运行检查，并明确记录未执行"
+      ],
+      "context": "先约定模块接口：parse_csv(text) 返回记录列表；format_rows(rows) 返回显示文本。具体字段以项目需求为准。",
+      "acceptance": [
+        "最终提交同时包含两个模块及调用集成",
+        "正常输入、空输入和错误输入的用户可见结果均有真实证据；未执行项明确列出"
+      ],
+      "steps": [
+        {
+          "id": "parse",
+          "title": "解析模块",
+          "goal": "实现 parse_csv(text) 并保留错误信息",
+          "owner": "claude",
+          "reviewer": "omp",
+          "owned_files": ["src/csv_parser.py"],
+          "depends_on": [],
+          "acceptance": ["返回约定记录结构，错误输入的行为可追溯"]
+        },
+        {
+          "id": "format",
+          "title": "展示模块",
+          "goal": "实现 format_rows(rows)",
+          "owner": "omp",
+          "reviewer": "claude",
+          "owned_files": ["src/row_formatter.py"],
+          "depends_on": [],
+          "acceptance": ["正常记录与空记录的显示符合约定"]
+        },
+        {
+          "id": "integrate",
+          "title": "最终集成与全局验收",
+          "goal": "组合两个已验收的模块，审查完整用户流程",
+          "owner": "claude",
+          "reviewer": "omp",
+          "owned_files": ["src/app.py", "src/csv_parser.py", "src/row_formatter.py"],
+          "depends_on": ["parse", "format"],
+          "acceptance": [
+            "完整结果包含两个已验收模块，调用接口一致",
+            "依据同一最终提交逐项核对全局验收标准，注明实际检查方式和限制"
+          ]
+        }
+      ]
+    }
+  },
+  "wait_seconds": 0
+}
+```
+
+`parse` 与 `format` 可并行，且互不占用相同文件；只有两者的当前提交均被独立接受，`integrate` 才可领取。归属重叠仅允许在有祖先依赖的步骤之间出现，如最终集成重新涉及模块文件。依赖必须无环、引用已有唯一步骤，并且只能有一个最终汇点，直接或间接依赖全部其他步骤。多个互不相连的“完成”输出不能代表集成成功。每一步的 `owner` 与 `reviewer` 必须不同，计划及每一步均至少有一条验收标准。
+
+### 读取、确认与 CAS 更新
+
+创建返回真实 `work_id`。以下的 `"WORK_ID"`、`"SUBMISSION_ID"` 和提交哈希均须替换为实际返回值。所有变更（包括 `create`）必须带 `expected_revision` 和唯一 `operation_id`；读取不需要。数字版本仅用于演示，**每次修改前读取当前卡片并使用实际 `revision`**，不可把示例数字当作稳定的调用序列：
+
+```json
+{"request":{"action":"get","work_id":"WORK_ID"},"wait_seconds":0}
+```
+
+返回的 `markdown` 是同一状态的可读任务卡；结构化字段包括 `revision`、`plan_revision`、`agreements`、步骤、阻塞、尝试、提交、`authorization`、`next_action` 和最终 `result`。进度会增加 `revision`，但不改变计划版本。`history` 的 `expected_revision` 是排除该版本及更早事件的游标：
+
+```json
+{"request":{"action":"history","work_id":"WORK_ID","expected_revision":0}}
+```
+
+双方先各自阅读完整计划，再分别在其席位调用。以下第一个来自 `claude`，第二个来自 `omp`，后者使用前者更新后的当前版本：
+
+```json
+{"request":{"action":"agree","work_id":"WORK_ID","expected_revision":1,"operation_id":"csv-agree-claude-001","note":"确认当前完整计划、接口及文件归属"}}
+```
+
+```json
+{"request":{"action":"agree","work_id":"WORK_ID","expected_revision":2,"operation_id":"csv-agree-omp-001","note":"独立阅读后确认同一计划版本"}}
+```
+
+CAS 冲突表示卡片已变化：重新读取、理解变化，再用新 `operation_id` 提交有意的新操作。只有网络结果丢失、需要取回**相同请求回执**时才原样重发同一个操作 ID；不能修改负载后复用 ID，也不能因此重放编辑、shell 或模型启动。
+
+`propose` 同样携带完整 `plan`、当前 `expected_revision`、新 `operation_id`，可附 `note`。实质性改计划会推进 `plan_revision`，清除双方共识和当前验收状态，使旧尝试失效并撤销旧自主授权；必须重新确认，必要时先处理旧执行的不确定性，再重新授权。旧记录仍可从历史追溯。
+
+### 在线手动模式：领取、真实提交、独立审查
+
+在 `claude` 的同一在线会话领取 `parse`：
+
+```json
+{"request":{"action":"claim","work_id":"WORK_ID","step_id":"parse","expected_revision":3,"operation_id":"csv-claim-parse-001"}}
+```
+
+领取会固定当前 Git `HEAD`；仓库必须已有提交。随后由已获许可的在线智能体或用户实际工作，并自行安排隔离的分支／worktree 与 Git 提交。**手动 `claim` 不替你准备受管 worktree。** 提交必须已存在于该项目的 Git 对象库中，是领取时源提交的后代，并且相对该源提交只改变本步骤归属的文件。并行工作不要相互带入对方的未验收修改；手动集成者还需确实组合当前已验收的依赖提交，不能仅把步骤标为完成。
+
+工作结束后，在原领取会话通过 `submit` 引用真实完整哈希（以下 40 位值只是格式占位，不能直接提交），并提供说明及真实证据：
+
+```json
+{
+  "request": {
+    "action": "submit",
+    "work_id": "WORK_ID",
+    "step_id": "parse",
+    "expected_revision": 4,
+    "operation_id": "csv-submit-parse-001",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "note": "说明该提交实际完成的行为及尚未验证的部分",
+    "evidence": ["替换为对应此提交的实际检查记录；未运行测试时明确写明未运行"]
+  }
+}
+```
+
+手动提交会检查并保留不可变 Git 输出。受管自主实现则由 supervisor 捕获并核对工作区、创建提交；模型不能通过 `commit` 字段指定受管输出。两者的 `submit` 都不等于通过验收。
+
+审查者 `omp` 先 `get` 当前卡片，再领取同一步骤；存在提交时 `claim` 领取的是审查而非实现：
+
+```json
+{"request":{"action":"claim","work_id":"WORK_ID","step_id":"parse","expected_revision":7,"operation_id":"csv-review-parse-001"}}
+```
+
+在该审查会话中阅读**当前 `submission.commit` 的精确内容**，不要以另一个工作区的最新文件替代它。核对各项标准后，引用当前 `submission_id`：
+
+```json
+{
+  "request": {
+    "action": "accept",
+    "work_id": "WORK_ID",
+    "step_id": "parse",
+    "expected_revision": 8,
+    "operation_id": "csv-accept-parse-001",
+    "submission_id": "SUBMISSION_ID",
+    "note": "说明独立判断、覆盖的标准和检查限制",
+    "evidence": ["替换为对此精确提交的真实审查依据和实际检查结果"]
+  }
+}
+```
+
+需要修改时改用 `action: "reject"`，填写真实问题及证据，并使用新的操作 ID；作者不能自我验收。`format` 同理但双方角色相反；最后 `integrate` 的审查者还需核对全局标准。验收记录是带归属的**模型／人工声明**，存储层不会执行或认证检查；有提交、有共识、任务 `completed` 均不能替代真实的运行证据。
+
+### 阻塞、暂停与在线唤醒
+
+| 操作 | 当前版本与新操作 ID 之外的必要输入／作用 |
+|---|---|
+| `block` | `step_id`、`note`、`condition`；写明阻塞原因及解除条件 |
+| `unblock` | `step_id`、`blocker_id`、`resolution`、非空 `evidence`；仅阻塞作者或操作者可解除 |
+| `heartbeat` | `step_id`；由持有当前领取凭据的会话记录心跳，不授权新的启动 |
+| `pause` | `work_id`；持久暂停，并隔离现有尝试 |
+| `resume` | `work_id`；显式恢复，不清除阻塞、不恢复已失效的令牌或撤销的授权 |
+| `list` | 无需 CAS，列出当前可信项目的任务 |
+
+普通阻塞被有证据地解除后，若没有不确定执行、任务未暂停且自主授权仍有效，控制器可继续选择就绪步骤；无需为了推进而重新发送通知。若 `block` 隔离了正在执行的尝试，则先走下文的操作者恢复流程。显式暂停具有粘性，计划确认、通知或重启控制器都不会自动撤销它。
+
+若当前执行者主动登记阻塞并以 `blocked` 正常结束，控制器会保留中间提交为 `checkpoint`、确认进程已退出并释放执行槽位。有证据地解除阻塞后，新尝试从该检查点继续已有改动，而非重新实现整个模块；检查点不等于验收。外部强制停止、丢失启动确认、未知费用或未确认的副作用仍需操作者恢复。
+
+```json
+{"request":{"action":"get","work_id":"WORK_ID"},"wait_seconds":25}
+```
+
+`wait_seconds` 范围为 0–25，正值只让 `get` 有界等待已提交的状态变化。事件／Channels 是在线客户端的尽力唤醒提示：醒来后重新读取持久任务卡，不把消息当作执行权或需要重发启动的信号。通知不能复活已经退出的 Claude／OMP 客户端。只有另行启动的自主控制器拥有独立生命周期；它观察持久状态，不依赖客户端持续接收推送。
+
+### 操作者自主授权与生命周期
+
+先确保双方已确认计划、项目是已有提交的 Git 仓库，且机器上真实的 `claude`、`omp` 及其提供商认证可用。下面的 `python` 必须来自**安装了当前 OMP Tandem 的环境**；仅系统 Python 不够。插件用户可通过上文 `server.py --prepare` 获取准备好的解释器路径。所有命令使用与 MCP 相同的绝对项目根和状态目录；默认状态根为 `~/.local/state/omp-tandem`，自定义 `--state-dir` 放在子命令之前。
+
+用户需明确批准这些费用与工具权限并执行授权，而不是让模型自行决定无人值守运行。授权绑定当前计划版本、当前源提交与期限：
+
+```sh
+python -m omp_tandem.work_daemon --project-root /absolute/project \
+  authorize WORK_ID --budget-seconds 1800 --max-launches 8 \
+  --max-cost-usd 5 --allow-work
+```
+
+`--allow-work` 允许受管实现的写入；若用户还明确允许 shell 检查，则在这条授权命令末尾添加 `--allow-tests`。**它允许任意 shell 能力，不是只允许名为“测试”的安全命令。** 不授予 shell 时应记录未执行的验证，不能编造通过结果。已知费用、未知费用和每次启动保留的费用额度用于调度；美元上限是估算／软上限，不保证提供商账单绝不超额。用量未知会暂停任务；预算、启动次数或期限耗尽不会自动追加授权。
+
+选择前台运行，或显式脱离客户端运行；二者是替代方式，不要重复启动：
+
+```sh
+python -m omp_tandem.work_daemon --project-root /absolute/project \
+  run --work-id WORK_ID --concurrency 2
+```
+
+```sh
+python -m omp_tandem.work_daemon --project-root /absolute/project \
+  start --work-id WORK_ID --concurrency 2
+```
+
+默认并发为 2，允许 1–4；每项目只运行一个控制器。`start` 在脱离前检查有效授权；前台执行也不能绕过调度授权。可选 `--once` 在没有当前可运行／活动尝试时退出，不是“忽略阻塞后一直完成整个计划”。控制器为各实现准备项目状态目录内的独立 detached worktree，按依赖顺序组合已验收提交；审查使用对应提交的精确快照。原工作区不会因受管提交或最终验收被自动更新。
+
+快照使用提交中的精确字节，包括存在换行转换或 `ident` 属性的仓库。安全上限为每文件 16 MiB、每快照 256 MiB、20,000 个文件；已跟踪的符号链接、子模块和已配置的 Git 过滤器会被拒绝，而非被静默省略。共享状态目录应位于原工作区之外。被审查拒绝或正常阻塞的结果保留检查点供后续修正；依赖冲突的各版本保留在对应 worktree 的 Git 索引中供检查。
+
+```sh
+python -m omp_tandem.work_daemon --project-root /absolute/project status
+python -m omp_tandem.work_daemon --project-root /absolute/project show WORK_ID
+python -m omp_tandem.work_daemon --project-root /absolute/project stop
+python -m omp_tandem.work_daemon --project-root /absolute/project revoke WORK_ID
+```
+
+`status` 检查真实控制器租约，`show` 不带 ID 时列出项目任务。`stop` 请求控制器停止并暂停其任务；返回 `stop_requested` 不是已停止证明，应继续查看 `status` 与任务状态。`revoke` 撤销该任务授权、隔离当前尝试，控制器据此终止工作；它不回滚已发生的编辑或外部副作用。恢复需要显式 `resume`，必要时完成恢复核对并重新授权，再执行 `run`／`start`。
+
+没有自动安装全局 launchd／systemd 服务，也没有云端执行承诺。脱离终端不等于跨关机运行：机器关闭时不执行，进程崩溃后不自动重放工作。
+
+### 不确定执行：先检查，再明确恢复
+
+控制器丢失、尝试超时、进程可能已启动、输出捕获失败等会进入 `recovery_required`。缺少心跳、没有通知或父进程退出都不能证明旧子进程和外部副作用已消失。不要重新发送领取／启动来“修复”它。
+
+1. 请求 `stop`，查看控制器与尝试状态；检查并确认旧执行确实停止。
+2. 检查保留的 worktree、Git 提交、日志、可能的外部副作用与提供商费用，保存实际证据。未知费用导致暂停时，先核对费用再决定新的有界授权。
+3. 操作者明确选择 `retry` 或 `abandon`。`--confirm-stopped` 是操作者在实际检查后的声明，不是根据进程沉默推断的事实：
+
+```sh
+python -m omp_tandem.work_daemon --project-root /absolute/project \
+  reconcile WORK_ID parse --resolution retry \
+  --note "替换为停止确认、已检查副作用及允许重试的具体理由" \
+  --evidence "替换为实际检查记录或证据位置" --confirm-stopped
+```
+
+放弃则使用 `--resolution abandon`，保留说明与证据；这会留下需要显式解决的阻塞并暂停任务。恢复操作只能由操作者 CLI 执行，不能由 MCP 模型调用 `reconcile` 获得权限。`retry` 只是允许一次经过有意决定的新尝试，仍受共识、阻塞、暂停及现有授权约束；它不自动回滚、重放或清除未知费用。
+
+### 最终结果与显式应用
+
+只有当前计划的所有步骤（含最终集成）被不同审查者接受，任务才为 `completed`，`result` 指向最终不可变提交。先阅读 `markdown`、每一步提交与证据及最终结果，区分静态审查、人工声明和真正执行过的检查。状态与受管 worktree 按可信项目隔离，保存在仓库之外；这些不是用于合并的可编辑 Markdown 清单。
+
+原分支的更新必须由用户显式执行。把 `EXPECTED_HEAD` 替换为已检查的原项目完整当前提交哈希：
+
+```sh
+python -m omp_tandem.work_daemon --project-root /absolute/project \
+  apply WORK_ID --expected-head EXPECTED_HEAD
+```
+
+应用要求当前 `HEAD` 与预期一致、原工作区干净、输出可快进，并且不会覆盖冲突的忽略文件。若分支已变化或无法快进，会拒绝而不强制覆盖；应检查保存的结果并由用户明确决定如何集成。任务完成不自动合并、推送或发布。
+
+**安全边界：** worktree 与文件归属检查帮助隔离和核对输出，**不是操作系统沙箱**。拥有 shell／操作系统权限的进程仍可能访问其他文件或产生外部副作用，宿主的沙箱不会自动覆盖外部 Claude／OMP。共享数据也不会授予执行权；计划中的提示文字不是授权。提供商可能收到任务上下文，费用与运行时间不由“本地存储”保证为零。
 
 <a id="tasks-and-execution-modes"></a>
 ## 任务与执行模式
@@ -867,11 +1124,12 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 <a id="mcp-tools"></a>
 ## MCP 工具
 
-共 19 个 MCP 工具。首次只读审查优先使用 `tandem_review_run`；原有单任务与逐阶段工具仍然保留。宿主前缀可能不同；以下是稳定的工具后缀。MCP `Context` 由系统注入，不是用户参数。
+共 20 个 MCP 工具。首次只读审查优先使用 `tandem_review_run`；共享实现使用 `tandem_work`。原有单任务与逐阶段工具仍然保留。宿主前缀可能不同；以下是稳定的工具后缀。MCP `Context` 由系统注入，不是用户参数。
 
 | 工具 | 主要输入 | 用途 |
 |---|---|---|
 | `tandem_scope` | 无 | 检查不可变的项目边界和启动迁移结果 |
+| `tandem_work` | `request: WorkCommand`、`wait_seconds=0..25` | [共享计划、CAS 更新、领取、提交与独立验收](#shared-work)；自主授权及不确定执行恢复仅限操作者 CLI |
 | `tandem_start` | `cwd`、`prompt` 或 `contract`、`mode`、超时参数、`execution`、`review_id`、`review_stage`、`project_context_id` | 新建任务和对话 |
 | `tandem_continue` | `conversation_id`、`prompt` 或 `contract`、超时参数、`execution`、`review_id`、`review_stage`、`project_context_id` | 基于已有历史开启新轮次 |
 | `tandem_result` | `task_id`、`wait_seconds`、`details` | 读取回答、结果判定、问题、产物和诊断信息 |
@@ -892,6 +1150,8 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 | `tandem_receipt` | `task_id`、`action=status/claim/complete`、`token` | 单独领取并确认终态结果处理 |
 
 OMP 自身会获得绑定到其任务的宿主工具：`tandem_ask`、`tandem_finish`、`tandem_publish_artifact` 和 `tandem_read_artifact`。绑定审查的 `think` 任务还可使用 `tandem_review_read`，它只读取该任务／阶段允许的已保存材料，不提供实时文件系统访问。即使只是纯文本回答，也必须调用 `tandem_finish`；它不是普通的协调者工具。报告的可选 `findings` 和 `finding_updates` 用于提交[结构化问题](#finding-lifecycle)。
+
+OMP 也可使用同一个 `tandem_work` 契约，参与者由服务端绑定；受管尝试只允许其任务／步骤内的操作。它不能通过任务内容或工具参数给自己授予自主执行权限。
 
 <a id="results-questions-and-artifacts"></a>
 ## 结果、问题与产物

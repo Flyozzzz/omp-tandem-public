@@ -29,6 +29,20 @@ The default total `budget_seconds=600` includes capture/startup, both stages and
 `usage.peer` aggregates the run's own OMP stages once. Coordinator usage and total cost remain unknown unless measured separately; `elapsed_seconds` covers the accepted run, not the entire outer coordinator process. Never present these as complete end-to-end cost/time.
 
 
+## Shared complex tasks
+
+Use `tandem_work(request={...})` for one durable shared plan and checklist, separate from native turn IDs. The current host's operator-selected seat is `claude` by default; native OMP uses `omp`. Seats are task participants, not claims about which model is running. Managed attempts receive a server-bound credential and may act only on their assigned step.
+
+1. Record actual goal/context/constraints/global acceptance and steps with stable IDs, exact `owned_files`, `owner`, distinct `reviewer`, `depends_on`, and step acceptance. Use one final integration sink depending transitively on all modules. Both participants agree to the exact plan revision; a shared plan is not permission for background launches.
+2. Read the latest `revision`; every mutation needs `expected_revision` and a stable `operation_id`. After a conflict reread and reconsider. Retry the exact operation only to recover its acknowledgement; do not replay uncertain execution.
+3. Attached clients claim eligible steps and retain the claim through the current MCP/native-tool session. Manual implementation submits an existing exact committed hash with note/evidence; no worktree is launched by a claim. Use a separate reviewer claim to accept/reject the exact `submission_id`. Reconnect does not silently steal a claim; recover an exact still-active claim receipt or reconcile explicitly.
+4. For unattended execution, explain project/tool/shell/time/launch/cost limits and obtain explicit operator approval for `python -m omp_tandem.work_daemon ... authorize`. Agents cannot grant that authority through MCP. The operator then uses `run` or `start`; do not install a global service or hijack an interactive session. Managed file tools are restricted by role; `allow_tests` permits arbitrary shell, not a sandbox.
+5. The controller reserves independent steps atomically, launches in separate worktrees, waits for a real shared-work heartbeat and complete structured output, and schedules review/dependents from committed state. Record a cooperative blocker and finish honestly; known stopped work preserves a checkpoint. After an evidenced unblock it can continue from that checkpoint under the same current grant. Missing acknowledgements/crashes/unknown effects require operator reconciliation, never retry by notification.
+6. Observe with `get` and positive `wait_seconds` when idle. Events only signal invalidation; get current state. Explicit pause remains sticky; revoked/expired/unknown-cost grants cannot launch more work. A closed interactive client does not end a separately authorized supervisor, but a sleeping/offline machine cannot be promised to execute.
+7. Read the final accepted integration commit and evidence. Acceptance is an attributed assessment, not proof inferred from an exit code or a checked box. Applying it to the original checkout is an explicit operator `apply --expected-head` action, refusing changed/dirty roots rather than resetting user work.
+
+See the detailed guide's shared-tasks section for the exact MCP JSON and operator CLI. Task revisions do not silently expand permissions or rewrite prior evidence.
+
 ## Plan before nontrivial development
 
 For a feature, behavioral fix, architectural change, or other nontrivial development, the default sequence is **understand → independently assess → compare → plan → implement → cross-check**. Do not begin implementation edits or send a `work` implementation task before the planning phase is complete.

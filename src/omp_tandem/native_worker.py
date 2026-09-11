@@ -23,6 +23,7 @@ from .runtime_models import (
 from .task_contracts import TaskMessages
 from .task_interaction import TaskInteraction
 from .task_store import TaskStore
+from .work_access import WorkToolRequest, perform_work
 from .worker_turn import TurnCancelled, wait_for_turn
 
 logger = logging.getLogger(__name__)
@@ -36,15 +37,61 @@ class NativeWorker:
         interaction: TaskInteraction,
         messages: TaskMessages,
         executable: str,
+        *,
+        work_items=None,
     ):
         self.tasks = tasks
         self.artifacts = artifacts
         self.interaction = interaction
         self.messages = messages
         self.executable = executable
+        self.work_items = work_items
 
     def worker_tools(self, task):
         task_id = task["task_id"]
+        work_tools = ()
+        if self.work_items is not None:
+            attempt = self.work_items.native_attempt(task_id)
+            claims = {}
+
+            def shared_work(request, context):
+                if context.cancelled:
+                    raise Cancelled()
+                result = perform_work(
+                    self.work_items,
+                    request.request,
+                    actor="omp",
+                    attempt_token=attempt["token"] if attempt else None,
+                    claims=claims,
+                )
+                revision = result.get("revision")
+                deadline = time.monotonic() + request.wait_seconds
+                while (
+                    request.request.action == "get"
+                    and result.get("revision") == revision
+                    and time.monotonic() < deadline
+                ):
+                    if context.cancelled:
+                        raise Cancelled()
+                    time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+                    result = perform_work(
+                        self.work_items,
+                        request.request,
+                        actor="omp",
+                        attempt_token=attempt["token"] if attempt else None,
+                        claims=claims,
+                    )
+                return json.dumps(result, ensure_ascii=False)
+
+            work_tools = (
+                host_tool(
+                    name="tandem_work",
+                    description="Read and update the shared project task, agree on its plan, claim assignments, report blockers and review exact submissions. Actor and managed assignment are bound by the server. Read latest revision before a mutation; events are not permission. No autonomy grants or uncertain replay.",
+                    parameters=WorkToolRequest.model_json_schema(),
+                    decode=WorkToolRequest.model_validate,
+                    execute=shared_work,
+                ),
+            )
         review_tools = ()
         if task.get("review_id"):
             review_tools = (
@@ -110,6 +157,7 @@ class NativeWorker:
                 ),
             ),
             *review_tools,
+            *work_tools,
         )
 
     def execute(self, task_id):
@@ -160,6 +208,19 @@ class NativeWorker:
                     "lsp",
                     "todo",
                 )
+            managed = (
+                self.work_items.native_attempt(task_id) if self.work_items else None
+            )
+            if managed:
+                self.work_items.authenticate(managed["token"])
+                if "--no-tools" in args:
+                    args.remove("--no-tools")
+                tools = ["read", "grep", "glob"]
+                if managed["kind"] == "implement" and managed["allow_work"]:
+                    tools += ["edit", "write"]
+                if managed["allow_tests"]:
+                    tools.append("bash")
+                args += ["--no-lsp"]
             host_tools = self.worker_tools(task)
             client = RpcClient(
                 executable=self.executable,
@@ -171,14 +232,17 @@ class NativeWorker:
                 session_dir=self.tasks.root / "sessions",
                 tools=tools,
                 custom_tools=host_tools,
-                no_skills=task["mode"] != "work",
-                no_rules=task["mode"] != "work",
+                no_skills=managed is not None or task["mode"] != "work",
+                no_rules=managed is not None or task["mode"] != "work",
                 extra_args=args,
                 startup_timeout=min(45, remaining),
                 request_timeout=min(30, remaining),
                 append_system_prompt=WORKER_INSTRUCTIONS
                 + (
-                    "\nDo not modify project files or execute shell commands."
+                    "\nManaged assignment: respect its exact workspace and grants. "
+                    "A reviewer never edits source; shell checks require explicit allow_tests."
+                    if managed
+                    else "\nDo not modify project files or execute shell commands."
                     if task["mode"] != "work"
                     else ""
                 ),

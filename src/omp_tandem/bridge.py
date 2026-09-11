@@ -21,6 +21,8 @@ from .task_interaction import TaskInteraction
 from .task_results import TaskResults
 from .task_runtime import TaskRuntime
 from .task_store import TaskStore, initialize_database
+from .work_access import perform_work, read_work_token
+from .work_items import WorkStore
 from .workspace import WorkerSlots, resolve_scope
 
 
@@ -37,6 +39,8 @@ class Bridge:
         project_root: Path | None = None,
         project_source: str | None = None,
         migrate_legacy=True,
+        work_participant="claude",
+        work_token_file: Path | None = None,
     ):
         self.scope = resolve_scope(state_dir, project_root, source=project_source)
         slots = WorkerSlots(self.scope.base)
@@ -61,13 +65,28 @@ class Bridge:
         self.reviews = ReviewStore(database, self.scope, self.artifacts)
         self.findings = FindingStore(database)
         self.receipts = ReceiptStore(database)
+        self.work_items = WorkStore(database, self.scope)
+        if work_participant not in ("claude", "omp"):
+            raise ValueError("Work participant must be claude or omp")
+        self.work_participant = work_participant
+        self.work_token = read_work_token(work_token_file) if work_token_file else None
+        if self.work_token:
+            self.work_participant = self.work_items.authenticate(self.work_token)[
+                "actor"
+            ]
+        self._work_claims = {}
         messages = TaskMessages(self.scope, self.projects, self.reviews)
         self.interaction = TaskInteraction(
             self.tasks, self.artifacts, self.projects, self.findings
         )
         self.results = TaskResults(self.tasks, self.artifacts, self.projects)
         worker = NativeWorker(
-            self.tasks, self.artifacts, self.interaction, messages, executable
+            self.tasks,
+            self.artifacts,
+            self.interaction,
+            messages,
+            executable,
+            work_items=self.work_items,
         )
         self.runtime = TaskRuntime(
             self.tasks,
@@ -90,6 +109,20 @@ class Bridge:
             self.channel.owner,
         )
 
+    def work(self, request):
+        result = perform_work(
+            self.work_items,
+            request,
+            actor=self.work_participant,
+            attempt_token=self.work_token,
+            claims=self._work_claims,
+        )
+        if result.get("work_id") and result.get("revision") is not None:
+            self.channel.store.acknowledge_work(
+                self.channel.owner, result["work_id"], result["revision"]
+            )
+        return result
+
     def start(
         self,
         prompt=None,
@@ -106,6 +139,7 @@ class Bridge:
         review_stage=None,
         reserved_task_id=None,
         review_run_id=None,
+        work_attempt_id=None,
     ):
         previous = (
             self.tasks.latest(conversation_id) if conversation_id is not None else None
@@ -163,6 +197,7 @@ class Bridge:
             review_stage=effective_stage,
             reserved_task_id=reserved_task_id,
             review_run_id=review_run_id,
+            work_attempt_id=work_attempt_id,
         )
 
     def view(self, task_id, details=False, *, refresh=True):

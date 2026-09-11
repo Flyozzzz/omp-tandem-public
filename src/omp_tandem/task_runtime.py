@@ -58,6 +58,7 @@ class TaskRuntime:
         review_stage=None,
         reserved_task_id=None,
         review_run_id=None,
+        work_attempt_id=None,
     ):
         resuming = conversation_id is not None
         if (reserved_task_id is None) != (review_run_id is None):
@@ -72,6 +73,15 @@ class TaskRuntime:
                 raise ValueError(
                     "Review run stages must start independently then resume for comparison"
                 )
+        if work_attempt_id is not None:
+            if resuming or review_run_id is not None:
+                raise ValueError(
+                    "Managed work attempts require a dedicated native turn"
+                )
+            attempt = self.worker.work_items.attempt(work_attempt_id)
+            self.worker.work_items.authenticate(attempt["token"])
+            if attempt["actor"] != "omp":
+                raise ValueError("Native work attempt is not assigned to OMP")
         if (prompt is None) == (contract is None):
             raise ValueError("Supply exactly one of prompt or contract")
         if prompt is not None and (not isinstance(prompt, str) or not prompt.strip()):
@@ -208,6 +218,18 @@ class TaskRuntime:
                 if self.closing:
                     raise ValueError("MCP server is shutting down")
                 self.tasks.insert(record, owned)
+                if work_attempt_id is not None:
+                    try:
+                        self.worker.work_items.started(
+                            work_attempt_id, workspace=str(cwd), native_task_id=task_id
+                        )
+                    except Exception:
+                        self.tasks.update(
+                            task_id,
+                            status="failed",
+                            error="Work attempt admission was rejected",
+                        )
+                        raise
                 thread = threading.Thread(
                     target=self._run, args=(task_id, handle, slot), daemon=True
                 )

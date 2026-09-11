@@ -81,6 +81,17 @@ def main(argv=None):
         default=os.environ.get("OMP_TANDEM_WEBHOOK_PORT", "0"),
         help="Loopback webhook port after channel acknowledgment; 0 selects a per-session port",
     )
+    parser.add_argument(
+        "--work-participant",
+        choices=("claude", "omp"),
+        default="claude",
+        help="Operator-selected participant seat for shared tasks; not a model identity claim",
+    )
+    parser.add_argument(
+        "--work-token-file",
+        type=Path,
+        help="Private managed-attempt capability; exposes only the restricted shared-work API",
+    )
     args = parser.parse_args(argv)
     os.umask(0o077)
     if not 0 <= args.webhook_port <= 65535:
@@ -113,6 +124,8 @@ def main(argv=None):
         webhook_port=args.webhook_port,
         project_root=args.project_root,
         migrate_legacy=not args.no_legacy_import and not args.migrate_only,
+        work_participant=args.work_participant,
+        work_token_file=args.work_token_file,
     )
     if args.migrate_only:
         bridge = Bridge(

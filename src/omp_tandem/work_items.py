@@ -1,0 +1,1706 @@
+"""Versioned shared work, independent acceptance, and fenced execution authority.
+
+Public cards and event snapshots never contain worker credentials. All transitions,
+including scheduler reservations, serialize in the launch project's SQLite database.
+Acceptance is an attributed attestation, not a claim that this store ran checks.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import math
+import re
+import secrets
+import sqlite3
+import subprocess
+import time
+from contextlib import closing, contextmanager
+from pathlib import Path, PurePosixPath
+from typing import Annotated, Literal, Self
+from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+
+from .task_store import initialize_database
+from .workspace import ProjectScope
+
+_NonBlank = Annotated[str, StringConstraints(pattern=r"\S", max_length=16000)]
+_Identifier = Annotated[
+    str, StringConstraints(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$")
+]
+_Actor = Literal["claude", "omp"]
+_ACTIVE = {"reserved", "running"}
+
+
+class _Model(BaseModel):
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")
+
+
+class WorkStep(_Model):
+    id: _Identifier
+    title: _NonBlank
+    goal: _NonBlank
+    owner: _Actor
+    reviewer: _Actor
+    owned_files: list[_NonBlank] = Field(default_factory=list, max_length=500)
+    depends_on: list[_Identifier] = Field(default_factory=list, max_length=200)
+    acceptance: list[_NonBlank] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_step(self) -> Self:
+        if self.owner == self.reviewer:
+            raise ValueError("Step owner and reviewer must be distinct principals")
+        if len(set(self.depends_on)) != len(self.depends_on):
+            raise ValueError("Duplicate dependency")
+        if len(set(self.owned_files)) != len(self.owned_files):
+            raise ValueError("Duplicate owned file")
+        for path in self.owned_files:
+            parts = PurePosixPath(path).parts
+            if (
+                not parts
+                or path != str(PurePosixPath(path))
+                or path.startswith("/")
+                or any(part in {".", "..", ".git"} for part in parts)
+                or any(char in path for char in "\\\x00\n\r*?[]")
+            ):
+                raise ValueError(
+                    "Owned files must be relative exact paths without escapes or globs"
+                )
+        return self
+
+
+class WorkPlan(_Model):
+    title: _NonBlank
+    goal: _NonBlank
+    constraints: list[_NonBlank] = Field(default_factory=list, max_length=100)
+    acceptance: list[_NonBlank] = Field(min_length=1, max_length=100)
+    steps: list[WorkStep] = Field(min_length=1, max_length=200)
+    context: str = Field(default="", max_length=64000)
+
+    @model_validator(mode="after")
+    def validate_graph(self) -> Self:
+        steps = {step.id: step for step in self.steps}
+        if len(steps) != len(self.steps):
+            raise ValueError("Step IDs must be unique")
+        ancestors: dict[str, set[str]] = {}
+        visiting: set[str] = set()
+
+        def visit(step_id):
+            if step_id not in steps:
+                raise ValueError("Dependency references a missing step")
+            if step_id in visiting:
+                raise ValueError("Dependencies must not form a cycle")
+            if step_id not in ancestors:
+                visiting.add(step_id)
+                result = set()
+                for dependency in steps[step_id].depends_on:
+                    result.add(dependency)
+                    result.update(visit(dependency))
+                visiting.remove(step_id)
+                ancestors[step_id] = result
+            return ancestors[step_id]
+
+        for step in self.steps:
+            visit(step.id)
+        for index, left in enumerate(self.steps):
+            for right in self.steps[index + 1 :]:
+                overlap = any(
+                    a == b or a.startswith(b + "/") or b.startswith(a + "/")
+                    for a in left.owned_files
+                    for b in right.owned_files
+                )
+                if (
+                    overlap
+                    and left.id not in ancestors[right.id]
+                    and right.id not in ancestors[left.id]
+                ):
+                    raise ValueError(
+                        "Overlapping ownership requires an ancestor dependency"
+                    )
+        referenced = {
+            dependency for step in self.steps for dependency in step.depends_on
+        }
+        sinks = set(steps) - referenced
+        if len(sinks) != 1:
+            raise ValueError(
+                "Plan requires one final integration step depending transitively on every other step; independent final outputs cannot certify the combined result"
+            )
+        return self
+
+
+class WorkCommand(_Model):
+    action: Literal[
+        "create",
+        "get",
+        "list",
+        "history",
+        "propose",
+        "agree",
+        "claim",
+        "heartbeat",
+        "block",
+        "unblock",
+        "submit",
+        "accept",
+        "reject",
+        "pause",
+        "resume",
+        "reconcile",
+    ]
+    work_id: str | None = None
+    step_id: str | None = None
+    expected_revision: int | None = Field(default=None, ge=0)
+    operation_id: _NonBlank | None = None
+    plan: WorkPlan | None = None
+    note: _NonBlank | None = None
+    blocker_id: str | None = None
+    condition: _NonBlank | None = None
+    resolution: _NonBlank | None = None
+    evidence: list[_NonBlank] = Field(default_factory=list, max_length=100)
+    submission_id: str | None = None
+    commit: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40,64}$")] | None = (
+        None
+    )
+
+
+class WorkConflict(ValueError):
+    """The caller must read the current card before revising it."""
+
+
+def _json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _public_attempt(attempt):
+    return {
+        key: value
+        for key, value in attempt.items()
+        if key not in {"token", "token_hash"}
+    }
+
+
+class WorkStore:
+    def __init__(self, database: Path, scope: ProjectScope):
+        self.database = Path(database)
+        self.scope = scope
+        if (
+            self.database != scope.directory / "tasks.sqlite3"
+            or self.database.is_symlink()
+        ):
+            raise ValueError(
+                "Work database must be this launch project's scoped task database"
+            )
+        # Check our own tables too: the shared initializer predates this store.
+        if self.database.exists():
+            with closing(sqlite3.connect(self.database)) as db:
+                tables = {
+                    row[0]
+                    for row in db.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                identity = (
+                    db.execute(
+                        "SELECT scope_id, project_root FROM bridge_scope WHERE singleton=1"
+                    ).fetchone()
+                    if "bridge_scope" in tables
+                    else None
+                )
+                if identity is not None and identity != (scope.key, str(scope.root)):
+                    raise ValueError("Database belongs to a different launch project")
+                if identity is None and any(
+                    table.startswith("work_") for table in tables
+                ):
+                    raise ValueError(
+                        "Unscoped work data cannot be attached to a project"
+                    )
+        initialize_database(scope)
+        with self._transaction() as db:
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS work_cards (work_id TEXT PRIMARY KEY, card TEXT NOT NULL)"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS work_events (work_id TEXT NOT NULL, revision INTEGER NOT NULL, event TEXT NOT NULL, PRIMARY KEY(work_id, revision))"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS work_attempts (attempt_id TEXT PRIMARY KEY, work_id TEXT NOT NULL, step_id TEXT NOT NULL, state TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, native_task_id TEXT UNIQUE, attempt TEXT NOT NULL)"
+            )
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS work_one_active_attempt ON work_attempts(work_id, step_id) WHERE state IN ('reserved','running','recovery_required')"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS work_operations (actor TEXT NOT NULL, operation_id TEXT NOT NULL, fingerprint TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(actor, operation_id))"
+            )
+
+    @contextmanager
+    def _transaction(self, *, timeout=10):
+        if self.database.is_symlink():
+            raise ValueError("Project database must not be a symbolic link")
+        with closing(
+            sqlite3.connect(self.database, timeout=timeout, isolation_level=None)
+        ) as db:
+            db.row_factory = sqlite3.Row
+            db.execute("BEGIN IMMEDIATE")
+            identity = db.execute(
+                "SELECT scope_id, project_root FROM bridge_scope WHERE singleton=1"
+            ).fetchone()
+            if identity is None or tuple(identity) != (
+                self.scope.key,
+                str(self.scope.root),
+            ):
+                raise ValueError("Database belongs to a different launch project")
+            try:
+                yield db
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+
+    @contextmanager
+    def _read_connection(self):
+        if self.database.is_symlink():
+            raise ValueError("Project database must not be a symbolic link")
+        with closing(
+            sqlite3.connect(
+                self.database.as_uri() + "?mode=ro",
+                uri=True,
+                timeout=1,
+                isolation_level=None,
+            )
+        ) as db:
+            db.row_factory = sqlite3.Row
+            db.execute("BEGIN")
+            identity = db.execute(
+                "SELECT scope_id, project_root FROM bridge_scope WHERE singleton=1"
+            ).fetchone()
+            if identity is None or tuple(identity) != (
+                self.scope.key,
+                str(self.scope.root),
+            ):
+                raise ValueError("Database belongs to a different launch project")
+            yield db
+
+    def _maintenance(self):
+        # Observers never wait for a writer just to mark an already fenced lease.
+        with self._read_connection() as db:
+            due = any(
+                attempt["state"] in _ACTIVE and attempt["deadline"] <= time.time()
+                for attempt in self._attempts(db)
+            )
+        if not due:
+            return
+        try:
+            with self._transaction(timeout=0) as db:
+                self._expire(db)
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error).lower() and "busy" not in str(error).lower():
+                raise
+
+    def _load(self, db, work_id):
+        row = db.execute(
+            "SELECT card FROM work_cards WHERE work_id=?", (work_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("Unknown work item")
+        return json.loads(row["card"])
+
+    def _attempt(self, db, attempt_id):
+        row = db.execute(
+            "SELECT attempt FROM work_attempts WHERE attempt_id=?", (attempt_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("Unknown work attempt")
+        return json.loads(row["attempt"])
+
+    def _attempts(self, db, work_id=None):
+        rows = db.execute(
+            "SELECT attempt FROM work_attempts"
+            + (" WHERE work_id=?" if work_id else ""),
+            (work_id,) if work_id else (),
+        )
+        return [json.loads(row["attempt"]) for row in rows]
+
+    def _save_attempt(self, db, attempt):
+        db.execute(
+            "INSERT INTO work_attempts VALUES (?,?,?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET state=excluded.state, native_task_id=excluded.native_task_id, attempt=excluded.attempt",
+            (
+                attempt["attempt_id"],
+                attempt["work_id"],
+                attempt["step_id"],
+                attempt["state"],
+                attempt["token_hash"],
+                attempt["native_task_id"],
+                _json(attempt),
+            ),
+        )
+
+    def _step(self, card, step_id):
+        for step in card["steps"]:
+            if step["id"] == step_id:
+                return step
+        raise ValueError("Unknown step")
+
+    def _agreed(self, card):
+        return all(
+            card["agreements"].get(actor, {}).get("plan_revision")
+            == card["plan_revision"]
+            for actor in ("claude", "omp")
+        )
+
+    def _refresh(self, card):
+        steps = {step["id"]: step for step in card["steps"]}
+        for step in card["steps"]:
+            if step["state"] in {"running", "recovery_required", "accepted"}:
+                continue
+            if any(blocker["resolved_at"] is None for blocker in step["blockers"]):
+                step["state"] = "blocked"
+            elif step["submission"] is not None:
+                step["state"] = "review"
+            elif all(steps[item]["state"] == "accepted" for item in step["depends_on"]):
+                step["state"] = "ready" if self._agreed(card) else "todo"
+            elif step["state"] != "changes_requested":
+                step["state"] = "todo"
+        if card["status"] != "paused":
+            card["status"] = (
+                "completed"
+                if all(step["state"] == "accepted" for step in card["steps"])
+                else "active"
+                if self._agreed(card)
+                else "draft"
+            )
+
+    def _view(self, db, card):
+        view = json.loads(_json(card))
+        for step in view["steps"]:
+            step["attempt"] = (
+                _public_attempt(self._attempt(db, step["attempt"]))
+                if step["attempt"]
+                else None
+            )
+            if (
+                step["attempt"]
+                and step["attempt"]["state"] in _ACTIVE
+                and step["attempt"]["deadline"] <= time.time()
+            ):
+                step["state"] = "recovery_required"
+                step["attempt"]["state"] = "recovery_required"
+        view["events"] = {"revision": card["revision"], "cursor": card["revision"]}
+        view["next_action"] = (
+            "Resume explicitly; fenced attempts require operator reconciliation."
+            if card["status"] == "paused"
+            else "Both principals must agree to this exact plan revision."
+            if not self._agreed(card)
+            else "All steps independently accepted; output is not merged into the user's branch."
+            if card["status"] == "completed"
+            else "Reconcile uncertain attempts; never replay possibly launched work."
+            if any(step["state"] == "recovery_required" for step in view["steps"])
+            else "Resolve blockers or claim an eligible implementation/review step."
+        )
+        referenced = {
+            dependency for step in card["steps"] for dependency in step["depends_on"]
+        }
+        view["final_step_id"] = next(
+            step["id"] for step in card["steps"] if step["id"] not in referenced
+        )
+        view["result"] = (
+            self._step(card, view["final_step_id"])["submission"]
+            if card["status"] == "completed"
+            else None
+        )
+        view = self._redact(db, view)
+        view["markdown"] = self._markdown(view)
+        return view
+
+    @staticmethod
+    def _markdown(view):
+        plan = view["plan"]
+        lines = [
+            f"# {plan['title']}",
+            "",
+            f"Work `{view['work_id']}` · revision {view['revision']} · plan {view['plan_revision']} · {view['status']}",
+            "",
+            plan["goal"],
+        ]
+        if plan["context"]:
+            lines.extend(["", "## Context", plan["context"]])
+        for title, items in (
+            ("Constraints", plan["constraints"]),
+            ("Global acceptance", plan["acceptance"]),
+        ):
+            lines.extend(["", "## " + title, *("- " + item for item in items)])
+        lines.extend(["", "## Checklist"])
+        for step in view["steps"]:
+            spec = next(item for item in plan["steps"] if item["id"] == step["id"])
+            lines.extend(
+                [
+                    f"- [{'x' if step['state'] == 'accepted' else ' '}] {step['id']}: {spec['title']} — {step['state']} (owner {step['owner']}; reviewer {step['reviewer']})",
+                    "  Goal: " + spec["goal"],
+                    "  Dependencies: " + (", ".join(step["depends_on"]) or "none"),
+                    "  Owned files: " + (", ".join(spec["owned_files"]) or "none"),
+                ]
+            )
+            lines.extend(
+                "  - Acceptance: " + criterion for criterion in spec["acceptance"]
+            )
+            lines.extend(
+                "  - Blocker: "
+                + blocker["note"]
+                + "; condition: "
+                + blocker["condition"]
+                for blocker in step["blockers"]
+                if blocker["resolved_at"] is None
+            )
+            if step["submission"]:
+                lines.append(
+                    "  Submission: "
+                    + step["submission"]["submission_id"]
+                    + " @ "
+                    + step["submission"]["commit"]
+                )
+            if step.get("acceptance"):
+                lines.extend(
+                    "  - Evidence: " + item for item in step["acceptance"]["evidence"]
+                )
+        lines.extend(
+            [
+                "",
+                "Acceptance records are attributed attestations; the store does not execute or certify checks.",
+                "",
+                view["next_action"],
+            ]
+        )
+        return "\n".join(lines)
+
+    def _record(self, db, card, kind, actor, details=None):
+        self._refresh(card)
+        card["revision"] += 1
+        card["updated_at"] = time.time()
+        db.execute(
+            "INSERT INTO work_cards VALUES (?,?) ON CONFLICT(work_id) DO UPDATE SET card=excluded.card",
+            (card["work_id"], _json(card)),
+        )
+        view = self._view(db, card)
+        event = {
+            "work_id": card["work_id"],
+            "revision": card["revision"],
+            "plan_revision": card["plan_revision"],
+            "kind": kind,
+            "actor": actor,
+            "created_at": card["updated_at"],
+            "details": self._redact(db, details or {}),
+            "snapshot": view,
+        }
+        db.execute(
+            "INSERT INTO work_events VALUES (?,?,?)",
+            (card["work_id"], card["revision"], _json(event)),
+        )
+        return view
+
+    def _redact(self, db, value):
+        encoded = _json(value)
+        for attempt in self._attempts(db):
+            for key in ("token", "token_hash"):
+                encoded = encoded.replace(attempt[key], "[REDACTED]")
+        return json.loads(encoded)
+
+    @staticmethod
+    def _new_steps(plan):
+        return [
+            {
+                "id": step["id"],
+                "owner": step["owner"],
+                "reviewer": step["reviewer"],
+                "depends_on": step["depends_on"],
+                "state": "todo",
+                "blockers": [],
+                "submission": None,
+                "checkpoint": None,
+                "acceptance": None,
+                "attempt": None,
+            }
+            for step in plan["steps"]
+        ]
+
+    def _fence(self, db, card, reason):
+        for attempt in self._attempts(db, card["work_id"]):
+            if attempt["state"] in _ACTIVE:
+                attempt.update(
+                    state="recovery_required", error=reason, fenced_at=time.time()
+                )
+                self._save_attempt(db, attempt)
+                for step in card["steps"]:
+                    if step["id"] == attempt["step_id"]:
+                        step["state"] = "recovery_required"
+                        step["attempt"] = attempt["attempt_id"]
+
+    def _expire(self, db):
+        # A timeout is uncertainty, never permission for another writer.
+        cards = {}
+        for attempt in self._attempts(db):
+            if attempt["state"] in _ACTIVE and attempt["deadline"] <= time.time():
+                card = cards.setdefault(
+                    attempt["work_id"], self._load(db, attempt["work_id"])
+                )
+                attempt.update(
+                    state="recovery_required",
+                    error="Attempt deadline expired; side effects may exist",
+                    fenced_at=time.time(),
+                )
+                self._save_attempt(db, attempt)
+                self._step(card, attempt["step_id"])["state"] = "recovery_required"
+        for card in cards.values():
+            self._record(db, card, "expired", "supervisor")
+
+    def _credential(self, db, token, actor=None):
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        row = db.execute(
+            "SELECT attempt FROM work_attempts WHERE token_hash=?", (digest,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("Invalid attempt credential")
+        attempt = json.loads(row["attempt"])
+        if not hmac.compare_digest(attempt["token_hash"], digest):
+            raise ValueError("Invalid attempt credential")
+        if actor is not None and actor != attempt["actor"]:
+            raise ValueError("Attempt belongs to a different principal")
+        return attempt
+
+    def _authenticate(self, db, token, actor=None):
+        attempt = self._credential(db, token, actor)
+        if attempt["state"] not in _ACTIVE or attempt["deadline"] <= time.time():
+            raise ValueError("Attempt credential is fenced or expired")
+        card = self._load(db, attempt["work_id"])
+        if (
+            card["status"] == "paused"
+            or card["plan_revision"] != attempt["plan_revision"]
+        ):
+            raise ValueError("Attempt is no longer current")
+        if attempt["autonomous"]:
+            grant = card["authorization"]
+            if (
+                not grant
+                or grant["revoked_at"] is not None
+                or grant["authorization_id"] != attempt["authorization_id"]
+            ):
+                raise ValueError("Attempt authorization was revoked")
+        return attempt
+
+    def perform(
+        self,
+        command: WorkCommand | dict,
+        *,
+        actor: str,
+        attempt_token: str | None = None,
+    ) -> dict:
+        command = WorkCommand.model_validate(command)
+        if actor not in {"claude", "omp", "operator"}:
+            raise ValueError("Invalid work principal")
+        # Opportunistic expiry is separate from CAS; reads never wait for its write.
+        self._maintenance()
+        source_commit = self._head() if command.action == "claim" else None
+        connection = (
+            self._read_connection
+            if command.action in {"get", "list", "history"}
+            else self._transaction
+        )
+        with connection() as db:
+            bound = (
+                self._credential(db, attempt_token, actor) if attempt_token else None
+            )
+            if bound:
+                if command.work_id is None:
+                    command = command.model_copy(update={"work_id": bound["work_id"]})
+                if command.work_id != bound["work_id"] or command.action in {
+                    "create",
+                    "list",
+                    "claim",
+                    "agree",
+                    "resume",
+                    "reconcile",
+                }:
+                    raise ValueError(
+                        "Bound worker cannot mutate or enumerate unrelated work"
+                    )
+                if command.step_id is not None and command.step_id != bound["step_id"]:
+                    raise ValueError("Bound worker cannot act on another step")
+                if (
+                    command.action not in {"get", "history", "propose", "pause"}
+                    and command.step_id is None
+                ):
+                    command = command.model_copy(update={"step_id": bound["step_id"]})
+            if command.action == "list":
+                return {
+                    "items": [
+                        self._view(db, json.loads(row["card"]))
+                        for row in db.execute(
+                            "SELECT card FROM work_cards ORDER BY work_id"
+                        )
+                    ]
+                }
+            if command.action in {"get", "history"}:
+                if bound:
+                    self._authenticate(db, attempt_token, actor)
+                card = self._load(db, command.work_id)
+                if command.action == "get":
+                    return self._view(db, card)
+                return {
+                    "work_id": card["work_id"],
+                    "revision": card["revision"],
+                    "cursor": card["revision"],
+                    "events": [
+                        json.loads(row["event"])
+                        for row in db.execute(
+                            "SELECT event FROM work_events WHERE work_id=? AND revision>? ORDER BY revision",
+                            (card["work_id"], command.expected_revision or 0),
+                        )
+                    ],
+                }
+            if not command.operation_id or command.expected_revision is None:
+                raise ValueError("Mutations require expected_revision and operation_id")
+            fingerprint = hashlib.sha256(
+                _json(
+                    {
+                        "command": command.model_dump(),
+                        "attempt_id": bound["attempt_id"] if bound else None,
+                    }
+                ).encode()
+            ).hexdigest()
+            receipt = db.execute(
+                "SELECT fingerprint,response FROM work_operations WHERE actor=? AND operation_id=?",
+                (actor, command.operation_id),
+            ).fetchone()
+            if receipt:
+                if receipt["fingerprint"] != fingerprint:
+                    raise WorkConflict(
+                        "Operation ID was already used for a different command"
+                    )
+                response = json.loads(receipt["response"])
+                # Credentials are never persisted in operation responses.
+                if command.action == "claim":
+                    attempt = self._attempt(db, response["claim"]["attempt_id"])
+                    if attempt["state"] in _ACTIVE:
+                        response["claim"]["token"] = attempt["token"]
+                return response
+            if bound:
+                self._authenticate(db, attempt_token, actor)
+            if command.action == "create":
+                if (
+                    command.plan is None
+                    or command.expected_revision != 0
+                    or command.work_id is not None
+                ):
+                    raise ValueError(
+                        "Create requires plan, expected_revision=0, and no work_id"
+                    )
+                plan = command.plan.model_dump()
+                card = {
+                    "work_id": str(uuid4()),
+                    "revision": 0,
+                    "plan_revision": 1,
+                    "status": "draft",
+                    "plan": plan,
+                    "agreements": {},
+                    "steps": self._new_steps(plan),
+                    "authorization": None,
+                    "created_at": time.time(),
+                    "updated_at": time.time(),
+                }
+                result = self._record(db, card, "created", actor)
+            else:
+                card = self._load(db, command.work_id)
+                if command.expected_revision != card["revision"]:
+                    raise WorkConflict(
+                        f"Expected revision {command.expected_revision}; current revision is {card['revision']}"
+                    )
+                result = self._perform(db, card, command, actor, bound, source_commit)
+            saved = json.loads(_json(result))
+            if "claim" in saved:
+                saved["claim"].pop("token", None)
+            db.execute(
+                "INSERT INTO work_operations VALUES (?,?,?,?)",
+                (actor, command.operation_id, fingerprint, _json(saved)),
+            )
+            return result
+
+    def _perform(self, db, card, command, actor, bound, source_commit=None):
+        action = command.action
+        if action == "propose":
+            if command.plan is None:
+                raise ValueError("Propose requires a complete plan")
+            plan = command.plan.model_dump()
+            if plan != card["plan"]:
+                identifiers = {step["id"] for step in plan["steps"]}
+                if any(
+                    attempt["step_id"] not in identifiers
+                    and attempt["state"] in _ACTIVE | {"recovery_required"}
+                    for attempt in self._attempts(db, card["work_id"])
+                ):
+                    raise WorkConflict(
+                        "Reconcile unresolved attempts before removing or renaming their steps"
+                    )
+                self._fence(db, card, "Plan changed; old attempt cannot publish")
+                previous = {step["id"]: step for step in card["steps"]}
+                card.update(
+                    plan=plan,
+                    plan_revision=card["plan_revision"] + 1,
+                    agreements={},
+                    steps=self._new_steps(plan),
+                )
+                for step in card["steps"]:
+                    old = previous.get(step["id"])
+                    if old and old["state"] == "recovery_required":
+                        step.update(state="recovery_required", attempt=old["attempt"])
+                if card["authorization"]:
+                    card["authorization"]["revoked_at"] = time.time()
+            return self._record(db, card, "proposed", actor, {"note": command.note})
+        if action == "agree":
+            if actor not in {"claude", "omp"}:
+                raise ValueError("Only the two work principals may agree")
+            card["agreements"][actor] = {
+                "plan_revision": card["plan_revision"],
+                "at": time.time(),
+                "note": command.note,
+            }
+        elif action == "pause":
+            card["status"] = "paused"
+            self._fence(
+                db, card, "Work paused; process must stop before reconciliation"
+            )
+        elif action == "resume":
+            if card["status"] != "paused":
+                raise ValueError("Work is not paused")
+            card["status"] = "draft"
+        elif action == "reconcile":
+            if actor != "operator" or bound:
+                raise ValueError(
+                    "Only the trusted operator may reconcile uncertain work"
+                )
+            if (
+                not command.note
+                or not command.evidence
+                or command.resolution not in {"retry", "abandon"}
+            ):
+                raise ValueError(
+                    "Reconcile requires note, evidence, and retry or abandon resolution"
+                )
+            attempts = [
+                item
+                for item in self._attempts(db, card["work_id"])
+                if item["state"] == "recovery_required"
+                and (command.step_id is None or item["step_id"] == command.step_id)
+            ]
+            if not attempts or any(
+                not item["process_confirmed_gone"] for item in attempts
+            ):
+                raise ValueError(
+                    "Supervisor must confirm every old process has stopped before reconciliation"
+                )
+            for attempt in attempts:
+                if (
+                    attempt["autonomous"]
+                    and not attempt["cost_recorded"]
+                    and card["authorization"]
+                    and card["authorization"]["authorization_id"]
+                    == attempt["authorization_id"]
+                ):
+                    card["authorization"]["unknown_cost"] = True
+                    card["status"] = "paused"
+                attempt.update(
+                    state="reconciled",
+                    reconciliation={
+                        "resolution": command.resolution,
+                        "note": command.note,
+                        "evidence": command.evidence,
+                        "at": time.time(),
+                    },
+                )
+                self._save_attempt(db, attempt)
+                for step in card["steps"]:
+                    if step["id"] == attempt["step_id"]:
+                        step["attempt"] = None
+                        step["state"] = "todo"
+                        if command.resolution == "abandon":
+                            step["blockers"].append(
+                                self._blocker(
+                                    actor,
+                                    command.note,
+                                    "Operator must explicitly resolve abandonment before continuing",
+                                )
+                            )
+            if command.resolution == "abandon":
+                card["status"] = "paused"
+        elif action == "claim":
+            step = self._step(card, command.step_id)
+            kind = "review" if step["submission"] is not None else "implement"
+            attempt = self._reserve(
+                db,
+                card,
+                step["id"],
+                actor=actor,
+                kind=kind,
+                owner_id="manual:" + actor,
+                autonomous=False,
+                source_commit=source_commit,
+            )
+            result = self._record(
+                db, card, "claimed", actor, {"attempt_id": attempt["attempt_id"]}
+            )
+            result["claim"] = {**_public_attempt(attempt), "token": attempt["token"]}
+            return result
+        else:
+            step = self._step(card, command.step_id)
+            if action in {"heartbeat", "submit", "accept", "reject"}:
+                if bound is None:
+                    raise ValueError(
+                        "This action requires the step's active attempt credential"
+                    )
+                if bound["step_id"] != step["id"]:
+                    raise ValueError("Attempt is bound to another step")
+            if action in {"submit", "accept", "reject"} and any(
+                blocker["resolved_at"] is None for blocker in step["blockers"]
+            ):
+                raise ValueError(
+                    "Resolve outstanding blockers before submitting or deciding acceptance"
+                )
+            if action == "heartbeat":
+                bound["heartbeat_at"] = time.time()
+                self._save_attempt(db, bound)
+            elif action == "block":
+                if not command.note or not command.condition:
+                    raise ValueError("Block requires note and a resolution condition")
+                if actor not in {step["owner"], step["reviewer"], "operator"}:
+                    raise ValueError("Principal cannot block this step")
+                if step["state"] == "accepted":
+                    raise ValueError(
+                        "Revise the plan before reopening an accepted output"
+                    )
+                blocker = self._blocker(actor, command.note, command.condition)
+                step["blockers"].append(blocker)
+                if bound and bound["attempt_id"] == step["attempt"]:
+                    intent = bound.get("block_intent") or {
+                        "blocker_ids": [],
+                        "at": time.time(),
+                    }
+                    intent["blocker_ids"].append(blocker["blocker_id"])
+                    bound["block_intent"] = intent
+                    self._save_attempt(db, bound)
+                else:
+                    self._fence_step(db, step, "Step externally blocked")
+            elif action == "unblock":
+                if not command.resolution or not command.evidence:
+                    raise ValueError("Unblock requires resolution and evidence")
+                blocker = next(
+                    (
+                        item
+                        for item in step["blockers"]
+                        if item["blocker_id"] == command.blocker_id
+                        and item["resolved_at"] is None
+                    ),
+                    None,
+                )
+                if blocker is None:
+                    raise ValueError("Unknown unresolved blocker")
+                if actor not in {blocker["actor"], "operator"}:
+                    raise ValueError("Only blocker author or operator may resolve it")
+                blocker.update(
+                    resolved_at=time.time(),
+                    resolution=command.resolution,
+                    evidence=command.evidence,
+                    resolved_by=actor,
+                )
+                if step["state"] == "blocked":
+                    step["state"] = "todo"
+            elif action == "submit":
+                if (
+                    bound["kind"] != "implement"
+                    or actor != step["owner"]
+                    or not command.note
+                    or not command.evidence
+                ):
+                    raise ValueError(
+                        "Only implementation owner may submit with note and evidence"
+                    )
+                if bound["autonomous"] and command.commit is not None:
+                    raise ValueError(
+                        "Managed submission commit is captured by the supervisor, never agent text"
+                    )
+                if not bound["autonomous"] and command.commit is None:
+                    raise ValueError(
+                        "Manual submission requires the exact committed output hash"
+                    )
+                if bound.get("submission_intent") is not None:
+                    raise ValueError(
+                        "Submission intent is immutable; finish the attempt or propose a revision"
+                    )
+                bound["submission_intent"] = {
+                    "answer": command.note,
+                    "evidence": command.evidence,
+                    "commit": command.commit,
+                    "plan_revision": card["plan_revision"],
+                    "at": time.time(),
+                }
+                self._save_attempt(db, bound)
+            elif action in {"accept", "reject"}:
+                if (
+                    bound["kind"] != "review"
+                    or actor != step["reviewer"]
+                    or not command.note
+                    or not command.evidence
+                ):
+                    raise ValueError(
+                        "Only distinct reviewer may decide with note and evidence"
+                    )
+                submission = step["submission"]
+                if (
+                    not submission
+                    or command.submission_id != submission["submission_id"]
+                    or submission["plan_revision"] != card["plan_revision"]
+                    or bound["submission"]["submission_id"] != command.submission_id
+                ):
+                    raise WorkConflict(
+                        "Review must reference the exact current submission and plan"
+                    )
+                if bound.get("verdict"):
+                    raise ValueError("Review verdict is immutable")
+                if any(
+                    self._step(card, dependency)["state"] != "accepted"
+                    for dependency in step["depends_on"]
+                ):
+                    raise WorkConflict("Dependencies are no longer accepted")
+                verdict = {
+                    "verdict": action,
+                    "actor": actor,
+                    "submission_id": command.submission_id,
+                    "plan_revision": card["plan_revision"],
+                    "note": command.note,
+                    "evidence": command.evidence,
+                    "criteria": next(
+                        item["acceptance"]
+                        for item in card["plan"]["steps"]
+                        if item["id"] == step["id"]
+                    ),
+                    "at": time.time(),
+                }
+                if action == "accept" and all(
+                    item["id"] == step["id"] or item["state"] == "accepted"
+                    for item in card["steps"]
+                ):
+                    verdict["global_criteria_attested"] = card["plan"]["acceptance"]
+                bound["verdict"] = verdict
+                self._save_attempt(db, bound)
+                if not bound["autonomous"]:
+                    step["acceptance"] = verdict if action == "accept" else None
+                    step["state"] = (
+                        "accepted" if action == "accept" else "changes_requested"
+                    )
+                    if action == "reject":
+                        step["checkpoint"] = {
+                            **step["submission"],
+                            "checkpoint_id": str(uuid4()),
+                            "step_id": step["id"],
+                            "plan_revision": card["plan_revision"],
+                            "created_at": time.time(),
+                        }
+                        step["submission"] = None
+                    bound.update(
+                        state="succeeded",
+                        outcome="success",
+                        finished_at=time.time(),
+                        cost_usd=None,
+                        cost_recorded=True,
+                    )
+                    self._save_attempt(db, bound)
+            else:
+                raise ValueError("Unsupported transition")
+        return self._record(
+            db,
+            card,
+            action,
+            actor,
+            {"note": command.note, "evidence": command.evidence},
+        )
+
+    @staticmethod
+    def _blocker(actor, note, condition):
+        return {
+            "blocker_id": str(uuid4()),
+            "actor": actor,
+            "note": note,
+            "condition": condition,
+            "created_at": time.time(),
+            "resolved_at": None,
+        }
+
+    def _fence_step(self, db, step, reason):
+        if step["attempt"]:
+            attempt = self._attempt(db, step["attempt"])
+            if attempt["state"] in _ACTIVE:
+                attempt.update(
+                    state="recovery_required", error=reason, fenced_at=time.time()
+                )
+                self._save_attempt(db, attempt)
+                step["state"] = "recovery_required"
+
+    def _head(self):
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.scope.root),
+                "rev-parse",
+                "--verify",
+                "HEAD^{commit}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        commit = result.stdout.strip()
+        if result.returncode or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+            raise ValueError(
+                "Work execution requires a Git repository with an immutable HEAD commit"
+            )
+        return commit
+
+    def authorize(
+        self,
+        work_id,
+        *,
+        budget_seconds: int,
+        max_launches: int,
+        max_cost_usd: float,
+        allow_work: bool,
+        allow_tests: bool,
+    ) -> dict:
+        if (
+            type(budget_seconds) is not int
+            or budget_seconds <= 0
+            or type(max_launches) is not int
+            or max_launches <= 0
+            or isinstance(max_cost_usd, bool)
+            or not math.isfinite(max_cost_usd)
+            or max_cost_usd <= 0
+            or type(allow_work) is not bool
+            or type(allow_tests) is not bool
+        ):
+            raise ValueError(
+                "Authorization requires positive finite budgets and explicit boolean permissions"
+            )
+        source_commit = self._head()
+        with self._transaction() as db:
+            card = self._load(db, work_id)
+            if not self._agreed(card) or card["status"] != "active":
+                raise ValueError(
+                    "Only an active, exactly agreed plan may be authorized"
+                )
+            if any(
+                item["state"] in _ACTIVE | {"recovery_required"}
+                for item in self._attempts(db, work_id)
+            ):
+                raise ValueError(
+                    "Stop and reconcile outstanding attempts before replacing authorization"
+                )
+            now = time.time()
+            card["authorization"] = {
+                "authorization_id": str(uuid4()),
+                "plan_revision": card["plan_revision"],
+                "authorized_at": now,
+                "deadline": now + budget_seconds,
+                "max_launches": max_launches,
+                "launches": 0,
+                "max_cost_usd": max_cost_usd,
+                "used_cost_usd": 0.0,
+                "unknown_cost": False,
+                "allow_work": allow_work,
+                "allow_tests": allow_tests,
+                "source_commit": source_commit,
+                "revoked_at": None,
+            }
+            return self._record(db, card, "authorized", "operator")
+
+    def revoke(self, work_id) -> dict:
+        with self._transaction() as db:
+            card = self._load(db, work_id)
+            if card["authorization"]:
+                card["authorization"]["revoked_at"] = time.time()
+            self._fence(db, card, "Operator revoked execution authorization")
+            return self._record(db, card, "revoked", "operator")
+
+    def _ready(self, db, card):
+        if card["status"] != "active" or not self._agreed(card):
+            return []
+        attempts = self._attempts(db, card["work_id"])
+        if any(
+            item["state"] == "recovery_required"
+            or (item["state"] in _ACTIVE and item["deadline"] <= time.time())
+            for item in attempts
+        ):
+            return []
+        occupied = {item["step_id"] for item in attempts if item["state"] in _ACTIVE}
+        result = []
+        for step in card["steps"]:
+            if (
+                step["id"] in occupied
+                or step["state"] not in {"ready", "review", "changes_requested"}
+                or any(item["resolved_at"] is None for item in step["blockers"])
+            ):
+                continue
+            if any(
+                self._step(card, dependency)["state"] != "accepted"
+                for dependency in step["depends_on"]
+            ):
+                continue
+            kind = "review" if step["submission"] else "implement"
+            result.append(
+                {
+                    "work_id": card["work_id"],
+                    "step_id": step["id"],
+                    "actor": step["reviewer"] if kind == "review" else step["owner"],
+                    "kind": kind,
+                }
+            )
+        return result
+
+    def ready(self, work_id: str | None = None) -> list[dict]:
+        self._maintenance()
+        with self._read_connection() as db:
+            cards = (
+                [self._load(db, work_id)]
+                if work_id
+                else [
+                    json.loads(row["card"])
+                    for row in db.execute(
+                        "SELECT card FROM work_cards ORDER BY work_id"
+                    )
+                ]
+            )
+            return [entry for card in cards for entry in self._ready(db, card)]
+
+    def _dependencies(self, card, step):
+        ordered = []
+        visited = set()
+
+        def visit(step_id):
+            if step_id in visited:
+                return
+            visited.add(step_id)
+            parent = self._step(card, step_id)
+            for dependency in parent["depends_on"]:
+                visit(dependency)
+            if parent["submission"]:
+                ordered.append(parent["submission"])
+
+        for dependency in step["depends_on"]:
+            visit(dependency)
+        return ordered
+
+    def _reserve(
+        self,
+        db,
+        card,
+        step_id,
+        *,
+        actor,
+        kind,
+        owner_id,
+        autonomous,
+        source_commit=None,
+    ):
+        if (
+            not owner_id
+            or actor not in {"claude", "omp"}
+            or kind not in {"implement", "review"}
+        ):
+            raise ValueError("Reservation requires valid owner, principal, and kind")
+        eligible = {
+            "work_id": card["work_id"],
+            "step_id": step_id,
+            "actor": actor,
+            "kind": kind,
+        }
+        if eligible not in self._ready(db, card):
+            raise WorkConflict("Step is not ready for this actor and attempt kind")
+        grant = card["authorization"]
+        envelope = 0.0
+        if autonomous:
+            if (
+                not grant
+                or grant["revoked_at"] is not None
+                or grant["plan_revision"] != card["plan_revision"]
+                or grant["deadline"] <= time.time()
+            ):
+                raise ValueError("Current operator authorization is required")
+            if (
+                grant["unknown_cost"]
+                or grant["used_cost_usd"] >= grant["max_cost_usd"]
+                or grant["launches"] >= grant["max_launches"]
+            ):
+                raise ValueError(
+                    "Autonomous cost or launch budget is exhausted or unknown"
+                )
+            if kind == "implement" and not grant["allow_work"]:
+                raise ValueError("Operator did not grant implementation permission")
+            active = [item for item in self._attempts(db) if item["state"] in _ACTIVE]
+            if len(active) >= 4:
+                raise ValueError(
+                    "Project work concurrency is limited to four active attempts"
+                )
+            reserved = sum(
+                item["reserved_cost_usd"]
+                for item in active
+                if item["authorization_id"] == grant["authorization_id"]
+            )
+            envelope = min(
+                grant["max_cost_usd"] / grant["max_launches"],
+                grant["max_cost_usd"] - grant["used_cost_usd"] - reserved,
+            )
+            if envelope <= 0:
+                raise ValueError("No unreserved monetary budget remains")
+            grant["launches"] += 1
+        step = self._step(card, step_id)
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        attempt = {
+            "attempt_id": str(uuid4()),
+            "token": token,
+            "token_hash": hashlib.sha256(token.encode()).hexdigest(),
+            "work_id": card["work_id"],
+            "step_id": step_id,
+            "actor": actor,
+            "kind": kind,
+            "owner_id": owner_id,
+            "plan_revision": card["plan_revision"],
+            "autonomous": autonomous,
+            "authorization_id": grant["authorization_id"] if autonomous else None,
+            "source_commit": grant["source_commit"] if autonomous else source_commit,
+            "deadline": grant["deadline"] if autonomous else now + 3600,
+            "created_at": now,
+            "started_at": None,
+            "heartbeat_at": None,
+            "state": "reserved",
+            "workspace": None,
+            "native_task_id": None,
+            "session_id": None,
+            "allow_work": grant["allow_work"] if autonomous else False,
+            "allow_tests": grant["allow_tests"] if autonomous else False,
+            "remaining_cost_usd": envelope,
+            "reserved_cost_usd": envelope,
+            "submission": step["submission"] if kind == "review" else None,
+            "checkpoint": step.get("checkpoint")
+            if kind == "implement"
+            and (step.get("checkpoint") or {}).get("plan_revision")
+            == card["plan_revision"]
+            else None,
+            "dependencies": self._dependencies(card, step),
+            "process_confirmed_gone": False,
+            "verdict": None,
+            "submission_intent": None,
+            "block_intent": None,
+            "cost_recorded": False,
+        }
+        self._save_attempt(db, attempt)
+        step.update(state="running", attempt=attempt["attempt_id"])
+        return attempt
+
+    def reserve(
+        self, work_id, step_id, *, actor, kind, owner_id, autonomous=True
+    ) -> dict:
+        self._maintenance()
+        source_commit = None if autonomous else self._head()
+        with self._transaction() as db:
+            card = self._load(db, work_id)
+            attempt = self._reserve(
+                db,
+                card,
+                step_id,
+                actor=actor,
+                kind=kind,
+                owner_id=owner_id,
+                autonomous=autonomous,
+                source_commit=source_commit,
+            )
+            self._record(
+                db,
+                card,
+                "reserved",
+                "supervisor",
+                {"attempt_id": attempt["attempt_id"]},
+            )
+            return attempt
+
+    def attempt(self, attempt_id) -> dict:
+        with self._read_connection() as db:
+            return self._attempt(db, attempt_id)
+
+    def authenticate(self, token) -> dict:
+        with self._read_connection() as db:
+            return self._authenticate(db, token)
+
+    def started(
+        self,
+        attempt_id,
+        *,
+        workspace: str,
+        native_task_id: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        with self._transaction() as db:
+            attempt = self._attempt(db, attempt_id)
+            self._authenticate(db, attempt["token"])
+            if attempt["workspace"] is not None and attempt["workspace"] != workspace:
+                raise ValueError("Attempt workspace is immutable")
+            if (
+                attempt["native_task_id"] is not None
+                and native_task_id is not None
+                and attempt["native_task_id"] != native_task_id
+            ):
+                raise ValueError("Attempt native task binding is immutable")
+            attempt.update(
+                state="running",
+                started_at=attempt["started_at"] or time.time(),
+                workspace=workspace,
+                native_task_id=native_task_id or attempt["native_task_id"],
+                session_id=session_id or attempt["session_id"],
+            )
+            self._save_attempt(db, attempt)
+            self._record(
+                db,
+                self._load(db, attempt["work_id"]),
+                "started",
+                "supervisor",
+                {"attempt_id": attempt_id},
+            )
+
+    def bind_native(self, attempt_id, task_id) -> None:
+        with self._transaction() as db:
+            attempt = self._attempt(db, attempt_id)
+            self._authenticate(db, attempt["token"])
+            if attempt["native_task_id"] not in {None, task_id}:
+                raise ValueError("Attempt native task binding is immutable")
+            attempt["native_task_id"] = task_id
+            self._save_attempt(db, attempt)
+
+    def native_attempt(self, task_id) -> dict | None:
+        with self._read_connection() as db:
+            row = db.execute(
+                "SELECT attempt FROM work_attempts WHERE native_task_id=?", (task_id,)
+            ).fetchone()
+            return json.loads(row["attempt"]) if row else None
+
+    def active_attempts(self, owner_id: str | None = None) -> list[dict]:
+        with self._read_connection() as db:
+            return [
+                attempt
+                for attempt in self._attempts(db)
+                if attempt["state"] in _ACTIVE | {"recovery_required"}
+                and (owner_id is None or attempt["owner_id"] == owner_id)
+            ]
+
+    def confirm_stopped(self, attempt_id) -> None:
+        """Supervisor-only assertion after verified child exit, never based on text."""
+        with self._transaction() as db:
+            attempt = self._attempt(db, attempt_id)
+            attempt["process_confirmed_gone"] = True
+            self._save_attempt(db, attempt)
+            self._record(
+                db,
+                self._load(db, attempt["work_id"]),
+                "process_stopped",
+                "supervisor",
+                {"attempt_id": attempt_id},
+            )
+
+    @staticmethod
+    def _validate_output(card, step, attempt, output, answer, evidence):
+        if (
+            not output
+            or any(
+                not output.get(key)
+                for key in ("commit", "base_commit", "workspace", "tree_hash")
+            )
+            or not evidence
+            or not answer.strip()
+        ):
+            raise ValueError(
+                "Implementation completion requires immutable output, answer, and evidence"
+            )
+        if attempt["workspace"] is None or output["workspace"] != attempt["workspace"]:
+            raise ValueError(
+                "Submission output must come from the bound attempt workspace"
+            )
+        if any(
+            not re.fullmatch(r"[0-9a-f]{40,64}", output[key])
+            for key in ("commit", "base_commit", "tree_hash")
+        ):
+            raise ValueError(
+                "Submission commit and tree identities must be immutable Git object IDs"
+            )
+        intent = attempt["submission_intent"]
+        if (
+            not attempt["autonomous"]
+            and intent
+            and output["commit"] != intent["commit"]
+        ):
+            raise ValueError(
+                "Committed output differs from immutable manual submission intent"
+            )
+        allowed = set(
+            next(
+                item["owned_files"]
+                for item in card["plan"]["steps"]
+                if item["id"] == step["id"]
+            )
+        )
+        if (
+            not isinstance(output.get("changed_files"), list)
+            or set(output["changed_files"]) - allowed
+        ):
+            raise ValueError("Submission changed files exceed declared ownership")
+
+    def finish_attempt(
+        self,
+        attempt_id,
+        *,
+        outcome: str,
+        answer: str,
+        evidence: list[str],
+        output: dict | None,
+        cost_usd: float | None,
+        error: str | None = None,
+    ) -> dict:
+        if outcome not in {"success", "blocked", "failed", "interrupted"}:
+            raise ValueError("Invalid attempt outcome")
+        if cost_usd is not None and (
+            isinstance(cost_usd, bool) or not math.isfinite(cost_usd) or cost_usd < 0
+        ):
+            raise ValueError("Cost must be finite and nonnegative, or unknown")
+        with self._transaction() as db:
+            attempt = self._attempt(db, attempt_id)
+            card = self._load(db, attempt["work_id"])
+            fingerprint = hashlib.sha256(
+                _json(
+                    {
+                        "outcome": outcome,
+                        "answer": answer,
+                        "evidence": evidence,
+                        "output": output,
+                        "cost_usd": cost_usd,
+                        "error": error,
+                    }
+                ).encode()
+            ).hexdigest()
+            if attempt.get("finish_fingerprint"):
+                if attempt["finish_fingerprint"] != fingerprint:
+                    raise WorkConflict("Attempt completion is immutable")
+                return self._view(db, card)
+            if attempt["state"] not in _ACTIVE | {"recovery_required"}:
+                raise ValueError("Attempt is already terminal")
+            current = (
+                attempt["state"] in _ACTIVE
+                and attempt["deadline"] > time.time()
+                and card["status"] != "paused"
+                and attempt["plan_revision"] == card["plan_revision"]
+            )
+            if attempt["autonomous"]:
+                grant = card["authorization"]
+                current = (
+                    current
+                    and grant is not None
+                    and grant["revoked_at"] is None
+                    and grant["authorization_id"] == attempt["authorization_id"]
+                )
+                if grant and grant["authorization_id"] == attempt["authorization_id"]:
+                    if cost_usd is None:
+                        grant["unknown_cost"] = True
+                    else:
+                        grant["used_cost_usd"] += cost_usd
+            attempt.update(
+                finish_fingerprint=fingerprint,
+                outcome=outcome,
+                answer=answer,
+                evidence=evidence,
+                output=output,
+                cost_usd=cost_usd,
+                cost_recorded=True,
+                error=error or attempt.get("error"),
+                finished_at=time.time(),
+            )
+            step = next(
+                (item for item in card["steps"] if item["id"] == attempt["step_id"]),
+                None,
+            )
+            unresolved = (
+                [
+                    blocker
+                    for blocker in step["blockers"]
+                    if blocker["resolved_at"] is None
+                ]
+                if step
+                else []
+            )
+            cooperative_block = (
+                current
+                and outcome == "blocked"
+                and attempt.get("block_intent")
+                and any(
+                    blocker["blocker_id"] in attempt["block_intent"]["blocker_ids"]
+                    for blocker in unresolved
+                )
+                and (
+                    not attempt["autonomous"]
+                    or (cost_usd is not None and attempt["process_confirmed_gone"])
+                )
+                and (attempt["kind"] == "review" or output is not None)
+            )
+            if (
+                current
+                and outcome == "success"
+                and attempt["kind"] == "implement"
+                and not unresolved
+            ):
+                self._validate_output(card, step, attempt, output, answer, evidence)
+                submission = {
+                    **output,
+                    "submission_id": str(uuid4()),
+                    "attempt_id": attempt_id,
+                    "plan_revision": card["plan_revision"],
+                    "evidence": evidence,
+                    "answer": answer,
+                    "submitted_at": time.time(),
+                }
+                step.update(
+                    submission=submission,
+                    checkpoint=None,
+                    acceptance=None,
+                    state="review",
+                )
+                attempt["state"] = "succeeded"
+            elif cooperative_block:
+                if attempt["kind"] == "implement":
+                    self._validate_output(card, step, attempt, output, answer, evidence)
+                    step["checkpoint"] = {
+                        **output,
+                        "checkpoint_id": str(uuid4()),
+                        "attempt_id": attempt_id,
+                        "step_id": step["id"],
+                        "plan_revision": card["plan_revision"],
+                        "evidence": evidence,
+                        "answer": answer,
+                        "created_at": time.time(),
+                    }
+                attempt["state"] = "blocked"
+                step["state"] = "blocked"
+                step["acceptance"] = None
+            elif (
+                current
+                and outcome == "success"
+                and attempt["kind"] == "review"
+                and attempt["verdict"]
+                and not unresolved
+            ):
+                attempt["state"] = "succeeded"
+                verdict = attempt["verdict"]
+                step["acceptance"] = verdict if verdict["verdict"] == "accept" else None
+                step["state"] = (
+                    "accepted"
+                    if verdict["verdict"] == "accept"
+                    else "changes_requested"
+                )
+                if verdict["verdict"] == "reject":
+                    step["checkpoint"] = {
+                        **step["submission"],
+                        "checkpoint_id": str(uuid4()),
+                        "step_id": step["id"],
+                        "plan_revision": card["plan_revision"],
+                        "created_at": time.time(),
+                    }
+                    step["submission"] = None
+            else:
+                attempt["state"] = "recovery_required"
+                attempt["error"] = (
+                    error
+                    or "Outcome is uncertain or lacks explicit reviewer verdict; side effects may exist"
+                )
+                if step:
+                    step["state"] = "recovery_required"
+                    # A process failure after a verdict cannot certify a completed step.
+                    step["acceptance"] = None
+            self._save_attempt(db, attempt)
+            if attempt["autonomous"] and cost_usd is None:
+                card["status"] = "paused"
+                self._fence(
+                    db,
+                    card,
+                    "Unknown provider usage; operator must reconcile budget before continuation",
+                )
+            return self._record(
+                db,
+                card,
+                "attempt_finished",
+                "supervisor",
+                {
+                    "attempt_id": attempt_id,
+                    "outcome": outcome,
+                    "output": output,
+                    "evidence": evidence,
+                    "error": attempt["error"],
+                },
+            )
+
+    def recover_owner(self, owner_id) -> list[dict]:
+        with self._transaction() as db:
+            affected = {}
+            for attempt in self._attempts(db):
+                if attempt["owner_id"] == owner_id and attempt["state"] in _ACTIVE:
+                    card = affected.setdefault(
+                        attempt["work_id"], self._load(db, attempt["work_id"])
+                    )
+                    attempt.update(
+                        state="recovery_required",
+                        error="Previous owner disappeared; work may have launched and must not be replayed",
+                        fenced_at=time.time(),
+                    )
+                    self._save_attempt(db, attempt)
+                    self._step(card, attempt["step_id"])["state"] = "recovery_required"
+            return [
+                self._record(
+                    db, card, "owner_recovered", "supervisor", {"owner_id": owner_id}
+                )
+                for card in affected.values()
+            ]
+
+    def events(self, after: int = 0, limit: int = 100) -> list[dict]:
+        """Global durable invalidation cursor; event hints convey no authority."""
+        if (
+            type(after) is not int
+            or after < 0
+            or type(limit) is not int
+            or not 1 <= limit <= 1000
+        ):
+            raise ValueError(
+                "Events require a nonnegative cursor and limit between 1 and 1000"
+            )
+        with self._read_connection() as db:
+            rows = db.execute(
+                "SELECT rowid AS event_id, work_id, revision, event FROM work_events WHERE rowid>? ORDER BY rowid LIMIT ?",
+                (after, limit),
+            )
+            return [
+                {
+                    "event_id": row["event_id"],
+                    "work_id": row["work_id"],
+                    "revision": row["revision"],
+                    "kind": json.loads(row["event"])["kind"],
+                    "actor": json.loads(row["event"])["actor"],
+                }
+                for row in rows
+            ]
+
+    def event_head(self) -> int:
+        with self._read_connection() as db:
+            return db.execute(
+                "SELECT COALESCE(MAX(rowid),0) FROM work_events"
+            ).fetchone()[0]

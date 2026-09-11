@@ -20,6 +20,7 @@ from .project_context import ProjectContext
 from .prompts import coordinator_instructions
 from .reviews import PublicationBusy, ReviewRequest, publication_lock
 from .runtime_models import ACTIVE, Mode, TaskSummary
+from .work_items import WorkCommand
 from .workspace import client_root_paths
 
 
@@ -50,6 +51,11 @@ def build_server(configuration: Bridge | RuntimeOptions):
         if isinstance(configuration, Bridge)
         else configuration.channel_enabled
     )
+    restricted_work = bool(
+        configuration.work_token
+        if isinstance(configuration, Bridge)
+        else configuration.work_token_file
+    )
 
     @asynccontextmanager
     async def lifespan(_server):
@@ -66,6 +72,44 @@ def build_server(configuration: Bridge | RuntimeOptions):
         lifespan=lifespan,
         binding=runtime,
     )
+
+    @mcp.tool()
+    async def tandem_work(
+        request: WorkCommand,
+        ctx: Context,
+        wait_seconds: Annotated[int, Field(ge=0, le=25)] = 0,
+    ) -> dict:
+        """Maintain one durable shared task and its role-bound checklist.
+
+        Read current revision before changing state. Plan agreement, worker submission
+        and independent acceptance are separate. Mutations require stable operation_id
+        and expected_revision; repeat an exact request only, never blindly replay work.
+        Waiting observes committed changes, not permission to start an agent.
+        Autonomous grants and uncertain-attempt reconciliation are operator CLI actions.
+        """
+        bridge = await runtime.get(ctx)
+        if not restricted_work:
+            await bridge.channel.bind(ctx)
+        result = await asyncio.to_thread(bridge.work, request)
+        work_id = result.get("work_id")
+        revision = result.get("revision")
+        if wait_seconds and request.action == "get" and work_id:
+            deadline = time.monotonic() + wait_seconds
+            while result.get("revision") == revision and time.monotonic() < deadline:
+                await asyncio.sleep(min(0.2, max(0, deadline - time.monotonic())))
+                result = await asyncio.to_thread(
+                    bridge.work, {"action": "get", "work_id": work_id}
+                )
+        # Each session observes the same durable card; channel delivery only hints.
+        result["delivery"] = bridge.channel.delivery
+        result["delivery_instructions"] = (
+            "Read current shared-task state after a wake. Use bounded tandem_work get "
+            "waiting when idle; do not replay claims or launches. Explicit pause remains sticky."
+        )
+        return result
+
+    if restricted_work:
+        return mcp
 
     @mcp.tool()
     async def tandem_scope(ctx: Context) -> dict:

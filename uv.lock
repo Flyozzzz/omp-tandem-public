@@ -690,7 +690,7 @@ sdist = { hash = "sha256:aba914d6178d7d8e7d23f421983a233e69287ff1b26069ff6b35906
 
 [[package]]
 name = "omp-tandem"
-version = "3.3.0"
+version = "3.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },

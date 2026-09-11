@@ -58,6 +58,10 @@ def initialize_database(scope: ProjectScope) -> Path:
                 "finding_reports",
                 "result_receipts",
                 "diagnostic_probes",
+                "work_cards",
+                "work_events",
+                "work_attempts",
+                "work_operations",
             }
             if any(
                 db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
