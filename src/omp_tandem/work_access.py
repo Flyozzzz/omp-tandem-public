@@ -89,7 +89,11 @@ def perform_work(
         # require an active one and are checked again by the domain transaction.
         with suppress(ValueError):
             bound = store.authenticate(token)
-    if command.action == "submit" and token and store.recovery_scope(token, actor):
+    if (
+        command.action == "submit"
+        and token
+        and store.recovery_scope(token, actor, (origin or {}).get("host_owner"))
+    ):
         # A successor host closes bookkeeping only; it never adopts Git output.
         raise ValueError("recovery_report_only")
     if bound and not bound["autonomous"] and command.action == "submit":

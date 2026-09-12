@@ -17,7 +17,7 @@ import sqlite3
 import subprocess
 import threading
 import time
-from contextlib import closing, contextmanager, suppress
+from contextlib import closing, contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal, Self
 from uuid import uuid4
@@ -1499,18 +1499,30 @@ class WorkStore:
         return attempt
 
     @staticmethod
-    def _delegation(attempt, actor):
-        """The consumed successor authorization letting `actor` act on this claim."""
-        if attempt is None or actor == attempt["actor"]:
+    def _delegation(attempt, actor, host=None):
+        """The consumed successor authorization under which this caller acts.
+
+        Scope follows the recovering host and principal, not principal
+        inequality alone: a successor with the claim's own principal on another
+        host is still limited to report-only closure. Without a host the
+        original holder is indistinguishable from a same-principal successor,
+        so only a different principal is delegated.
+        """
+        if attempt is None:
             return None
         for entry in (attempt.get("binding") or {}).get("successors") or []:
-            if entry.get("consumed") and entry["principal"] == actor:
-                return {
-                    "principal": actor,
-                    "successor_id": entry["successor_id"],
-                    "scope": entry["scope"],
-                    "on_behalf_of": attempt["actor"],
-                }
+            if not entry.get("consumed") or entry["principal"] != actor:
+                continue
+            if host is None and actor == attempt["actor"]:
+                continue
+            if host is not None and entry["host_owner"] != host:
+                continue
+            return {
+                "principal": actor,
+                "successor_id": entry["successor_id"],
+                "scope": entry["scope"],
+                "on_behalf_of": attempt["actor"],
+            }
         return None
 
     def _authenticate(self, db, token, actor=None):
@@ -1716,7 +1728,7 @@ class WorkStore:
         self, db, command, caller, attempt_token, origin, source_commit
     ):
         bound = self._credential(db, attempt_token, caller) if attempt_token else None
-        delegation = self._delegation(bound, caller)
+        delegation = self._delegation(bound, caller, (origin or {}).get("host_owner"))
         # A successor host acts on behalf of the claim's principal, within its
         # authorized reporting scope; receipts stay keyed by the real caller.
         actor = bound["actor"] if delegation else caller
@@ -1796,11 +1808,13 @@ class WorkStore:
                 if command.action == "claim" and attempt["state"] in _ACTIVE:
                     response["claim"]["token"] = attempt["token"]
                 elif command.action == "recover":
-                    # An exact recovery retry re-installs the credential only
-                    # while the same claim is still live and current.
-                    with suppress(ValueError):
-                        self._authenticate(db, attempt["token"])
-                        response["claim"]["token"] = attempt["token"]
+                    # An exact recovery retry re-installs the credential only for
+                    # the caller and host that recovered, while the same claim is
+                    # still live in the exact recorded context; the descriptor is
+                    # rebuilt from current state, never replayed.
+                    response = self._recovery_replay(
+                        db, command, caller, origin, response, attempt
+                    )
                 return _project_claim(response, attempt)
             return redact_author(response, bound)
         if bound:
@@ -3423,6 +3437,35 @@ class WorkStore:
             "path": "administrative closure by an authorized successor host; ordinary continuation is a separate explicit claim",
         }
 
+    def _recovery_replay(self, db, command, caller, origin, response, attempt):
+        binding = attempt.get("binding") or {}
+        record = next(
+            (
+                item
+                for item in binding.get("recoveries") or []
+                if item["operation_id"] == command.operation_id
+            ),
+            None,
+        )
+        host = (origin or {}).get("host_owner")
+        if (
+            record is None
+            or record.get("host_owner") != host
+            or record["principal"] != caller
+        ):
+            raise ValueError("recovery_not_authorized")
+        card = self._load(db, attempt["work_id"])
+        step = self._step(card, attempt["step_id"])
+        code, _ = self._recovery_target(db, card, step)
+        if code:
+            raise ValueError(code)
+        if _recovery_context(attempt) != record.get("context"):
+            raise ValueError("recovery_context_changed")
+        self._authenticate(db, attempt["token"])
+        response["claim"]["token"] = attempt["token"]
+        response["recovery"] = self.recovery_descriptor(db, card, step, bound=attempt)
+        return response
+
     def _recover(self, db, card, command, actor, origin):
         if actor not in {"claude", "omp"}:
             raise ValueError("recovery_not_authorized")
@@ -3430,6 +3473,15 @@ class WorkStore:
         code, attempt = self._recovery_target(db, card, step)
         if code:
             raise ValueError(code)
+        submission = attempt.get("submission") or {}
+        if (
+            command.submission_id is not None
+            and command.submission_id != submission.get("submission_id")
+        ) or (
+            command.commit is not None and command.commit != submission.get("commit")
+        ):
+            # The request names another submission or commit than the claim's.
+            raise ValueError("recovery_context_changed")
         successor = self._recovery_authorization(
             attempt, actor, origin, command.operation_id
         )
@@ -3453,7 +3505,9 @@ class WorkStore:
                 "operation_id": command.operation_id,
                 "at": time.time(),
                 "principal": actor,
+                "host_owner": (origin or {}).get("host_owner"),
                 "successor_id": successor["successor_id"] if successor else None,
+                "context": _recovery_context(attempt),
             }
         )
         self._save_attempt(db, attempt)
@@ -3554,11 +3608,11 @@ class WorkStore:
                 )
             return settled
 
-    def recovery_scope(self, token, actor):
-        """report_only when `actor` wields this credential as a successor."""
+    def recovery_scope(self, token, actor, host=None):
+        """report_only when this caller wields the credential as a successor."""
         with self._read_connection() as db:
             attempt = self._credential(db, token)
-        delegation = self._delegation(attempt, actor)
+        delegation = self._delegation(attempt, actor, host)
         return delegation["scope"] if delegation else None
 
     def record_application(self, work_id, record: dict, *, actor="operator") -> dict:

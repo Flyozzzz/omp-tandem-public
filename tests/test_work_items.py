@@ -726,6 +726,155 @@ class WorkItemsTests(unittest.TestCase):
         self.assertEqual(usage["coverage"], "unknown")
         self.assertEqual(usage["unattributed"]["legacy_unlinked"], 1)
 
+    def test_recovery_replay_and_same_principal_successor_stay_bounded(self):
+        from omp_tandem.work_access import perform_work
+
+        self.agreed()
+        self.submit(self.reserve(autonomous=False), cost=None)
+        origin = {
+            "host_owner": "claude-host",
+            "task_id": "task-3",
+            "conversation_id": "conv-3",
+        }
+        claim = self._claim("claude", origin)
+        submission_id = claim["submission"]["submission_id"]
+        self.store.origin_settled("task-3", status="failed", teardown_confirmed=True)
+        # A successor with the claim's OWN principal on another host is still a
+        # report-only successor, never the original holder.
+        self.store.authorize_successor(
+            claim["attempt_id"],
+            host_owner="claude-host-2",
+            principal="claude",
+            note="same-principal handoff",
+        )
+        successor_host = {"host_owner": "claude-host-2"}
+        # Contradictory request identity is refused before any credential.
+        with self.assertRaisesRegex(ValueError, "recovery_context_changed"):
+            self.store.perform(
+                {
+                    "action": "recover",
+                    "work_id": self.work_id,
+                    "step_id": "backend",
+                    "expected_revision": self.view()["revision"],
+                    "operation_id": str(uuid4()),
+                    "submission_id": "different-submission",
+                },
+                actor="claude",
+                origin=successor_host,
+            )
+        with self.assertRaisesRegex(ValueError, "recovery_context_changed"):
+            self.store.perform(
+                {
+                    "action": "recover",
+                    "work_id": self.work_id,
+                    "step_id": "backend",
+                    "expected_revision": self.view()["revision"],
+                    "operation_id": str(uuid4()),
+                    "commit": "f" * 40,
+                },
+                actor="claude",
+                origin=successor_host,
+            )
+        claims = {}
+        command = {
+            "action": "recover",
+            "work_id": self.work_id,
+            "step_id": "backend",
+            "expected_revision": self.view()["revision"],
+            "operation_id": str(uuid4()),
+        }
+        recovered = perform_work(
+            self.store, command, actor="claude", claims=claims, origin=successor_host
+        )
+        self.assertEqual(claims[(self.work_id, "backend")], claim["token"])
+        revision = recovered["revision"]
+        self.assertEqual(
+            self.store.recovery_scope(claim["token"], "claude", "claude-host-2"),
+            "report_only",
+        )
+        self.assertIsNone(
+            self.store.recovery_scope(claim["token"], "claude", "claude-host")
+        )
+        # Identical replay from an unauthorized host with the same principal.
+        foreign = {}
+        with self.assertRaisesRegex(ValueError, "recovery_not_authorized"):
+            perform_work(
+                self.store,
+                command,
+                actor="claude",
+                claims=foreign,
+                origin={"host_owner": "unauthorized-host"},
+            )
+        self.assertEqual(foreign, {})
+        with self.assertRaisesRegex(ValueError, "recovery_not_authorized"):
+            self.store.perform(command, actor="claude", origin=None)
+        replay = perform_work(
+            self.store, command, actor="claude", claims={}, origin=successor_host
+        )
+        self.assertEqual(replay["claim"]["token"], claim["token"])
+        self.assertEqual(self.view()["revision"], revision)
+        # Report-only scope applies to the same-principal successor host.
+        for action, fields in (
+            ("pause", {}),
+            ("claim", {"step_id": "frontend"}),
+        ):
+            with self.assertRaisesRegex(ValueError, "recovery_report_only"):
+                perform_work(
+                    self.store,
+                    {
+                        "action": action,
+                        "work_id": self.work_id,
+                        "expected_revision": self.view()["revision"],
+                        "operation_id": str(uuid4()),
+                        **fields,
+                    },
+                    actor="claude",
+                    attempt_token=claim["token"],
+                    origin=successor_host,
+                )
+        self.assertEqual(self.view()["status"], "active")
+        with self.assertRaisesRegex(ValueError, "recovery_report_only"):
+            perform_work(
+                self.store,
+                {
+                    "action": "submit",
+                    "work_id": self.work_id,
+                    "step_id": "backend",
+                    "expected_revision": self.view()["revision"],
+                    "operation_id": str(uuid4()),
+                    "commit": "a" * 40,
+                    "note": "x",
+                    "evidence": ["x"],
+                },
+                actor="claude",
+                claims=claims,
+                origin=successor_host,
+            )
+        self._mutation(
+            "report",
+            "claude",
+            successor_host,
+            claims,
+            submission_id=submission_id,
+            resolution="success",
+            note="Closure by the same-principal successor",
+            evidence=["artifact finding-3"],
+        )
+        history = self.store.perform(
+            {"action": "history", "work_id": self.work_id}, actor="operator"
+        )["events"]
+        report_event = next(e for e in history if e["kind"] == "independent_report")
+        self.assertEqual(report_event["details"]["recorded_by"]["principal"], "claude")
+        self.assertEqual(
+            report_event["details"]["recorded_by"]["on_behalf_of"], "claude"
+        )
+        self._mutation("compare", "claude", successor_host, claims)
+        # The stage changed after recovery: the exact retry no longer re-issues.
+        with self.assertRaisesRegex(ValueError, "recovery_context_changed"):
+            perform_work(
+                self.store, command, actor="claude", claims={}, origin=successor_host
+            )
+
     def test_recovery_refuses_changed_context_expired_and_legacy_claims(self):
         self.agreed()
         self.submit(self.reserve(autonomous=False), cost=None)
