@@ -875,6 +875,96 @@ class WorkItemsTests(unittest.TestCase):
                 self.store, command, actor="claude", claims={}, origin=successor_host
             )
 
+    def test_original_claim_receipt_reissues_only_to_the_claiming_origin(self):
+        from omp_tandem.work_access import perform_work
+
+        self.agreed(parallel=True)
+        self.submit(self.reserve(autonomous=False), cost=None)
+        origin = {"host_owner": "claude-host"}
+        before = self.view()["revision"]
+        command = {
+            "action": "claim",
+            "work_id": self.work_id,
+            "step_id": "backend",
+            "expected_revision": before,
+            "operation_id": str(uuid4()),
+        }
+        claim = self.store.perform(command, actor="claude", origin=origin)["claim"]
+        # Public views and history never carry replay material of the binding.
+        exposed = json.dumps(
+            [
+                self.store.perform(
+                    {"action": "get", "work_id": self.work_id}, actor="omp"
+                ),
+                self.store.perform(
+                    {"action": "history", "work_id": self.work_id}, actor="omp"
+                ),
+            ]
+        )
+        self.assertNotIn(command["operation_id"], exposed)
+        self.assertNotIn("claude-host", exposed)
+        self.assertNotIn("claim_operation_id", exposed)
+        # Same origin: the exact retry still recovers its acknowledgement.
+        same = self.store.perform(command, actor="claude", origin=origin)
+        self.assertEqual(same["claim"]["token"], claim["token"])
+        # Another host of the same principal knowing the exact command gets the
+        # historical response but no credential and installs nothing.
+        foreign = {}
+        replay = perform_work(
+            self.store,
+            command,
+            actor="claude",
+            claims=foreign,
+            origin={"host_owner": "unauthorized-host"},
+        )
+        self.assertEqual(replay["claim"]["attempt_id"], claim["attempt_id"])
+        self.assertNotIn("token", replay["claim"])
+        self.assertEqual(foreign, {})
+        self.assertNotIn("token", self.store.perform(command, actor="claude")["claim"])
+        self.assertEqual(self.view()["revision"], before + 1)
+        # A native-tool claim is bound to its task: neither the same host without
+        # that task nor another task replays the credential.
+        native = {
+            "host_owner": "omp-host",
+            "task_id": "task-9",
+            "conversation_id": "conv-9",
+        }
+        frontier = self.view()["revision"]
+        native_command = {
+            "action": "claim",
+            "work_id": self.work_id,
+            "step_id": "frontend",
+            "expected_revision": frontier,
+            "operation_id": str(uuid4()),
+        }
+        issued = self.store.perform(native_command, actor="claude", origin=native)
+        self.assertIn("token", issued["claim"])
+        for replay_origin in (
+            {"host_owner": "omp-host"},
+            {"host_owner": "omp-host", "task_id": "task-10"},
+            {"host_owner": "other-host", "task_id": "task-9"},
+        ):
+            self.assertNotIn(
+                "token",
+                self.store.perform(
+                    native_command, actor="claude", origin=replay_origin
+                )["claim"],
+            )
+        self.assertEqual(
+            self.store.perform(native_command, actor="claude", origin=native)["claim"][
+                "token"
+            ],
+            issued["claim"]["token"],
+        )
+        # Legacy attempts without a binding stay readable, never re-armed.
+        legacy = self._stored_attempt(issued["claim"]["attempt_id"])
+        legacy.pop("binding")
+        self._store_attempt(legacy)
+        self.assertNotIn(
+            "token",
+            self.store.perform(native_command, actor="claude", origin=native)["claim"],
+        )
+
     def test_recovery_refuses_changed_context_expired_and_legacy_claims(self):
         self.agreed()
         self.submit(self.reserve(autonomous=False), cost=None)

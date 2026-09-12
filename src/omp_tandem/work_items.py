@@ -519,12 +519,56 @@ def _operation_fingerprint(command, bound, *, version=2):
     return digest if version == 1 else f"v2:{digest}"
 
 
+def _public_binding(binding):
+    """Provenance without replay material: no operation ids, no host identities."""
+    if not isinstance(binding, dict):
+        return binding
+    return {
+        "version": binding.get("version"),
+        "host_owner_bound": binding.get("host_owner") is not None,
+        "task_id": binding.get("task_id"),
+        "conversation_id": binding.get("conversation_id"),
+        "bound_at": binding.get("bound_at"),
+        "origin_settled": binding.get("origin_settled"),
+        "successors": [
+            {
+                key: entry.get(key)
+                for key in ("successor_id", "principal", "scope", "authorized_at")
+            }
+            | {"consumed": bool(entry.get("consumed"))}
+            for entry in binding.get("successors") or []
+        ],
+        "recoveries": [
+            {key: item.get(key) for key in ("at", "principal", "successor_id")}
+            for item in binding.get("recoveries") or []
+        ],
+    }
+
+
 def _public_attempt(attempt):
     return {
-        key: value
+        key: _public_binding(value) if key == "binding" else value
         for key, value in attempt.items()
         if key not in {"token", "token_hash"}
     }
+
+
+def _claim_replay_allowed(attempt, origin):
+    """An exact claim retry re-issues its credential only to the claiming origin.
+
+    The receipt is keyed by principal and operation id, which another host of
+    the same principal can learn; the durable binding supplies the missing
+    session identity. Legacy attempts without a binding stay readable but never
+    hand out fresh authority through replay.
+    """
+    binding = attempt.get("binding")
+    if not binding:
+        return False
+    origin = origin or {}
+    return origin.get("host_owner") == binding.get("host_owner") and (
+        binding.get("task_id") is None
+        or binding.get("task_id") == origin.get("task_id")
+    )
 
 
 RECOVERY_ACTIONS = frozenset(
@@ -1805,7 +1849,11 @@ class WorkStore:
             # Credentials are never persisted in operation responses.
             if command.action in {"claim", "recover"}:
                 attempt = self._attempt(db, response["claim"]["attempt_id"])
-                if command.action == "claim" and attempt["state"] in _ACTIVE:
+                if (
+                    command.action == "claim"
+                    and attempt["state"] in _ACTIVE
+                    and _claim_replay_allowed(attempt, origin)
+                ):
                     response["claim"]["token"] = attempt["token"]
                 elif command.action == "recover":
                     # An exact recovery retry re-installs the credential only for
@@ -3431,7 +3479,7 @@ class WorkStore:
                 | {"consumed": bool(entry.get("consumed"))}
                 for entry in binding.get("successors") or []
             ],
-            "recoveries": binding.get("recoveries") or [],
+            "recoveries": _public_binding(binding)["recoveries"] if binding else [],
             "refusal": code,
             "allowed_actions": sorted(RECOVERY_ACTIONS - {"get", "history"}),
             "path": "administrative closure by an authorized successor host; ordinary continuation is a separate explicit claim",
