@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from .models import TaskOutcome
+from .models import parse_outcome
 from .reviews import ReviewRequest
 from .work_items import (
     _withhold,
@@ -507,8 +507,8 @@ class OmpWorkAdapter(_Adapter):
                 error=view.get("error") or "Native worker did not complete",
             )
         try:
-            report = TaskOutcome.model_validate(view.get("report"))
-        except ValueError:
+            report = parse_outcome(view.get("report"))
+        except (ValueError, TypeError):
             return self._result(
                 handle,
                 "failed",

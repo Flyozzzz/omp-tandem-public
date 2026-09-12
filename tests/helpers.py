@@ -68,6 +68,10 @@ for line in sys.stdin:
             finish({'outcome': 'success', 'summary': 'Paragraph prepared', 'answer': 'Поручайте независимый анализ; приёмку проверяйте сами.'})
         elif scenario == 'long-answer':
             finish({'outcome': 'success', 'summary': 'Long answer prepared', 'answer': '雪界𝄞' * 6000})
+        elif scenario == 'contract-error-then-partial':
+            finish({'outcome': 'success', 'summary': 'Claimed complete', 'answer': 'Everything passed', 'checks': [{'name': 'pytest', 'result': 'failed'}]})
+        elif scenario in ('finish-twice', 'finish-differs'):
+            finish({'outcome': 'success', 'summary': 'Done', 'answer': 'Exact answer'})
         else:
             emit({'type': 'host_tool_call', 'id': 'question', 'toolCallId': 'question-call', 'toolName': 'tandem_ask',
                   'arguments': {'question': 'Which value?', 'options': ['blue', 'green']}})
@@ -85,6 +89,28 @@ for line in sys.stdin:
     elif kind == 'host_tool_result' and command['id'] == 'checkpoint':
         end('Stopped before final report')
     elif kind == 'host_tool_result' and command['id'] == 'finish':
+        text = command['result']['content'][0]['text']
+        if scenario == 'contract-error-then-partial':
+            if not (command.get('isError') and 'outcome_contract' in text):
+                end('Contract error was not surfaced: ' + text)
+            else:
+                runs = [
+                    {'check_id': 'pytest', 'run_id': '11111111-1111-4111-8111-111111111111', 'criterion': 'full suite passes', 'role': 'author', 'command': 'pytest -q', 'ended_at': 1.0, 'scope': {'kind': 'tree', 'digest': 'a' * 40}, 'result': 'failed'},
+                    {'check_id': 'pytest', 'run_id': '22222222-2222-4222-8222-222222222222', 'criterion': 'full suite passes', 'role': 'author', 'command': 'pytest -q', 'ended_at': 2.0, 'scope': {'kind': 'tree', 'digest': 'a' * 40}, 'result': 'passed'},
+                ]
+                emit({'type': 'host_tool_call', 'id': 'finish2', 'toolCallId': 'finish-call-2', 'toolName': 'tandem_finish', 'arguments': {
+                    'outcome': 'partial', 'summary': 'Delivered with an open platform check', 'answer': 'Corrected report: partial with history',
+                    'checks': [{'name': 'pytest', 'result': 'passed', 'run_id': '22222222-2222-4222-8222-222222222222'}, {'name': 'linux suite', 'result': 'not_run'}],
+                    'check_runs': runs}})
+        elif scenario == 'finish-twice':
+            emit({'type': 'host_tool_call', 'id': 'finish2', 'toolCallId': 'finish-call-2', 'toolName': 'tandem_finish', 'arguments': {'outcome': 'success', 'summary': 'Done', 'answer': 'Exact answer'}})
+        elif scenario == 'finish-differs':
+            emit({'type': 'host_tool_call', 'id': 'finish2', 'toolCallId': 'finish-call-2', 'toolName': 'tandem_finish', 'arguments': {'outcome': 'success', 'summary': 'Done', 'answer': 'A different answer'}})
+        else:
+            end('Recorded')
+    elif kind == 'host_tool_result' and command['id'] == 'finish2':
+        emit({'type': 'host_tool_call', 'id': 'note', 'toolCallId': 'note-call', 'toolName': 'tandem_publish_artifact', 'arguments': {'name': 'second-finish', 'content': json.dumps({'is_error': bool(command.get('isError')), 'text': command['result']['content'][0]['text']})}})
+    elif kind == 'host_tool_result' and command['id'] == 'note':
         end('Recorded')
     elif kind == 'abort':
         respond(command)

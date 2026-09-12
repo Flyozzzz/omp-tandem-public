@@ -1,14 +1,17 @@
 """Consumer-facing task summaries, detailed results, and wait projections."""
 
 import json
+import sqlite3
 import time
 from contextlib import closing
 
 from .artifacts import ArtifactStore
 from .execution import conversation_usage, task_usage
+from .models import assess_checks
 from .project_context import ProjectContextStore
 from .runtime_models import ACTIVE, TaskSummary
 from .task_contracts import current_task, work_policy
+from .task_interaction import CHECK_RUN_ARTIFACT
 from .task_store import TaskStore
 
 
@@ -113,6 +116,11 @@ class TaskResults:
             result["provisional_artifacts_truncated"] = (
                 not details and len(preliminary) > 10
             )
+        runs = self._check_runs(task_id)
+        result["check_runs"] = assess_checks(runs)
+        result["facts"] = self._facts(
+            task_id, task, status, report, result["check_runs"]
+        )
         if task["project_context_id"]:
             result["project_context"] = self.projects.info(task["project_context_id"])
             if task["previous_project_context_id"]:
@@ -173,6 +181,73 @@ class TaskResults:
                     task["project_context_id"]
                 )["context"]
         return result
+
+    def _check_runs(self, task_id):
+        """Append-only check run records published for this task."""
+        runs = []
+        for item in reversed(self.artifacts.for_task(task_id)):
+            if item["name"] != CHECK_RUN_ARTIFACT:
+                continue
+            content = self.artifacts.read(item["artifact_id"], 0, 50000)["content"]
+            record = json.loads(content)
+            record.pop("task_id", None)
+            record.pop("recorded_at", None)
+            record.pop("recorded_by", None)
+            runs.append(record)
+        return runs
+
+    def _facts(self, task_id, task, status, report, checks):
+        """Four separately observed facts; none is inferred from another.
+
+        execution: how the worker turn ended; delivery: what the final report
+        declared, or that none was delivered; verdict: the linked shared-work
+        reviewer decision, if any; checks: current applicability of the recorded
+        check runs. A delivered rejection is a successful delivery, and an
+        interrupted turn with a saved report is still interrupted.
+        """
+        if status in ACTIVE:
+            execution = "running"
+        elif status == "completed":
+            execution = "completed"
+        elif status == "cancelled":
+            execution = "cancelled"
+        elif status == "interrupted":
+            execution = "interrupted"
+        else:
+            execution = "failed"
+        if report is not None:
+            delivery = report["outcome"]
+        elif status in ACTIVE:
+            delivery = "pending"
+        else:
+            delivery = "missing"
+        verdict = {"status": "none", "attempt_id": None, "kind": None}
+        with closing(self.tasks.connect()) as db:
+            try:
+                row = db.execute(
+                    "SELECT attempt FROM work_attempts WHERE native_task_id=?",
+                    (task_id,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                row = None
+        if row is not None:
+            attempt = json.loads(row["attempt"])
+            verdict = {
+                "status": attempt.get("verdict") or "none",
+                "attempt_id": attempt.get("attempt_id"),
+                "kind": attempt.get("kind"),
+            }
+        return {
+            "execution": execution,
+            "delivery": delivery,
+            "verdict": verdict,
+            "checks": {
+                "status": checks["status"],
+                "run_count": checks["run_count"],
+                "known_issues": len(checks["known_issues"]),
+                "invalid_supersedes": len(checks["invalid_supersedes"]),
+            },
+        }
 
     def recent(self, limit=20):
         ids = self.tasks.recent_ids(limit)

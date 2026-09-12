@@ -10,7 +10,7 @@ from omp_rpc import RpcClient, host_tool
 
 from .artifacts import ArtifactStore
 from .execution import TurnUsage, resolve_execution
-from .models import TaskOutcome
+from .models import decode_outcome, outcome_schema, parse_outcome
 from .prompts import WORKER_INSTRUCTIONS
 from .runtime_models import (
     MAX_EVENT_HISTORY,
@@ -127,8 +127,8 @@ class NativeWorker:
             host_tool(
                 name="tandem_finish",
                 description="Deliver the actual requested text in answer, separately from the short work summary, with an honest success/partial/blocked outcome. This call is required even for plain-text conversation. Then end your turn.",
-                parameters=TaskOutcome.model_json_schema(),
-                decode=TaskOutcome.model_validate,
+                parameters=outcome_schema(),
+                decode=decode_outcome,
                 execute=lambda report, _: self.interaction.submit_report(
                     task_id, report
                 ),
@@ -396,11 +396,7 @@ class NativeWorker:
                 ),
             )
             task = self.tasks.get(task_id)
-            report = (
-                TaskOutcome.model_validate_json(task["report_json"])
-                if task["report_json"]
-                else None
-            )
+            report = parse_outcome(task["report_json"]) if task["report_json"] else None
             if report is not None:
                 answer = report.answer
             artifact_ids = []

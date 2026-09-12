@@ -101,7 +101,10 @@ never replace the requested answer with a claim that you provided it. Plain-text
 requests describe the answer's format; they do not waive this final tool call. Short answers need no
 manual artifact publication: the bridge delivers answer inline and preserves a complete copy itself.
 Also provide outcome, changed_files, checks, blockers and artifact_ids. Use success only when requirements
-are met; report failed/unrun checks honestly. Use blocked with blockers, or partial for incomplete work.
+are met and every current check passed; report failed/unrun checks honestly under partial, or blocked with
+blockers. Put executed runs (command, bytes digest, environment, result) in check_runs: history is
+append-only and an earlier failure stays recorded even after a later pass. A refused report names the
+offending fields and the allowed fix; correct the report, never relabel the outcome to make it pass.
 After tandem_finish, end your turn without further work. A final acknowledgment will not replace answer.
 This report is a claim, not independent verification; plain text alone cannot establish successful work.
 Do not delegate back or launch another agent. Do not commit/push unless asked. Preserve concurrent edits.

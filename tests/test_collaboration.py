@@ -195,6 +195,77 @@ class CollaborationTests(RpcHarness):
         self.assertEqual(result["report"]["blockers"], ["Credentials are required"])
         self.assertNotIn("error", result)
 
+    async def test_refused_report_names_fields_and_partial_records_run_history(self):
+        job = await self.start("contract-error-then-partial")
+        result = await self.result(job["task_id"], details=True)
+        self.assertEqual(
+            (result["status"], result["outcome"]), ("completed", "partial")
+        )
+        self.assertEqual(result["answer"], "Corrected report: partial with history")
+        self.assertEqual(
+            [check["result"] for check in result["report"]["checks"]],
+            ["passed", "not_run"],
+        )
+        facts = result["facts"]
+        self.assertEqual(facts["execution"], "completed")
+        self.assertEqual(facts["delivery"], "partial")
+        self.assertEqual(facts["verdict"]["status"], "none")
+        self.assertEqual(facts["checks"]["status"], "passed")
+        self.assertEqual(facts["checks"]["run_count"], 2)
+        self.assertEqual(facts["checks"]["known_issues"], 1)
+        criterion = result["check_runs"]["criteria"][0]
+        self.assertEqual(
+            criterion["run_ids"],
+            [
+                "11111111-1111-4111-8111-111111111111",
+                "22222222-2222-4222-8222-222222222222",
+            ],
+        )
+        self.assertEqual(criterion["provenance"], "participant_reported")
+        recorded = [
+            item
+            for item in result["provisional_artifacts"]
+            if item["name"] == "check-run"
+        ]
+        self.assertEqual(len(recorded), 2)
+        first = await self.call(
+            "tandem_read_artifact", artifact_id=recorded[-1]["artifact_id"]
+        )
+        record = json.loads(first["content"])
+        self.assertEqual(record["result"], "failed")
+        self.assertEqual(record["recorded_by"], "report")
+
+    async def test_exact_final_report_repeat_is_idempotent(self):
+        job = await self.start("finish-twice")
+        result = await self.result(job["task_id"], details=True)
+        self.assertEqual(
+            (result["status"], result["outcome"], result["answer"]),
+            ("completed", "success", "Exact answer"),
+        )
+        note = await self._second_finish(result)
+        self.assertFalse(note["is_error"])
+        self.assertIn("Final report recorded", note["text"])
+
+    async def test_differing_final_report_is_rejected(self):
+        job = await self.start("finish-differs")
+        result = await self.result(job["task_id"], details=True)
+        self.assertEqual(
+            (result["status"], result["outcome"], result["answer"]),
+            ("completed", "success", "Exact answer"),
+        )
+        note = await self._second_finish(result)
+        self.assertTrue(note["is_error"])
+        self.assertIn("already been submitted", note["text"])
+
+    async def _second_finish(self, result):
+        artifacts = [
+            *result.get("artifacts", []),
+            *result.get("provisional_artifacts", []),
+        ]
+        note = next(item for item in artifacts if item["name"] == "second-finish")
+        raw = await self.call("tandem_read_artifact", artifact_id=note["artifact_id"])
+        return json.loads(raw["content"])
+
     async def test_contract_survives_follow_up_and_prevents_overlapping_assignment(
         self,
     ):

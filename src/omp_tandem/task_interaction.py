@@ -7,11 +7,13 @@ from uuid import uuid4
 
 from .artifacts import ArtifactStore
 from .findings import FindingStore
-from .models import TaskOutcome
+from .models import decode_outcome
 from .project_context import ProjectContextStore
 from .runtime_models import ACTIVE, Cancelled, QuestionRequest
 from .task_store import TaskStore
 from .work_items import independent_stage
+
+CHECK_RUN_ARTIFACT = "check-run"
 
 
 class TaskInteraction:
@@ -72,14 +74,19 @@ class TaskInteraction:
         return json.dumps(result, ensure_ascii=False)
 
     def submit_report(self, task_id, report):
-        report = TaskOutcome.model_validate(report)
+        # Refusals name the offending fields and the permitted correction; the
+        # declared outcome is never rewritten on the author's behalf.
+        report = decode_outcome(report)
         for identifier in report.artifact_ids:
             self.artifacts.info(identifier)
+        for run in report.check_runs:
+            if run.output_artifact_id:
+                self.artifacts.info(run.output_artifact_id)
         payload = report.model_dump_json()
         with closing(self.tasks.connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             task = db.execute(
-                "SELECT status, cancel_requested, report_json, project_context_id FROM tasks WHERE task_id=?",
+                "SELECT status, cancel_requested, report_json, project_context_id, conversation_id FROM tasks WHERE task_id=?",
                 (task_id,),
             ).fetchone()
             if task is None or task["cancel_requested"] or task["status"] != "running":
@@ -128,6 +135,27 @@ class TaskInteraction:
                     findings=report.findings,
                     finding_updates=report.finding_updates,
                 )
+            if task["report_json"] is None:
+                # Append-only history in the existing immutable artifact layer: one
+                # record per run, never rewritten by a later report or run.
+                recorded = time.time()
+                for run in report.check_runs:
+                    self.artifacts.publish_in_transaction(
+                        db,
+                        CHECK_RUN_ARTIFACT,
+                        json.dumps(
+                            {
+                                **run.model_dump(),
+                                "task_id": task_id,
+                                "recorded_at": recorded,
+                                "recorded_by": "report",
+                            },
+                            ensure_ascii=False,
+                        ),
+                        "application/json",
+                        conversation_id=task["conversation_id"],
+                        task_id=task_id,
+                    )
             db.execute(
                 "UPDATE tasks SET report_json=?, updated=? WHERE task_id=?",
                 (payload, time.time(), task_id),
