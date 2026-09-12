@@ -15,7 +15,7 @@ from .project_context import ProjectContextStore
 from .receipts import ReceiptStore
 from .review_runs import ReviewRuns
 from .reviews import ReviewStore
-from .runtime_models import ACTIVE
+from .runtime_models import ACTIVE, PublishRequest
 from .task_contracts import TaskMessages
 from .task_interaction import TaskInteraction
 from .task_results import TaskResults
@@ -229,11 +229,18 @@ class Bridge:
 
     def publish(self, conversation_id, name, content, media_type="text/plain"):
         conversation_id = str(UUID(conversation_id))
+        # Coordinator and native participants share one publication contract:
+        # reserved names are recorded only by the server itself.
+        request = PublishRequest(name=name, content=content, media_type=media_type)
         task = self.tasks.latest(conversation_id)
         if task is None:
             raise ValueError("Unknown conversation_id; start a conversation first")
         return self.artifacts.publish(
-            conversation_id, task["task_id"], name, content, media_type
+            conversation_id,
+            task["task_id"],
+            request.name,
+            request.content,
+            request.media_type,
         )
 
     def shutdown(self):

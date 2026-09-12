@@ -5,11 +5,9 @@ import sqlite3
 import time
 from contextlib import closing
 
-from pydantic import ValidationError
-
 from .artifacts import ArtifactStore
 from .execution import conversation_usage, task_usage
-from .models import assess_checks
+from .models import CheckRun, assess_checks
 from .project_context import ProjectContextStore
 from .runtime_models import ACTIVE, TaskSummary
 from .task_contracts import current_task, work_policy
@@ -130,12 +128,7 @@ class TaskResults:
                 not details and len(preliminary) > 10
             )
         runs, unreadable = self._check_runs(task_id)
-        try:
-            result["check_runs"] = assess_checks(runs)
-        except ValidationError as exc:
-            # A stored record that no longer validates is history, not a crash.
-            unreadable.append({"artifact_id": None, "error": str(exc)[:200]})
-            result["check_runs"] = assess_checks([])
+        result["check_runs"] = assess_checks(runs)
         result["check_runs"]["unreadable_records"] = unreadable
         result["facts"] = self._facts(
             task_id, task, status, report, result["check_runs"]
@@ -219,14 +212,15 @@ class TaskResults:
                 )
                 if not isinstance(record, dict):
                     raise TypeError("check run record is not an object")
+                for key in ("task_id", "recorded_at", "recorded_by"):
+                    record.pop(key, None)
+                # Validate each record on its own so one malformed historical
+                # record never erases the assessment of the valid ones.
+                runs.append(CheckRun.model_validate(record))
             except (ValueError, TypeError) as exc:
                 unreadable.append(
                     {"artifact_id": item["artifact_id"], "error": str(exc)[:200]}
                 )
-                continue
-            for key in ("task_id", "recorded_at", "recorded_by"):
-                record.pop(key, None)
-            runs.append(record)
         return runs, unreadable
 
     def _facts(self, task_id, task, status, report, checks):
