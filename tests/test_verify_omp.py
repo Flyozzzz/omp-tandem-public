@@ -37,6 +37,42 @@ def _alive(**overrides):
     return observed
 
 
+class SchemaCensusTests(unittest.TestCase):
+    def test_counts_schema_keywords_not_property_names_or_examples(self):
+        registered = {
+            "type": "object",
+            "properties": {
+                "anyOf": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "pattern": {"type": "string", "pattern": "^safe$"},
+            },
+            "examples": [{"anyOf": [{"pattern": "not a schema"}]}],
+        }
+        wire = {
+            "type": "object",
+            "properties": {
+                "anyOf": {"type": ["string", "null"]},
+                "pattern": {"type": "string", "pattern": "^changed$"},
+            },
+            "examples": registered["examples"],
+        }
+        census = verify_omp.schema_census(registered, wire)
+        self.assertEqual(census["registered_keywords"]["anyOf"], 1)
+        self.assertEqual(census["registered_keywords"]["pattern"], 1)
+        self.assertEqual(
+            census["keyword_count_differences"]["anyOf"], {"registered": 1, "wire": 0}
+        )
+        self.assertNotEqual(census["registered_sha256"], census["wire_sha256"])
+        self.assertIn(
+            {
+                "path": "/properties/pattern/pattern",
+                "change": "changed",
+                "registered": "^safe$",
+                "wire": "^changed$",
+            },
+            census["differences"],
+        )
+
+
 class AbortGateTests(unittest.TestCase):
     def test_gate_requires_live_parent_before_cleanup(self):
         self.assertTrue(verify_omp.abort_gate_supported(_alive()))

@@ -7,6 +7,7 @@ Run with the project's frozen environment; see docs/compatibility.md.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import importlib.metadata
 import json
@@ -27,6 +28,7 @@ import urllib.request
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from uuid import uuid4
 
 from omp_tandem.runtime_models import ACTIVE
 
@@ -72,7 +74,7 @@ def digest(path):
 # where it happened rather than defaulting to "no failed check".
 PREFLIGHT_CHECK = "binary_preflight"
 ACQUISITION_CHECKS = ("official_binary_acquisition", "official_binary_sha256")
-ENVIRONMENT_CHECKS = ("sdk_pin", "actual_omp_version")
+ENVIRONMENT_CHECKS = ("sdk_pin", "actual_omp_version", "installed_runtime_setup")
 SETUP_CHECKS = (PREFLIGHT_CHECK, *ACQUISITION_CHECKS, *ENVIRONMENT_CHECKS)
 PHASES = ("preflight", "acquisition", "setup", "probes", "complete")
 PHASE_FAILURE = {
@@ -1613,6 +1615,443 @@ def helper_probe(executable, root, agent, provider, report):
     }
 
 
+def fixture_command(arguments, *, cwd, evidence):
+    result = subprocess.run(
+        [str(value) for value in arguments],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    evidence.append(
+        {
+            "command": [str(value) for value in arguments],
+            "cwd": str(cwd),
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+    )
+    require(result.returncode == 0, f"Fixture command failed: {evidence[-1]}")
+    return result.stdout.strip()
+
+
+def install_fixture_runtime(root, wheel, report):
+    with check(report, "installed_runtime_setup") as evidence:
+        uv = shutil.which("uv")
+        require(uv is not None, "uv required to install locked fixture dependencies")
+        evidence.update(wheel=str(wheel), wheel_sha256=digest(wheel), commands=[])
+        commands = evidence["commands"]
+        python = root / "installed" / "bin" / "python"
+        fixture_command(
+            [uv, "venv", "--python", sys.executable, python.parent.parent],
+            cwd=ROOT,
+            evidence=commands,
+        )
+        dependencies = fixture_command(
+            [
+                uv,
+                "export",
+                "--frozen",
+                "--no-dev",
+                "--no-emit-project",
+                "--format",
+                "requirements-txt",
+            ],
+            cwd=ROOT,
+            evidence=commands,
+        )
+        requirements = root / "requirements.txt"
+        requirements.write_text(dependencies + "\n")
+        fixture_command(
+            [
+                uv,
+                "pip",
+                "install",
+                "--python",
+                python,
+                "--require-hashes",
+                "-r",
+                requirements,
+            ],
+            cwd=ROOT,
+            evidence=commands,
+        )
+        fixture_command(
+            [uv, "pip", "install", "--python", python, "--no-deps", wheel],
+            cwd=ROOT,
+            evidence=commands,
+        )
+        return python
+
+
+async def installed_shared_flow(root, executable, report_path):
+    from fastmcp import Client
+    from fastmcp.exceptions import ToolError
+    from pydantic_core import to_jsonable_python
+
+    from omp_tandem.api import build_server
+    from omp_tandem.bridge import Bridge
+    from omp_tandem.runtime_identity import runtime_identity
+
+    identity = runtime_identity()
+    require(identity["distribution_origin"] == "installed_wheel", str(identity))
+    require(identity["exact_build"] != "unknown", "Installed RECORD not verified")
+    project, state = root / "project", root / "state"
+    project.mkdir(parents=True)
+    evidence = {"runtime_identity": identity, "commands": [], "flows": []}
+
+    def git(*args):
+        return fixture_command(
+            [
+                "/usr/bin/git",
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                *args,
+            ],
+            cwd=project,
+            evidence=evidence["commands"],
+        )
+
+    git("init", "-q")
+    (project / "module.txt").write_text("before\n")
+    git("add", "module.txt")
+    git("commit", "-qm", "fixture: initial")
+    bridges = [
+        Bridge(
+            state,
+            str(executable),
+            MODEL,
+            project_root=project,
+            channel_enabled=False,
+            webhook_enabled=False,
+            migrate_legacy=False,
+            work_participant=actor,
+        )
+        for actor in ("claude", "omp")
+    ]
+    author, reviewer = bridges
+
+    async def call(client, request, **presentation):
+        result = await client.call_tool(
+            "tandem_work", {"request": request, "view": "full", **presentation}
+        )
+        return to_jsonable_python(result.data)
+
+    async def mutate(client, identifier, action, **values):
+        current = await call(client, {"action": "get", "work_id": identifier})
+        return await call(
+            client,
+            {
+                "action": action,
+                "work_id": identifier,
+                "expected_revision": current["revision"],
+                "operation_id": str(uuid4()),
+                **values,
+            },
+        )
+
+    def counts():
+        with author.tasks.connect() as db:
+            return [
+                db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                for table in ("tasks", "work_attempts")
+            ]
+
+    try:
+        async with (
+            Client(build_server(author)) as claude,
+            Client(build_server(reviewer)) as omp,
+        ):
+            with Provider() as provider:
+                provider.configure(Path(os.environ["PI_CODING_AGENT_DIR"]))
+                for scenario in ("recovery", "clarification"):
+                    created = await call(
+                        claude,
+                        {
+                            "action": "create",
+                            "expected_revision": 0,
+                            "operation_id": str(uuid4()),
+                            "plan": {
+                                "title": "Installed runtime fixture",
+                                "goal": "Change one module",
+                                "acceptance": ["Exact committed module is reviewed"],
+                                "steps": [
+                                    {
+                                        "id": "change",
+                                        "title": "Change module",
+                                        "goal": "Write fixture output",
+                                        "owner": "claude",
+                                        "reviewer": "omp",
+                                        "owned_files": ["module.txt"],
+                                        "depends_on": [],
+                                        "acceptance": ["Committed output matches"],
+                                    }
+                                ],
+                            },
+                        },
+                    )
+                    identifier = created["work_id"]
+                    await mutate(claude, identifier, "agree")
+                    await mutate(omp, identifier, "agree")
+                    await mutate(claude, identifier, "claim", step_id="change")
+                    (project / "module.txt").write_text(scenario + "\n")
+                    git("add", "module.txt")
+                    git("commit", "-qm", "fixture: " + scenario)
+                    commit = git("rev-parse", "HEAD")
+                    sentinel = "WITHHELD-AUTHOR-INTERPRETATION-947513"
+                    submitted = await mutate(
+                        claude,
+                        identifier,
+                        "submit",
+                        step_id="change",
+                        commit=commit,
+                        note=sentinel,
+                        evidence=[sentinel],
+                    )
+                    submission = submitted["steps"][0]["submission"]["submission_id"]
+                    claim = (
+                        "tandem_work",
+                        {
+                            "request": {
+                                "action": "claim",
+                                "work_id": identifier,
+                                "step_id": "change",
+                                "expected_revision": submitted["revision"],
+                                "operation_id": str(uuid4()),
+                            }
+                        },
+                    )
+                    if scenario == "recovery":
+                        # Independently inspect exact committed bytes before saving the finding.
+                        observed = git("show", f"{commit}:module.txt")
+                        require(
+                            observed == scenario, "Committed fixture output differs"
+                        )
+                        steps = [
+                            claim,
+                            (
+                                "tandem_publish_artifact",
+                                {
+                                    "name": "finding",
+                                    "content": f"Read {commit}:module.txt = {observed}",
+                                },
+                            ),
+                            "Interrupted before structured finish.",
+                        ]
+                    else:
+                        steps = [
+                            claim,
+                            (
+                                "tandem_ask",
+                                {
+                                    "question": "Need an unchanged caller",
+                                    "context": json.dumps(
+                                        {"requested_paths": ["caller.py"]}
+                                    ),
+                                },
+                            ),
+                            (
+                                "tandem_finish",
+                                {
+                                    "outcome": "blocked",
+                                    "answer": "New snapshot required",
+                                    "summary": "Missing context",
+                                    "blockers": ["Need caller.py in new snapshot"],
+                                },
+                            ),
+                            "Ended.",
+                        ]
+                    provider.prepare(steps)
+                    started = to_jsonable_python(
+                        (
+                            await omp.call_tool(
+                                "tandem_start",
+                                {
+                                    "cwd": str(project),
+                                    "mode": "think",
+                                    "prompt": "Installed fixture " + scenario,
+                                    "execution": {
+                                        "thinking": "off",
+                                        "timeout_seconds": 60,
+                                    },
+                                },
+                            )
+                        ).data
+                    )
+                    result = await asyncio.to_thread(
+                        await_task, reviewer, started["task_id"]
+                    )
+                    require(
+                        sentinel not in json.dumps(provider.requests),
+                        "Author interpretation reached independent model input",
+                    )
+                    require(
+                        result["runtime_identity"]["distribution_origin"]
+                        == "installed_wheel",
+                        "Task result loaded checkout instead of wheel",
+                    )
+                    row = {
+                        "scenario": scenario,
+                        "work_id": identifier,
+                        "commit": commit,
+                        "submission_id": submission,
+                        "task_result": result,
+                        "withheld_input": True,
+                        "tool_results": provider.results(),
+                    }
+                    evidence["flows"].append(row)
+                    if scenario == "clarification":
+                        ask = json.loads(provider.results()["tandem_ask"])
+                        require(
+                            ask["clarification_requires_new_snapshot"],
+                            "Independent clarification did not require new snapshot",
+                        )
+                        try:
+                            await claude.call_tool(
+                                "tandem_reply",
+                                {
+                                    "task_id": started["task_id"],
+                                    "question_id": ask["question_id"],
+                                    "answer": sentinel,
+                                },
+                            )
+                        except ToolError as exc:
+                            row["late_reply_refused"] = str(exc)
+                        else:
+                            raise RuntimeError("Independent late reply was accepted")
+                        require(
+                            result["outcome"] == "blocked",
+                            "Clarification stage did not close blocked",
+                        )
+                        continue
+                    require(
+                        result["status"] == "failed"
+                        and result.get("outcome") != "success",
+                        "Missing finish failure was erased",
+                    )
+                    finding = next(
+                        item
+                        for item in result["provisional_artifacts"]
+                        if item["name"] == "finding"
+                    )
+                    attempt = result["execution"]["attempt"]["originated_claims"][0]
+                    require(
+                        attempt["settled"]["teardown_confirmed"],
+                        "Origin stop not confirmed",
+                    )
+                    baseline, requests = counts(), provider.total_requests
+                    cli = [
+                        sys.executable,
+                        "-I",
+                        "-m",
+                        "omp_tandem.work_daemon",
+                        "--project-root",
+                        project,
+                        "--state-dir",
+                        state,
+                    ]
+                    handoff = json.loads(
+                        fixture_command(
+                            [
+                                *cli,
+                                "successor",
+                                attempt["attempt_id"],
+                                "--host",
+                                author.channel.owner,
+                                "--principal",
+                                "claude",
+                                "--note",
+                                "Fixture report-only closure after stopped task",
+                            ],
+                            cwd=root,
+                            evidence=evidence["commands"],
+                        )
+                    )
+                    recovered = await mutate(
+                        claude, identifier, "recover", step_id="change"
+                    )
+                    require(
+                        recovered["recovery"]["attempt_id"] == attempt["attempt_id"],
+                        "Recovery changed claim",
+                    )
+                    require(
+                        sentinel not in json.dumps(recovered),
+                        "Recovery disclosed author input",
+                    )
+                    await mutate(
+                        claude,
+                        identifier,
+                        "report",
+                        step_id="change",
+                        submission_id=submission,
+                        resolution="success",
+                        note="Independent finding preserved before interruption",
+                        evidence=[finding["artifact_id"]],
+                    )
+                    compared = await mutate(
+                        claude,
+                        identifier,
+                        "compare",
+                        step_id="change",
+                        submission_id=submission,
+                    )
+                    require(
+                        sentinel in json.dumps(compared),
+                        "Comparison did not open author material",
+                    )
+                    accepted = await mutate(
+                        claude,
+                        identifier,
+                        "accept",
+                        step_id="change",
+                        submission_id=submission,
+                        note="Exact finding supports committed output",
+                        evidence=[finding["artifact_id"]],
+                    )
+                    require(
+                        accepted["status"] == "completed"
+                        and accepted["result"]["commit"] == commit,
+                        "Exact verdict did not complete fixture",
+                    )
+                    require(
+                        counts() == baseline and provider.total_requests == requests,
+                        "Administrative closure launched work",
+                    )
+                    row.update(
+                        successor=handoff,
+                        recovered_attempt_id=attempt["attempt_id"],
+                        accepted=accepted,
+                        closure_counts=baseline,
+                        closure_model_requests=0,
+                    )
+                    row["markdown"] = fixture_command(
+                        [*cli, "show", identifier, "--format", "markdown"],
+                        cwd=root,
+                        evidence=evidence["commands"],
+                    )
+        evidence["runtime_identity"] = runtime_identity()
+        evidence["boundaries"] = {
+            "mode": "manual/disclosed fixture; protocol checks are not OS confinement",
+            "transport": "FastMCP Client and real pinned OMP RPC plus localhost HTTP/SSE; successor/show CLI",
+            "claude_model": "not invoked; Claude seat driven through MCP",
+            "claude_cost": "unknown",
+            "external_models": "not exercised",
+            "application": "not_recorded; no apply or assessment command executed",
+        }
+        return evidence
+    finally:
+        for bridge in bridges:
+            await asyncio.to_thread(bridge.shutdown)
+        report_path.write_text(json.dumps(evidence, indent=2) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1632,12 +2071,23 @@ def main():
         type=Path,
         help="Use an existing binary; still require the official pinned digest",
     )
+    parser.add_argument(
+        "--installed-wheel",
+        type=Path,
+        help="Install this built wheel into a new temporary environment and exercise shared flow",
+    )
     args = parser.parse_args()
     report_path = args.report.resolve()
     report = {
         "schema_version": 1,
         "status": "running",
         "checks": [],
+        "provenance": {
+            "command": [sys.executable, *sys.argv],
+            "verifier_sha256": digest(Path(__file__)),
+            "lock_sha256": digest(ROOT / "uv.lock"),
+            "environment_boundary": "Provider processes use isolated_environment allowlist; installation uses uv locked dependencies before isolation",
+        },
         "platform": {
             "os": platform.system(),
             "release": platform.release(),
@@ -1679,6 +2129,11 @@ def main():
             }
         with tempfile.TemporaryDirectory(prefix="tandem-real-omp-") as temporary:
             root = Path(temporary).resolve()
+            installed_python = (
+                install_fixture_runtime(root, args.installed_wheel.resolve(), report)
+                if args.installed_wheel
+                else None
+            )
             with isolated_environment(root) as agent:
                 with check(report, "actual_omp_version") as evidence:
                     version = subprocess.run(
@@ -1706,6 +2161,29 @@ def main():
                     provider.configure(agent)
                     exercise(executable, root, provider, report)
                     helper_probe(executable, root, agent, provider, report)
+                if installed_python:
+                    with check(report, "installed_runtime_shared_flow") as evidence:
+                        child_report = root / "installed-result.json"
+                        evidence["commands"] = []
+                        try:
+                            fixture_command(
+                                [
+                                    installed_python,
+                                    "-I",
+                                    Path(__file__).resolve(),
+                                    "--installed-child",
+                                    root / "shared",
+                                    executable,
+                                    child_report,
+                                ],
+                                cwd=root,
+                                evidence=evidence["commands"],
+                            )
+                        finally:
+                            if child_report.is_file():
+                                evidence["result"] = json.loads(
+                                    child_report.read_text()
+                                )
         report["phase"] = "complete"
         report["status"] = "passed"
     except Exception as exc:
@@ -1735,4 +2213,11 @@ def main():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--installed-child":
+        asyncio.run(
+            installed_shared_flow(
+                Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4])
+            )
+        )
+        raise SystemExit(0)
     raise SystemExit(main())
