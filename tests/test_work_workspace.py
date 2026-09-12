@@ -233,6 +233,61 @@ class WorkWorkspaceTests(unittest.TestCase):
             },
         )
 
+    def test_preserve_captures_interrupted_workspace_on_its_composed_base(self):
+        plan = self.plan(
+            ("alpha", ["alpha.txt"], []),
+            ("edit", ["beta.txt", "new.txt"], ["alpha"]),
+        )
+        alpha = self.publish("alpha", {"alpha.txt": "accepted dependency\n"}, plan=plan)
+        attempt = self.attempt()
+        workspace = self.workspaces.prepare(attempt, plan, [alpha])
+        path = Path(workspace["path"])
+        # The worker was interrupted after staging one edit and writing another.
+        (path / "beta.txt").write_text("half done\n")
+        self.git(path, "add", "beta.txt")
+        (path / "new.txt").write_text("unstaged draft\n")
+        interrupted = dict(attempt, workspace=workspace["path"])
+        preserved = self.workspaces.preserve(interrupted, plan)
+        # The snapshot sits on the composed base (source plus the accepted
+        # dependency), not on the bare source commit, so the dependency's bytes
+        # are neither lost nor attributed to the interrupted step.
+        self.assertEqual(preserved["base_commit"], workspace["base_commit"])
+        self.assertNotEqual(preserved["base_commit"], self.source)
+        self.assertEqual(sorted(preserved["changed_files"]), ["beta.txt", "new.txt"])
+        self.assertEqual(
+            self.git(self.root, "show", preserved["commit"] + ":alpha.txt"),
+            b"accepted dependency\n",
+        )
+        self.assertEqual(
+            self.git(self.root, "show", preserved["commit"] + ":beta.txt"),
+            b"half done\n",
+        )
+        self.assertEqual(
+            self.git(self.root, "show", preserved["commit"] + ":new.txt"),
+            b"unstaged draft\n",
+        )
+        subject = self.git(
+            self.root, "log", "-1", "--format=%s", preserved["commit"]
+        ).decode()
+        self.assertIn("Preserve interrupted shared-work step edit", subject)
+        # Preservation is evidence, never a submission: the root is untouched
+        # and a later checkpoint continuation can start from the same bytes.
+        self.assert_root_unchanged(
+            self.source, b"", {"alpha.txt": b"alpha base\n", "beta.txt": b"beta base\n"}
+        )
+        continued = self.attempt()
+        continued["checkpoint"] = dict(preserved, step_id="edit", plan_revision=1)
+        resumed = self.workspaces.prepare(continued, plan, [alpha])
+        self.assertEqual(
+            (Path(resumed["path"]) / "new.txt").read_text(), "unstaged draft\n"
+        )
+        with self.assertRaises(ValueError):
+            self.workspaces.preserve(dict(attempt, workspace=None), plan)
+        with self.assertRaises(ValueError):
+            self.workspaces.preserve(
+                dict(self.attempt(), workspace=workspace["path"]), plan
+            )
+
     def test_checkpoint_rejects_stale_tampered_and_unowned_output_before_checkout(self):
         plan = self.plan(("edit", ["beta.txt"], []))
         saved = self.publish("edit", {"beta.txt": "checkpoint\n"}, plan=plan)

@@ -783,10 +783,14 @@ class WorkWorkspace:
         """
         if not attempt.get("workspace"):
             raise ValueError("Attempt has no retained workspace to preserve")
+        manifest = self.directory / f"{attempt['attempt_id']}.json"
+        if manifest.is_symlink() or not manifest.is_file():
+            raise ValueError("Attempt workspace manifest is missing")
+        prepared = json.loads(manifest.read_text(encoding="utf-8"))
         return self.finish(
             attempt,
             plan,
-            {"path": attempt["workspace"], "base_commit": attempt.get("source_commit")},
+            {"path": attempt["workspace"], "base_commit": prepared.get("base_commit")},
             message=f"Preserve interrupted shared-work step {attempt['step_id']}",
         )
 

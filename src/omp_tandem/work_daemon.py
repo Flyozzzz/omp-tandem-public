@@ -148,6 +148,22 @@ def parser():
         "operation", choices=("inspect", "begin", "resolve", "activate", "withdraw")
     )
     transition.add_argument("--attempt", help="Attempt to dispose (resolve)")
+    transition.add_argument(
+        "--proposal", help="Exact proposal id the operator observed (begin, activate)"
+    )
+    transition.add_argument(
+        "--transition",
+        help="Exact transition id the operator observed (resolve, activate, withdraw)",
+    )
+    transition.add_argument(
+        "--expected-revision",
+        type=int,
+        help="Card revision the operator observed; a moved card refuses the command",
+    )
+    transition.add_argument(
+        "--operation-id",
+        help="Stable id for this exact operator command; an exact repeat returns the recorded outcome without new effects",
+    )
     transition.add_argument("--note")
     transition.add_argument("--evidence", action="append")
     transition.add_argument(
@@ -420,7 +436,13 @@ def main(argv=None):
                 if args.operation == "inspect":
                     result = store.transition_inspect(args.work_id)
                 elif args.operation == "begin":
-                    result = store.transition_begin(args.work_id, note=args.note)
+                    result = store.transition_begin(
+                        args.work_id,
+                        note=args.note,
+                        proposal_id=args.proposal,
+                        expected_revision=args.expected_revision,
+                        operation_id=args.operation_id,
+                    )
                 elif args.operation == "resolve":
                     if not args.attempt:
                         raise ValueError("resolve requires --attempt")
@@ -432,12 +454,26 @@ def main(argv=None):
                         confirm_stopped=args.confirm_stopped,
                         abandon=args.abandon,
                         saved_commit=args.saved_commit,
+                        transition_id=args.transition,
+                        operation_id=args.operation_id,
                         workspaces=WorkWorkspace(scope),
                     )
                 elif args.operation == "activate":
-                    result = store.transition_activate(args.work_id, note=args.note)
+                    result = store.transition_activate(
+                        args.work_id,
+                        note=args.note,
+                        transition_id=args.transition,
+                        proposal_id=args.proposal,
+                        expected_revision=args.expected_revision,
+                        operation_id=args.operation_id,
+                    )
                 else:
-                    result = store.transition_withdraw(args.work_id, note=args.note)
+                    result = store.transition_withdraw(
+                        args.work_id,
+                        note=args.note,
+                        transition_id=args.transition,
+                        operation_id=args.operation_id,
+                    )
                 if args.operation != "inspect":
                     result = {
                         "work_id": result["work_id"],
@@ -448,6 +484,7 @@ def main(argv=None):
                         "transition": result.get("transition"),
                         "next_action": result.get("next_action"),
                         "operator_commands": result.get("operator_commands"),
+                        "replayed_operation": result.get("replayed_operation"),
                     }
             elif args.command == "assess":
                 view = store.perform(

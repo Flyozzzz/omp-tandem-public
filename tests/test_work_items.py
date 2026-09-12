@@ -84,7 +84,7 @@ def six_step_fixture(case, *, count=6):
         }
         for index in range(count)
     ]
-    case.change("propose", plan=contract)
+    case.revise(contract)
     case.agreed()
     first = case.reserve("step0", autonomous=False)
     case.submit(first)
@@ -161,9 +161,54 @@ class WorkItemsTests(unittest.TestCase):
 
     def agreed(self, *, parallel=False):
         if parallel:
-            self.change("propose", plan=plan(parallel=True))
+            self.revise(plan(parallel=True))
         self.change("agree", actor="claude")
         self.change("agree", actor="omp")
+
+    def pending(self):
+        return self.view()["proposal"]
+
+    def revise(self, new_plan, *, actor="claude"):
+        """Propose a differing plan and let the operator activate it (no attempts)."""
+        proposed = self.change("propose", actor=actor, plan=new_plan)
+        if proposed.get("proposal") is None:
+            return proposed
+        return self.activate(note="Operator activates the negotiated revision")
+
+    def begin(self, *, note="Operator begins the transition", **extra):
+        return self.store.transition_begin(
+            self.work_id, note=note, proposal_id=self.pending()["proposal_id"], **extra
+        )
+
+    def resolve(self, attempt_id, *, note="stopped", evidence=("inspected",), **extra):
+        return self.store.transition_resolve(
+            self.work_id,
+            attempt_id,
+            note=note,
+            evidence=list(evidence),
+            transition_id=self.view()["transition"]["transition_id"],
+            **extra,
+        )
+
+    def activate(self, *, note="activate", **extra):
+        view = self.view()
+        transition = view.get("transition")
+        return self.store.transition_activate(
+            self.work_id,
+            note=note,
+            transition_id=transition["transition_id"] if transition else None,
+            proposal_id=(view.get("proposal") or {}).get("proposal_id"),
+            **extra,
+        )
+
+    def withdraw(self, *, note="withdraw", **extra):
+        transition = self.view().get("transition")
+        return self.store.transition_withdraw(
+            self.work_id,
+            note=note,
+            transition_id=transition["transition_id"] if transition else None,
+            **extra,
+        )
 
     def authorize(self, **changes):
         return self.store.authorize(
@@ -1200,7 +1245,7 @@ class WorkItemsTests(unittest.TestCase):
         self.assertEqual(self.view()["agreements"], before["agreements"])
         modified = copy.deepcopy(before["plan"])
         modified["goal"] = "Different substantive requirement"
-        self.change("propose", plan=modified)
+        self.revise(modified)
         self.assertEqual(self.view()["agreements"], {})
         self.assertEqual(self.view()["status"], "draft")
 
@@ -1303,7 +1348,7 @@ class WorkItemsTests(unittest.TestCase):
         self.assertIsNotNone(previous["steps"][0]["acceptance"])
         declaration = plan()
         declaration["steps"][0]["review_context_paths"] = ["caller.py", "caller.py"]
-        revised = self.change("propose", plan=declaration)
+        revised = self.revise(declaration)
         self.assertEqual(revised["plan_revision"], previous["plan_revision"] + 1)
         self.assertEqual(revised["agreements"], {})
         self.assertEqual(
@@ -1432,21 +1477,18 @@ class WorkItemsTests(unittest.TestCase):
         self.assertIsNotNone(pending["proposal"])
         self.assertEqual(self.view()["steps"][0]["state"], "running")
         self.store.authenticate(review["token"])
-        self.store.transition_begin(self.work_id, note="Operator begins the transition")
+        self.begin(note="Operator begins the transition")
         with self.assertRaises(ValueError):
             self.verdict(review)
         self.assertEqual(self.view()["steps"][0]["state"], "recovery_required")
         self.assertIsNone(self.view()["authorization"]["revoked_at"])
         self.store.confirm_stopped(review["attempt_id"])
-        self.store.transition_resolve(
-            self.work_id,
+        self.resolve(
             review["attempt_id"],
             note="Managed reviewer torn down by the supervisor",
             evidence=["supervisor teardown confirmed"],
         )
-        activated = self.store.transition_activate(
-            self.work_id, note="Activate revision"
-        )
+        activated = self.activate(note="Activate revision")
         self.assertEqual(activated["plan_revision"], before["plan_revision"] + 1)
         self.assertIsNotNone(activated["authorization"]["revoked_at"])
         with self.assertRaises(ValueError):
@@ -1680,7 +1722,7 @@ class WorkItemsTests(unittest.TestCase):
         )
         corrected = plan()
         corrected["steps"][0]["goal"] = "Implement backend using corrected schema"
-        proposed = self.change("propose", plan=corrected)
+        proposed = self.revise(corrected)
         carried = proposed["steps"][0]["blockers"][0]
         self.assertEqual(carried["blocker_id"], original["blocker_id"])
         self.assertEqual(carried["origin"], {"plan_revision": 1, "step_id": "backend"})
@@ -1721,7 +1763,7 @@ class WorkItemsTests(unittest.TestCase):
             resolved["resolution_history"][0]["note"], "Approved schema supplied"
         )
         corrected["goal"] = "Deliver revised independently reviewed output"
-        revised = self.change("propose", plan=corrected)["steps"][0]["blockers"][0]
+        revised = self.revise(corrected)["steps"][0]["blockers"][0]
         self.assertEqual(revised["origin"], original["origin"])
         self.assertEqual(revised["resolution_history"], resolved["resolution_history"])
         self.assertEqual(revised["carried_from"][:1], carried["carried_from"])
@@ -1750,7 +1792,7 @@ class WorkItemsTests(unittest.TestCase):
         replacement = plan()
         replacement["steps"] = replacement["steps"][1:]
         replacement["steps"][0]["depends_on"] = []
-        proposed = self.change("propose", plan=replacement)
+        proposed = self.revise(replacement)
         self.assertEqual(proposed["blockers"][0]["blocker_id"], original["blocker_id"])
         self.assertEqual(proposed["blockers"][0]["origin"], original["origin"])
         rendered = self.store.report_markdown(proposed, actor="claude")
@@ -1765,8 +1807,8 @@ class WorkItemsTests(unittest.TestCase):
         with self.assertRaises(WorkConflict):
             self.change("claim", step_id="integration")
         replacement["goal"] = "Corrective replacement without service"
-        self.change("propose", plan=replacement)
-        self.change("propose", plan=replacement)
+        self.revise(replacement)
+        self.revise(replacement)
         orphan = self.view()["blockers"][0]
         self.assertEqual(len(self.view()["blockers"]), 1)
         self.assertEqual(len(orphan["carried_from"]), 2)
@@ -1899,7 +1941,10 @@ class WorkItemsTests(unittest.TestCase):
         )
         changed = plan()
         changed["goal"] = "Corrected plan awaiting inspection"
+        # The reserved attempt keeps the proposal pending; the operator's begin
+        # fences it, and activation waits for its disposition below.
         self.change("propose", plan=changed)
+        self.begin(note="Renegotiate while the legacy card migrates")
         with sqlite3.connect(self.store.database) as db:
             card = json.loads(
                 db.execute(
@@ -1945,14 +1990,11 @@ class WorkItemsTests(unittest.TestCase):
         with sqlite3.connect(self.store.database) as db:
             self.assertEqual(list(db.iterdump()), before)
         self.store.confirm_stopped(attempt["attempt_id"])
-        self.change(
-            "reconcile",
-            actor="operator",
-            step_id="backend",
-            resolution="retry",
-            note="Process stopped",
-            evidence=["Exit observed"],
+        self.resolve(
+            attempt["attempt_id"], note="Process stopped", evidence=["Exit observed"]
         )
+        activated = self.activate(note="Corrected plan takes effect")
+        self.assertEqual(activated["plan_revision"], 2)
         self.agreed()
         self.assertEqual(self.store.ready(self.work_id), [])
         self.assertEqual(
@@ -2288,10 +2330,10 @@ class WorkItemsTests(unittest.TestCase):
         self.assertIsNone(withdrawn["proposal"])
         self.change("propose", plan=revised)
         with self.assertRaisesRegex(ValueError, "transition_not_begun"):
-            self.store.transition_activate(self.work_id, note="too early")
+            self.activate(note="too early")
         with self.assertRaises(ValueError):
-            self.store.transition_begin(self.work_id, note="x", actor="claude")
-        begun = self.store.transition_begin(self.work_id, note="Begin renegotiation")
+            self.begin(note="x", actor="claude")
+        begun = self.begin(note="Begin renegotiation")
         self.assertEqual(begun["transition"]["phase"], "stopping")
         self.assertEqual(
             {
@@ -2310,18 +2352,13 @@ class WorkItemsTests(unittest.TestCase):
         with self.assertRaises((WorkConflict, ValueError)):
             self._claim("omp", {"host_owner": "h"}, step_id="frontend")
         with self.assertRaisesRegex(ValueError, "stop_unconfirmed"):
-            self.store.transition_resolve(
-                self.work_id, managed["attempt_id"], note="n", evidence=["e"]
-            )
+            self.resolve(managed["attempt_id"], note="n", evidence=["e"])
         with self.assertRaisesRegex(ValueError, "attestation_required"):
-            self.store.transition_resolve(
-                self.work_id, manual["attempt_id"], note="n", evidence=["e"]
-            )
+            self.resolve(manual["attempt_id"], note="n", evidence=["e"])
         with self.assertRaisesRegex(ValueError, "inventory_not_disposed"):
-            self.store.transition_activate(self.work_id, note="not yet")
+            self.activate(note="not yet")
         self.store.confirm_stopped(managed["attempt_id"])
-        resolved = self.store.transition_resolve(
-            self.work_id,
+        resolved = self.resolve(
             managed["attempt_id"],
             note="Supervisor tore the worker down; workspace inspected",
             evidence=["teardown log"],
@@ -2333,11 +2370,8 @@ class WorkItemsTests(unittest.TestCase):
         self.assertEqual(entry["stop"]["source"], "supervisor_confirmed")
         self.assertIsNotNone(entry["saved"]["capture_failure"])
         with self.assertRaisesRegex(ValueError, "attempt_already_disposed"):
-            self.store.transition_resolve(
-                self.work_id, managed["attempt_id"], note="n", evidence=["e"]
-            )
-        self.store.transition_resolve(
-            self.work_id,
+            self.resolve(managed["attempt_id"], note="n", evidence=["e"])
+        self.resolve(
             manual["attempt_id"],
             note="Manual holder stopped; no background processes",
             evidence=["operator inspection"],
@@ -2345,7 +2379,7 @@ class WorkItemsTests(unittest.TestCase):
         )
         ready = self.view()
         self.assertEqual(ready["transition"]["phase"], "ready")
-        activated = self.store.transition_activate(self.work_id, note="Activate")
+        activated = self.activate(note="Activate")
         self.assertEqual(activated["plan_revision"], before["plan_revision"] + 1)
         self.assertEqual(activated["plan"], revised)
         self.assertEqual(activated["agreements"], {})
@@ -2385,10 +2419,8 @@ class WorkItemsTests(unittest.TestCase):
         revised = json.loads(json.dumps(before["plan"]))
         revised["steps"][1]["goal"] = "Changed"
         self.change("propose", plan=revised)
-        self.store.transition_begin(self.work_id, note="begin")
-        withdrawn = self.store.transition_withdraw(
-            self.work_id, note="Keep the old plan"
-        )
+        self.begin(note="begin")
+        withdrawn = self.withdraw(note="Keep the old plan")
         self.assertIsNone(withdrawn["proposal"])
         self.assertIsNone(withdrawn["transition"])
         self.assertEqual(withdrawn["plan_revision"], before["plan_revision"])
@@ -2403,16 +2435,18 @@ class WorkItemsTests(unittest.TestCase):
             self._claim("claude", {"host_owner": "claude-host"}, step_id="frontend")
         # A new proposal can still be negotiated; abandonment records a blocker.
         self.change("propose", plan=revised)
-        self.store.transition_begin(self.work_id, note="again")
-        self.store.transition_resolve(
-            self.work_id,
+        self.begin(note="again")
+        self.resolve(
             manual["attempt_id"],
             note="Work discarded",
             evidence=["nothing to keep"],
             confirm_stopped=True,
             abandon=True,
         )
-        activated = self.store.transition_activate(self.work_id, note="activate")
+        # Abandoning possibly-effectful work pauses the card; activation keeps it.
+        self.assertEqual(self.view()["status"], "paused")
+        activated = self.activate(note="activate")
+        self.assertEqual(activated["status"], "paused")
         step = next(item for item in activated["steps"] if item["id"] == "frontend")
         self.assertTrue(step["blockers"])
         self.assertEqual(
@@ -2429,10 +2463,9 @@ class WorkItemsTests(unittest.TestCase):
         revised = json.loads(json.dumps(self.view()["plan"]))
         revised["steps"][0]["goal"] = "Backend with a wider contract"
         self.change("propose", plan=revised)
-        self.store.transition_begin(self.work_id, note="begin")
+        self.begin(note="begin")
         with self.assertRaises(ValueError):
-            self.store.transition_resolve(
-                self.work_id,
+            self.resolve(
                 claim["attempt_id"],
                 note="wrong commit",
                 evidence=["e"],
@@ -2440,8 +2473,7 @@ class WorkItemsTests(unittest.TestCase):
                 saved_commit="f" * 40,
                 workspaces=WorkWorkspace(self.scope),
             )
-        resolved = self.store.transition_resolve(
-            self.work_id,
+        resolved = self.resolve(
             claim["attempt_id"],
             note="Stopped; intermediate work committed",
             evidence=["commit inspected"],
@@ -2454,7 +2486,7 @@ class WorkItemsTests(unittest.TestCase):
         ]
         self.assertEqual(preserved["commit"], saved)
         self.assertEqual(preserved["changed_files"], ["backend.py"])
-        activated = self.store.transition_activate(self.work_id, note="activate")
+        activated = self.activate(note="activate")
         checkpoint = activated["steps"][0]["checkpoint"]
         self.assertEqual(checkpoint["commit"], saved)
         self.assertEqual(checkpoint["plan_revision"], activated["plan_revision"])
@@ -2473,9 +2505,8 @@ class WorkItemsTests(unittest.TestCase):
         shrunk = json.loads(json.dumps(self.view()["plan"]))
         shrunk["steps"][0]["owned_files"] = ["other.py"]
         self.change("propose", plan=shrunk)
-        self.store.transition_begin(self.work_id, note="begin")
-        self.store.transition_resolve(
-            self.work_id,
+        self.begin(note="begin")
+        self.resolve(
             second["attempt_id"],
             note="stop",
             evidence=["e"],
@@ -2483,7 +2514,7 @@ class WorkItemsTests(unittest.TestCase):
             saved_commit=saved,
             workspaces=WorkWorkspace(self.scope),
         )
-        blocked = self.store.transition_activate(self.work_id, note="activate")
+        blocked = self.activate(note="activate")
         self.assertIsNone(blocked["steps"][0]["checkpoint"])
         self.assertEqual(
             blocked["transition_history"][-1]["continuation"][second["attempt_id"]][
@@ -2504,10 +2535,13 @@ class WorkItemsTests(unittest.TestCase):
         ]
         removed["steps"][-1]["depends_on"] = ["backend"]
         self.change("propose", plan=removed)
-        self.store.transition_begin(self.work_id, note="begin")
+        self.begin(note="begin")
         # A crash or response loss after begin: a fresh store sees the same
         # durable transition, refuses activation and grants nothing new.
         reopened = WorkStore(self.store.database, self.scope)
+        transition_id = reopened.perform(
+            {"action": "get", "work_id": self.work_id}, actor="operator"
+        )["transition"]["transition_id"]
         inspected = reopened.transition_inspect(self.work_id)
         self.assertEqual(inspected["transition"]["phase"], "stopping")
         self.assertEqual(
@@ -2515,7 +2549,9 @@ class WorkItemsTests(unittest.TestCase):
             "operator attestation of the manual stop (--confirm-stopped) and disposition",
         )
         with self.assertRaisesRegex(ValueError, "inventory_not_disposed"):
-            reopened.transition_activate(self.work_id, note="x")
+            reopened.transition_activate(
+                self.work_id, note="x", transition_id=transition_id
+            )
         with self.assertRaises(ValueError):
             reopened.authenticate(manual["token"])
         reopened.transition_resolve(
@@ -2524,8 +2560,11 @@ class WorkItemsTests(unittest.TestCase):
             note="stopped",
             evidence=["inspected"],
             confirm_stopped=True,
+            transition_id=transition_id,
         )
-        activated = reopened.transition_activate(self.work_id, note="activate")
+        activated = reopened.transition_activate(
+            self.work_id, note="activate", transition_id=transition_id
+        )
         self.assertEqual(
             [step["id"] for step in activated["steps"]], ["backend", "integration"]
         )
@@ -2537,6 +2576,196 @@ class WorkItemsTests(unittest.TestCase):
             "not_available",
         )
 
+    def test_idle_proposal_stays_pending_and_operator_binds_the_exact_proposal(self):
+        self.agreed()
+        before = self.view()
+        revised = json.loads(json.dumps(before["plan"]))
+        revised["goal"] = "Nothing executes, yet activation is still an operator act"
+        pending = self.change("propose", plan=revised)
+        # No attempts run, but the proposal is still only a proposal.
+        self.assertEqual(pending["plan"], before["plan"])
+        self.assertEqual(pending["plan_revision"], before["plan_revision"])
+        self.assertEqual(pending["agreements"], before["agreements"])
+        self.assertEqual(pending["proposal"]["preview"]["attempts"], [])
+        commands = self.store.transition_inspect(self.work_id)["commands"]
+        activate_commands = [
+            item for item in commands if " activate " in item["command"]
+        ]
+        self.assertEqual(len(activate_commands), 1)
+        self.assertIn(
+            f"--proposal {pending['proposal']['proposal_id']}",
+            activate_commands[0]["command"],
+        )
+        self.assertIn(
+            f"--expected-revision {pending['revision']}",
+            activate_commands[0]["command"],
+        )
+        proposal_id = pending["proposal"]["proposal_id"]
+        # A retained command for another proposal, an outdated observation and a
+        # missing binding are all refused before anything changes.
+        with self.assertRaisesRegex(ValueError, "proposal_mismatch"):
+            self.store.transition_activate(
+                self.work_id, note="x", proposal_id="not-this-proposal"
+            )
+        with self.assertRaisesRegex(ValueError, "proposal_mismatch"):
+            self.store.transition_activate(self.work_id, note="x")
+        with self.assertRaisesRegex(WorkConflict, "Expected revision"):
+            self.store.transition_activate(
+                self.work_id,
+                note="x",
+                proposal_id=proposal_id,
+                expected_revision=pending["revision"] - 1,
+            )
+        with self.assertRaisesRegex(ValueError, "proposal_mismatch"):
+            self.store.transition_begin(
+                self.work_id, note="x", proposal_id="not-this-proposal"
+            )
+        with self.assertRaisesRegex(WorkConflict, "Expected revision"):
+            self.store.transition_begin(
+                self.work_id,
+                note="x",
+                proposal_id=proposal_id,
+                expected_revision=pending["revision"] + 5,
+            )
+        self.assertEqual(self.view()["plan_revision"], before["plan_revision"])
+        self.assertIsNotNone(self.view()["proposal"])
+        # A proposal whose base revision no longer matches cannot be activated.
+        with sqlite3.connect(self.store.database) as db:
+            card = json.loads(
+                db.execute(
+                    "SELECT card FROM work_cards WHERE work_id=?", (self.work_id,)
+                ).fetchone()[0]
+            )
+            card["proposal"]["base_plan_revision"] = card["plan_revision"] - 1
+            db.execute(
+                "UPDATE work_cards SET card=? WHERE work_id=?",
+                (json.dumps(card), self.work_id),
+            )
+        self.store = WorkStore(self.store.database, self.scope)
+        with self.assertRaisesRegex(ValueError, "proposal_stale"):
+            self.store.transition_activate(
+                self.work_id, note="x", proposal_id=proposal_id
+            )
+        with self.assertRaisesRegex(ValueError, "proposal_stale"):
+            self.store.transition_begin(self.work_id, note="x", proposal_id=proposal_id)
+        with sqlite3.connect(self.store.database) as db:
+            card["proposal"]["base_plan_revision"] = card["plan_revision"]
+            db.execute(
+                "UPDATE work_cards SET card=? WHERE work_id=?",
+                (json.dumps(card), self.work_id),
+            )
+        self.store = WorkStore(self.store.database, self.scope)
+        # The one-operation activation replays by operation id without a second
+        # activation, and the exact proposal id is what it binds to.
+        activated = self.store.transition_activate(
+            self.work_id,
+            note="Activate the idle proposal",
+            proposal_id=proposal_id,
+            expected_revision=pending["revision"],
+            operation_id="activate-once",
+        )
+        self.assertEqual(activated["plan_revision"], before["plan_revision"] + 1)
+        self.assertEqual(activated["plan"], revised)
+        self.assertEqual(activated["agreements"], {})
+        self.assertIsNone(activated["proposal"])
+        self.assertEqual(activated["transition_history"][-1]["phase"], "activated")
+        self.assertEqual(
+            activated["transition_history"][-1]["proposal_id"], proposal_id
+        )
+        replayed = self.store.transition_activate(
+            self.work_id,
+            note="Activate the idle proposal",
+            proposal_id=proposal_id,
+            operation_id="activate-once",
+        )
+        self.assertEqual(replayed["replayed_operation"]["operation"], "activate")
+        self.assertEqual(replayed["plan_revision"], activated["plan_revision"])
+        self.assertEqual(len(replayed["transition_history"]), 1)
+        with self.assertRaisesRegex(ValueError, "no_pending_proposal"):
+            self.store.transition_activate(
+                self.work_id, note="again", proposal_id=proposal_id
+            )
+
+    def test_begin_replays_by_operation_id_and_inspect_never_leaks_credentials(self):
+        self.agreed(parallel=True)
+        self.authorize()
+        managed = self.reserve("backend")
+        manual = self._claim(
+            "claude", {"host_owner": "claude-host"}, step_id="frontend"
+        )
+        # The manual holder records its intent before the plan is renegotiated.
+        self.change(
+            "submit",
+            actor="claude",
+            token=manual["token"],
+            step_id="frontend",
+            commit=self._git_commit("frontend.py", "intent\n", "frontend intent"),
+            note="Frontend intent: half of the widget",
+            evidence=["widget test"],
+        )
+        revised = json.loads(json.dumps(self.view()["plan"]))
+        revised["steps"][1]["goal"] = "Changed frontend"
+        pending = self.change("propose", plan=revised)
+        history_before = len(pending["transition_history"])
+        proposal_id = pending["proposal"]["proposal_id"]
+        begun = self.store.transition_begin(
+            self.work_id,
+            note="Begin",
+            proposal_id=proposal_id,
+            expected_revision=pending["revision"],
+            operation_id="begin-once",
+        )
+        replayed = self.store.transition_begin(
+            self.work_id,
+            note="Begin",
+            proposal_id=proposal_id,
+            operation_id="begin-once",
+        )
+        self.assertEqual(replayed["replayed_operation"]["operation"], "begin")
+        self.assertEqual(
+            replayed["transition"]["transition_id"],
+            begun["transition"]["transition_id"],
+        )
+        self.assertEqual(len(replayed["transition_history"]), history_before)
+        with self.assertRaisesRegex(ValueError, "transition_in_progress"):
+            self.store.transition_begin(
+                self.work_id, note="Begin twice", proposal_id=proposal_id
+            )
+        self.store.confirm_stopped(managed["attempt_id"])
+        # An operator note that quotes a credential must not leak it through the
+        # operator's own inspect view any more than through an ordinary get.
+        self.resolve(
+            managed["attempt_id"],
+            note=f"stopped; worker log quoted {managed['token']}",
+            evidence=["e"],
+        )
+        self.resolve(
+            manual["attempt_id"],
+            note="stopped",
+            evidence=[f"holder pasted {manual['token']}"],
+            confirm_stopped=True,
+        )
+        inspected = self.store.transition_inspect(self.work_id)
+        serialized = json.dumps(inspected)
+        for secret in (managed["token"], manual["token"]):
+            self.assertNotIn(secret, serialized)
+        self.assertIn("[REDACTED]", serialized)
+        self.assertNotIn('"token"', serialized)
+        entries = {
+            item["attempt_id"]: item for item in inspected["transition"]["inventory"]
+        }
+        self.assertEqual(
+            entries[manual["attempt_id"]]["saved"]["submission_intent"]["answer"],
+            "Frontend intent: half of the widget",
+        )
+        self.assertEqual(
+            entries[managed["attempt_id"]]["stop"]["source"], "supervisor_confirmed"
+        )
+        self.assertEqual(
+            entries[manual["attempt_id"]]["stop"]["source"], "operator_attested"
+        )
+        self.assertNotIn(manual["token"], json.dumps(self.view()))
+
     def test_unknown_managed_cost_pauses_and_activation_keeps_the_pause(self):
         self.agreed()
         self.authorize()
@@ -2544,14 +2773,12 @@ class WorkItemsTests(unittest.TestCase):
         revised = json.loads(json.dumps(self.view()["plan"]))
         revised["steps"][0]["goal"] = "Changed"
         self.change("propose", plan=revised)
-        self.store.transition_begin(self.work_id, note="begin")
+        self.begin(note="begin")
         self.store.confirm_stopped(managed["attempt_id"])
-        resolved = self.store.transition_resolve(
-            self.work_id, managed["attempt_id"], note="stopped", evidence=["e"]
-        )
+        resolved = self.resolve(managed["attempt_id"], note="stopped", evidence=["e"])
         self.assertEqual(resolved["status"], "paused")
         self.assertTrue(resolved["authorization"]["unknown_cost"])
-        activated = self.store.transition_activate(self.work_id, note="activate")
+        activated = self.activate(note="activate")
         self.assertEqual(activated["status"], "paused")
         self.assertEqual(activated["plan_revision"], 2)
 
@@ -2842,7 +3069,7 @@ class IndependentReviewTests(WorkItemsTests):
         blocker = self.view()["steps"][0]["blockers"][-1]
         revised = plan()
         revised["goal"] = "Revised requirements need a new implementation"
-        self.change("propose", plan=revised)
+        self.revise(revised)
         self.agreed()
         self.change(
             "unblock",
@@ -2892,7 +3119,7 @@ class IndependentReviewTests(WorkItemsTests):
         historical = self._waived_shell_review()
         revised = plan()
         revised["steps"][0]["acceptance"] = ["Revised observable behavior"]
-        self.change("propose", plan=revised)
+        self.revise(revised)
         self.agreed()
         self.authorize(allow_shell=True)
         self.submit(self.reserve())
@@ -3077,6 +3304,51 @@ class IndependentReviewTests(WorkItemsTests):
                 for item in unbound["next_actions"]
             )
         )
+
+    def test_transition_inventory_withholds_author_material_from_independent_review(
+        self,
+    ):
+        self.agreed(parallel=True)
+        manual = self._claim("omp", {"host_owner": "omp-host"}, step_id="backend")
+        self.change(
+            "submit",
+            actor="omp",
+            token=manual["token"],
+            step_id="backend",
+            commit=self._git_commit("backend.py", "intent\n", "backend intent"),
+            note=self.SENTINEL,
+            evidence=["author evidence"],
+        )
+        revised = json.loads(json.dumps(self.view()["plan"]))
+        revised["steps"][0]["goal"] = "Backend, revised"
+        self.change("propose", plan=revised)
+        self.begin(note="begin")
+        self.resolve(
+            manual["attempt_id"],
+            note="Holder stopped; intent kept as evidence",
+            evidence=["operator inspection"],
+            confirm_stopped=True,
+        )
+        activated = self.activate(note="activate")
+        self.assertIn(self.SENTINEL, json.dumps(activated["transition_history"]))
+        self.change("agree", actor="claude")
+        self.change("agree", actor="omp")
+        self.authorize()
+        self.submit(self.reserve())
+        review = self.reserve(actor="claude", kind="review")
+        hidden = self._bound_get(review)
+        self.assertEqual(hidden["visibility"], "independent_stage")
+        self.assertNotIn(self.SENTINEL, json.dumps(hidden))
+        self.assertNotIn("author evidence", json.dumps(hidden))
+        saved = next(
+            entry["saved"]
+            for entry in hidden["transition_history"][-1]["inventory"].values()
+        )
+        self.assertIn("withheld", json.dumps(saved["submission_intent"]))
+        self.assertNotIn(self.SENTINEL, json.dumps(self._bound_history(review)))
+        self.report(review)
+        self.change("compare", actor="claude", token=review["token"], step_id="backend")
+        self.assertIn(self.SENTINEL, json.dumps(self._bound_get(review)))
 
     def test_presentation_preserves_independent_disclosure(self):
         from omp_tandem.work_access import perform_work

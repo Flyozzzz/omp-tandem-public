@@ -94,6 +94,25 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         return to_jsonable_python(result.data)
 
+    async def revise(self, client, work_id, new_plan):
+        """Propose a differing plan; the operator activates it through the CLI."""
+        proposed = await self.mutate(client, work_id, "propose", plan=new_plan)
+        if not proposed.get("proposal"):
+            return proposed
+        activated = await self.daemon(
+            "transition",
+            work_id,
+            "activate",
+            "--proposal",
+            proposed["proposal"]["proposal_id"],
+            "--expected-revision",
+            str(proposed["revision"]),
+            "--note",
+            "Operator activates the negotiated revision",
+        )
+        self.assertEqual(activated.returncode, 0, activated.stderr)
+        return await self.call(client, {"action": "get", "work_id": work_id})
+
     async def mutate(self, client, work_id, action, **values):
         view = await self.call(client, {"action": "get", "work_id": work_id})
         return await self.call(
@@ -683,7 +702,7 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         original = blocked["steps"][0]["blockers"][0]
         replacement = blocked["plan"]
         replacement["steps"][0]["id"] = "replacement"
-        await self.mutate(self.claude, identifier, "propose", plan=replacement)
+        await self.revise(self.claude, identifier, replacement)
         await self.mutate(self.claude, identifier, "agree")
         await self.mutate(self.omp, identifier, "agree")
         shown = await self.daemon("show", identifier, "--view", "full")
@@ -1632,11 +1651,24 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             view["steps"][0]["attempt"]["attempt_id"], claimed["claim"]["attempt_id"]
         )
         begun = await self.daemon(
-            "transition", identifier, "begin", "--note", "renegotiate"
+            "transition",
+            identifier,
+            "begin",
+            "--proposal",
+            pending["proposal"]["proposal_id"],
+            "--note",
+            "renegotiate",
         )
         self.assertEqual(begun.returncode, 0, begun.stderr)
+        transition_id = json.loads(begun.stdout)["transition"]["transition_id"]
         activate = await self.daemon(
-            "transition", identifier, "activate", "--note", "x"
+            "transition",
+            identifier,
+            "activate",
+            "--transition",
+            transition_id,
+            "--note",
+            "x",
         )
         self.assertNotEqual(activate.returncode, 0)
         self.assertIn("inventory_not_disposed", activate.stderr)
@@ -1649,6 +1681,8 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "transition",
             identifier,
             "resolve",
+            "--transition",
+            transition_id,
             "--attempt",
             claimed["claim"]["attempt_id"],
             "--confirm-stopped",
@@ -1659,7 +1693,13 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resolved.returncode, 0, resolved.stderr)
         activated = await self.daemon(
-            "transition", identifier, "activate", "--note", "go"
+            "transition",
+            identifier,
+            "activate",
+            "--transition",
+            transition_id,
+            "--note",
+            "go",
         )
         self.assertEqual(activated.returncode, 0, activated.stderr)
         view = await self.call(self.claude, {"action": "get", "work_id": identifier})
@@ -1702,7 +1742,7 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "acceptance": ["Both parts integrated."],
             }
         )
-        await self.mutate(self.claude, identifier, "propose", plan=plan)
+        await self.revise(self.claude, identifier, plan)
         await self.mutate(self.claude, identifier, "agree")
         await self.mutate(self.omp, identifier, "agree")
         view = await self.call(self.claude, {"action": "get", "work_id": identifier})
@@ -1739,16 +1779,73 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         inspect = await self.daemon("transition", identifier, "inspect")
         self.assertEqual(inspect.returncode, 0, inspect.stderr)
         self.assertEqual(len(json.loads(inspect.stdout)["commands"]), 2)
+        stale = await self.daemon(
+            "transition",
+            identifier,
+            "begin",
+            "--proposal",
+            "00000000-0000-4000-8000-000000000000",
+            "--note",
+            "retained command for another proposal",
+        )
+        self.assertNotEqual(stale.returncode, 0)
+        self.assertIn("proposal_mismatch", stale.stderr)
+        moved = await self.daemon(
+            "transition",
+            identifier,
+            "begin",
+            "--proposal",
+            pending["proposal"]["proposal_id"],
+            "--expected-revision",
+            str(pending["revision"] - 1),
+            "--note",
+            "observed an older card",
+        )
+        self.assertNotEqual(moved.returncode, 0)
+        self.assertIn("revision", moved.stderr)
         begun = await self.daemon(
-            "transition", identifier, "begin", "--note", "renegotiate"
+            "transition",
+            identifier,
+            "begin",
+            "--proposal",
+            pending["proposal"]["proposal_id"],
+            "--operation-id",
+            "begin-once",
+            "--note",
+            "renegotiate",
         )
         self.assertEqual(begun.returncode, 0, begun.stderr)
+        transition_id = json.loads(begun.stdout)["transition"]["transition_id"]
+        repeated = await self.daemon(
+            "transition",
+            identifier,
+            "begin",
+            "--proposal",
+            pending["proposal"]["proposal_id"],
+            "--operation-id",
+            "begin-once",
+            "--note",
+            "renegotiate",
+        )
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        self.assertEqual(
+            json.loads(repeated.stdout)["transition"]["transition_id"], transition_id
+        )
+        self.assertTrue(json.loads(repeated.stdout)["replayed_operation"])
         for client, step in ((self.claude, "change"), (self.omp, "docs")):
             with self.assertRaises(ToolError):
                 await self.mutate(client, identifier, "heartbeat", step_id=step)
         with self.assertRaises(ToolError):
             await self.mutate(self.claude, identifier, "claim", step_id="change")
-        stalled = await self.daemon("transition", identifier, "activate", "--note", "x")
+        stalled = await self.daemon(
+            "transition",
+            identifier,
+            "activate",
+            "--transition",
+            transition_id,
+            "--note",
+            "x",
+        )
         self.assertNotEqual(stalled.returncode, 0)
         report = await self.daemon("show", identifier, "--format", "markdown")
         self.assertIn("awaiting stop evidence and operator disposition", report.stdout)
@@ -1756,6 +1853,8 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "transition",
             identifier,
             "resolve",
+            "--transition",
+            transition_id,
             "--attempt",
             first["claim"]["attempt_id"],
             "--confirm-stopped",
@@ -1771,6 +1870,8 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "transition",
             identifier,
             "resolve",
+            "--transition",
+            transition_id,
             "--attempt",
             second["claim"]["attempt_id"],
             "--confirm-stopped",
@@ -1781,7 +1882,13 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resolved.returncode, 0, resolved.stderr)
         activated = await self.daemon(
-            "transition", identifier, "activate", "--note", "go"
+            "transition",
+            identifier,
+            "activate",
+            "--transition",
+            transition_id,
+            "--note",
+            "go",
         )
         self.assertEqual(activated.returncode, 0, activated.stderr)
         after = await self.call(self.claude, {"action": "get", "work_id": identifier})
