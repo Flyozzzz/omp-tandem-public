@@ -225,7 +225,7 @@ class CollaborationTests(RpcHarness):
         recorded = [
             item
             for item in result["provisional_artifacts"]
-            if item["name"] == "check-run"
+            if item["name"] == "tandem:check-run"
         ]
         self.assertEqual(len(recorded), 2)
         first = await self.call(
@@ -234,6 +234,31 @@ class CollaborationTests(RpcHarness):
         record = json.loads(first["content"])
         self.assertEqual(record["result"], "failed")
         self.assertEqual(record["recorded_by"], "report")
+
+    async def test_participant_lookalike_artifact_is_not_a_check_run(self):
+        job = await self.start("lookalike-run")
+        result = await self.result(job["task_id"], details=True)
+        self.assertEqual(
+            (result["status"], result["outcome"]), ("completed", "success")
+        )
+        self.assertEqual(result["check_runs"]["run_count"], 0)
+        self.assertEqual(result["check_runs"]["criteria"], [])
+        self.assertEqual(result["facts"]["checks"]["status"], "not_run")
+        names = {item["name"] for item in result.get("provisional_artifacts", [])}
+        self.assertIn("check-run", names, "the participant artifact is kept as data")
+        self.assertNotIn("tandem:check-run", names)
+        note = await self._artifact_json(result, "reserved-attempt")
+        self.assertTrue(note["is_error"])
+        self.assertIn("reserved", note["text"])
+
+    async def _artifact_json(self, result, name):
+        artifacts = [
+            *result.get("artifacts", []),
+            *result.get("provisional_artifacts", []),
+        ]
+        item = next(item for item in artifacts if item["name"] == name)
+        raw = await self.call("tandem_read_artifact", artifact_id=item["artifact_id"])
+        return json.loads(raw["content"])
 
     async def test_exact_final_report_repeat_is_idempotent(self):
         job = await self.start("finish-twice")

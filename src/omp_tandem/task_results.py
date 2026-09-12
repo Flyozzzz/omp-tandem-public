@@ -5,6 +5,8 @@ import sqlite3
 import time
 from contextlib import closing
 
+from pydantic import ValidationError
+
 from .artifacts import ArtifactStore
 from .execution import conversation_usage, task_usage
 from .models import assess_checks
@@ -13,6 +15,17 @@ from .runtime_models import ACTIVE, TaskSummary
 from .task_contracts import current_task, work_policy
 from .task_interaction import CHECK_RUN_ARTIFACT
 from .task_store import TaskStore
+
+
+def read_artifact_text(artifacts, artifact_id):
+    """Read a complete artifact by following the bounded reader's pages."""
+    pages, offset = [], 0
+    while True:
+        page = artifacts.read(artifact_id, offset, 50000)
+        pages.append(page["content"])
+        if page["next_offset"] is None:
+            return "".join(pages)
+        offset = page["next_offset"]
 
 
 class TaskResults:
@@ -116,8 +129,14 @@ class TaskResults:
             result["provisional_artifacts_truncated"] = (
                 not details and len(preliminary) > 10
             )
-        runs = self._check_runs(task_id)
-        result["check_runs"] = assess_checks(runs)
+        runs, unreadable = self._check_runs(task_id)
+        try:
+            result["check_runs"] = assess_checks(runs)
+        except ValidationError as exc:
+            # A stored record that no longer validates is history, not a crash.
+            unreadable.append({"artifact_id": None, "error": str(exc)[:200]})
+            result["check_runs"] = assess_checks([])
+        result["check_runs"]["unreadable_records"] = unreadable
         result["facts"] = self._facts(
             task_id, task, status, report, result["check_runs"]
         )
@@ -183,18 +202,32 @@ class TaskResults:
         return result
 
     def _check_runs(self, task_id):
-        """Append-only check run records published for this task."""
-        runs = []
+        """Server-recorded check runs for this task, oldest first.
+
+        Only artifacts under the reserved server name count; a participant
+        publication with a similar name is an ordinary artifact and never a run.
+        A record that cannot be decoded is reported as unreadable rather than
+        breaking the whole view.
+        """
+        runs, unreadable = [], []
         for item in reversed(self.artifacts.for_task(task_id)):
             if item["name"] != CHECK_RUN_ARTIFACT:
                 continue
-            content = self.artifacts.read(item["artifact_id"], 0, 50000)["content"]
-            record = json.loads(content)
-            record.pop("task_id", None)
-            record.pop("recorded_at", None)
-            record.pop("recorded_by", None)
+            try:
+                record = json.loads(
+                    read_artifact_text(self.artifacts, item["artifact_id"])
+                )
+                if not isinstance(record, dict):
+                    raise TypeError("check run record is not an object")
+            except (ValueError, TypeError) as exc:
+                unreadable.append(
+                    {"artifact_id": item["artifact_id"], "error": str(exc)[:200]}
+                )
+                continue
+            for key in ("task_id", "recorded_at", "recorded_by"):
+                record.pop(key, None)
             runs.append(record)
-        return runs
+        return runs, unreadable
 
     def _facts(self, task_id, task, status, report, checks):
         """Four separately observed facts; none is inferred from another.

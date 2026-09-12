@@ -9,11 +9,18 @@ from .artifacts import ArtifactStore
 from .findings import FindingStore
 from .models import decode_outcome
 from .project_context import ProjectContextStore
-from .runtime_models import ACTIVE, Cancelled, QuestionRequest
+from .runtime_models import (
+    ACTIVE,
+    RESERVED_ARTIFACT_PREFIX,
+    Cancelled,
+    QuestionRequest,
+)
 from .task_store import TaskStore
 from .work_items import independent_stage
 
-CHECK_RUN_ARTIFACT = "check-run"
+# Server-recorded records live under the reserved prefix that PublishRequest
+# refuses, so a participant cannot publish a look-alike record.
+CHECK_RUN_ARTIFACT = RESERVED_ARTIFACT_PREFIX + "check-run"
 
 
 class TaskInteraction:

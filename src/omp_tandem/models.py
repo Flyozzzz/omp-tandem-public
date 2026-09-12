@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import PureWindowsPath
 from typing import Annotated, Literal, Self
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from pydantic import (
     AfterValidator,
@@ -164,7 +164,9 @@ class CheckRun(_ContractModel):
     """
 
     check_id: _NonBlank = Field(max_length=200)
-    run_id: _ArtifactId = Field(default_factory=lambda: str(uuid4()))
+    run_id: _ArtifactId = Field(
+        description="Stable identity chosen by the recorder; exact report retries must repeat it.",
+    )
     criterion: _NonBlank2000
     role: _Role
     command: str | None = Field(default=None, max_length=2000)
@@ -414,12 +416,14 @@ def assess_checks(runs: list[CheckRun | dict], scope=None) -> dict:
                         "reason": "target missing or different criterion/role/bytes/command/environment",
                     }
                 )
-            elif run.supersedes:
+            elif run.supersedes and run.result == "passed":
+                # Only a successful replacement discharges the earlier run; a
+                # not_run or failed successor changes nothing about the failure.
                 valid_supersedes.add(run.supersedes)
         # A failure is answered only by a later pass of the same bytes with the
-        # same command and environment (or a valid supersedes, which implies the
-        # same). A pass under different inputs is a different observation and
-        # leaves the failure open; it still cannot rewrite history.
+        # same command and environment (or a passing valid supersedes, which
+        # implies the same). A pass under different inputs is a different
+        # observation and leaves the failure open; it still cannot rewrite history.
         open_failures = []
         for index, run in enumerate(applicable):
             if run.result != "failed":

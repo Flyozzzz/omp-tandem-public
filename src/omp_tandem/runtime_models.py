@@ -2,7 +2,7 @@
 
 from typing import Annotated, Literal, TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 # Keep the user's diagnostic buffer; completion is event-driven.
 MAX_EVENT_HISTORY = 200_000
@@ -21,13 +21,29 @@ class QuestionRequest(BaseModel):
     )
 
 
+RESERVED_ARTIFACT_PREFIX = "tandem:"
+
+
 class PublishRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    name: str = Field(min_length=1, max_length=120)
+    name: str = Field(
+        min_length=1,
+        max_length=120,
+        description="Artifact name; names starting with 'tandem:' are recorded only by the server.",
+    )
     content: str = Field(max_length=4 * 1024 * 1024)
     media_type: Literal["text/plain", "text/markdown", "application/json"] = (
         "text/plain"
     )
+
+    @field_validator("name")
+    @classmethod
+    def _not_reserved(cls, value: str) -> str:
+        if value.strip().casefold().startswith(RESERVED_ARTIFACT_PREFIX):
+            raise ValueError(
+                "Artifact names starting with 'tandem:' are reserved for server-recorded records"
+            )
+        return value
 
 
 class ArtifactReadRequest(BaseModel):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 from typing import ClassVar
+from uuid import uuid4
 
 from pydantic import ValidationError
 
@@ -18,6 +19,7 @@ from omp_tandem.models import (
     parse_outcome,
     run_applies,
 )
+from omp_tandem.runtime_models import PublishRequest
 
 try:
     import jsonschema
@@ -31,6 +33,7 @@ TREE_B = "b" * 40
 def _run(check_id, result, *, role="author", digest=TREE_A, ended_at, **fields):
     record = {
         "check_id": check_id,
+        "run_id": str(uuid4()),
         "criterion": fields.pop("criterion", f"{check_id} passes"),
         "role": role,
         "command": fields.pop("command", f"run {check_id}"),
@@ -327,6 +330,33 @@ class CheckRunApplicabilityTests(unittest.TestCase):
         )
         self.assertEqual(assessment["status"], "passed")
         self.assertEqual(assessment["invalid_supersedes"], [])
+
+    def test_nonpassing_successor_never_discharges_a_failure(self):
+        failed = _run("pytest", "failed", ended_at=1.0)
+        not_run = _run("pytest", "not_run", ended_at=3.0, supersedes=failed.run_id)
+        smoke = _run("pytest", "passed", ended_at=4.0, command="run pytest -k smoke")
+        assessment = assess_checks([failed, not_run, smoke])
+        self.assertEqual(assessment["status"], "failed")
+        self.assertEqual(
+            assessment["criteria"][0]["open_failure_run_ids"], [failed.run_id]
+        )
+        self.assertEqual(assessment["known_issues"], [])
+        self.assertEqual(assessment["invalid_supersedes"], [])
+        only_not_run = assess_checks([failed, not_run])
+        self.assertEqual(only_not_run["status"], "failed")
+        self.assertEqual(only_not_run["known_issues"], [])
+        failed_again = _run("pytest", "failed", ended_at=5.0, supersedes=failed.run_id)
+        self.assertEqual(assess_checks([failed, failed_again])["status"], "failed")
+
+    def test_run_ids_are_required_and_reserved_names_are_refused(self):
+        base = _run("pytest", "passed", ended_at=1.0).model_dump()
+        del base["run_id"]
+        with self.assertRaises(ValidationError):
+            CheckRun.model_validate(base)
+        for name in ("tandem:check-run", "TANDEM:anything", " tandem:x"):
+            with self.subTest(name=name), self.assertRaises(ValidationError):
+                PublishRequest(name=name, content="{}")
+        PublishRequest(name="check-run", content="{}")
 
     def test_author_runs_do_not_satisfy_reviewer_criteria(self):
         author = _run("pytest", "passed", ended_at=1.0)

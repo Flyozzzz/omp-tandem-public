@@ -249,3 +249,16 @@ class ArtifactStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ArtifactPagingTests(unittest.TestCase):
+    def test_read_artifact_text_reassembles_records_longer_than_one_page(self):
+        from omp_tandem.task_results import read_artifact_text
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        store = ArtifactStore(Path(directory.name) / "tasks.sqlite3")
+        content = "{" + '"note": "' + "雪" * 60000 + '"}'
+        published = store.publish(str(uuid4()), str(uuid4()), "big", content)
+        self.assertGreater(published["characters"], 50000)
+        self.assertEqual(read_artifact_text(store, published["artifact_id"]), content)
