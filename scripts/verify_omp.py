@@ -65,54 +65,173 @@ def digest(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def binary(args, manifest, report):
+# Checks that establish the binary before any probe runs. Everything else in the
+# report is a probe of the running OMP, so a failure there is a different class.
+PREFLIGHT_CHECK = "binary_preflight"
+ACQUISITION_CHECKS = ("official_binary_acquisition", "official_binary_sha256")
+SETUP_CHECKS = (PREFLIGHT_CHECK, *ACQUISITION_CHECKS)
+
+
+def platform_key():
     arch = {"aarch64": "arm64", "x86_64": "x64", "AMD64": "x64"}.get(
         platform.machine(), platform.machine()
     )
-    key = f"{platform.system().lower()}-{arch}"
-    require(key in manifest["assets"], f"No pinned official asset for {key}")
-    asset = manifest["assets"][key]
-    target = (
-        args.omp.resolve()
-        if args.omp
-        else args.cache_dir.resolve() / manifest["omp_version"] / asset["name"]
-    )
+    return f"{platform.system().lower()}-{arch}"
+
+
+def preflight(args, manifest, report, *, key=None):
+    """Identify the pinned asset and where the binary must come from.
+
+    Runs before any network or process activity so a missing pin, an unwritable
+    cache or a supplied path that does not exist fails as an environment problem
+    rather than as a probe result.
+    """
+    key = key or platform_key()
+    with check(report, PREFLIGHT_CHECK) as evidence:
+        require(key in manifest["assets"], f"No pinned official asset for {key}")
+        asset = manifest["assets"][key]
+        if args.omp:
+            target = args.omp.resolve()
+            require(target.is_file(), f"Supplied binary is not a file: {target}")
+            source = "provided"
+        else:
+            target = args.cache_dir.resolve() / manifest["omp_version"] / asset["name"]
+            source = "official_release_cache"
+        plan = {
+            "key": key,
+            "asset": asset["name"],
+            "expected_sha256": asset["sha256"],
+            "url": f"{manifest['download_base']}/{asset['name']}",
+            "target": target,
+            "source": source,
+            "acquisition_required": source != "provided" and not target.exists(),
+        }
+        report["preflight"] = {
+            **{name: value for name, value in plan.items() if name != "target"},
+            "target": str(target),
+            "omp_version": manifest["omp_version"],
+        }
+        evidence.update(
+            source=source,
+            acquisition_required=plan["acquisition_required"],
+            asset=asset["name"],
+        )
+    return plan
+
+
+def acquire(plan, report, *, opener=urllib.request.urlopen):
+    """Download the pinned asset into the cache; separate from probe execution.
+
+    The whole command deadline still applies: a slow download fails here as an
+    acquisition failure with probes recorded as not run, not as a probe result.
+    """
+    target = plan["target"]
+    with check(report, "official_binary_acquisition") as evidence:
+        evidence.update(url=plan["url"], target=str(target))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Never leave an interrupted download at the executable cache path.
+        with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as output:
+            partial = Path(output.name)
+            try:
+                request = urllib.request.Request(
+                    plan["url"], headers={"User-Agent": "omp-tandem-compatibility"}
+                )
+                with opener(request, timeout=60) as response:
+                    shutil.copyfileobj(response, output, length=1024 * 1024)
+                output.flush()
+                require(
+                    digest(partial) == plan["expected_sha256"],
+                    "Downloaded SHA-256 mismatch",
+                )
+                partial.chmod(0o700)
+                partial.replace(target)
+            finally:
+                partial.unlink(missing_ok=True)
+        evidence["bytes"] = target.stat().st_size
+    return target
+
+
+def verify_binary(plan, report):
+    """Refuse execution unless the binary on disk matches the official pin."""
+    target = plan["target"]
     with check(report, "official_binary_sha256") as evidence:
-        if not args.omp and not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            # Never leave an interrupted download at the executable cache path.
-            with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as output:
-                partial = Path(output.name)
-                try:
-                    request = urllib.request.Request(
-                        f"{manifest['download_base']}/{asset['name']}",
-                        headers={"User-Agent": "omp-tandem-compatibility"},
-                    )
-                    with urllib.request.urlopen(request, timeout=60) as response:
-                        shutil.copyfileobj(response, output, length=1024 * 1024)
-                    output.flush()
-                    require(
-                        digest(partial) == asset["sha256"],
-                        "Downloaded SHA-256 mismatch",
-                    )
-                    partial.chmod(0o700)
-                    partial.replace(target)
-                finally:
-                    partial.unlink(missing_ok=True)
         actual = digest(target)
         report["omp"] = {
             "path": str(target),
-            "source": "provided" if args.omp else "official_release_cache",
+            "source": plan["source"],
             "sha256": actual,
-            "expected_sha256": asset["sha256"],
-            "asset": asset["name"],
+            "expected_sha256": plan["expected_sha256"],
+            "asset": plan["asset"],
         }
         evidence["sha256"] = actual
         require(
-            actual == asset["sha256"],
+            actual == plan["expected_sha256"],
             f"SHA-256 mismatch for {target}; refuse execution",
         )
     return target
+
+
+def binary(args, manifest, report):
+    plan = preflight(args, manifest, report)
+    if plan["acquisition_required"]:
+        acquire(plan, report)
+    return verify_binary(plan, report)
+
+
+def failure_class(report):
+    """environment | acquisition | probe | None, from the recorded checks."""
+    for item in report.get("checks", []):
+        if item.get("status") != "failed":
+            continue
+        if item["name"] == PREFLIGHT_CHECK:
+            return "environment"
+        if item["name"] in ACQUISITION_CHECKS:
+            return "acquisition"
+        return "probe"
+    return None
+
+
+def probe_status(report):
+    """not_run | failed | passed for the checks that exercise the binary."""
+    probes = [
+        item for item in report.get("checks", []) if item["name"] not in SETUP_CHECKS
+    ]
+    if not probes:
+        return "not_run"
+    if any(item.get("status") == "failed" for item in probes):
+        return "failed"
+    return "passed"
+
+
+def abort_gate_supported(alive):
+    """Abort-only capability needs a parent that was still answering.
+
+    Silence after the release proves nothing when the parent process is gone:
+    the gate requires a positive liveness observation made before any cleanup,
+    plus no late model request and unconsumed child/parent script steps.
+    """
+    return (
+        alive.get("parent_alive") is True
+        and alive.get("requests_after_release") == alive.get("requests_before_release")
+        and (alive.get("steps_left_after_release") or 0) >= 1
+    )
+
+
+def evidence_destination(report_path, report, *, now=None):
+    """Keep a passing report on disk; a failed rerun lands next to it instead."""
+    if report.get("status") == "passed" or not report_path.exists():
+        return report_path
+    try:
+        existing = json.loads(report_path.read_text())
+        previous_status = existing.get("status") if isinstance(existing, dict) else None
+    except (OSError, ValueError):
+        previous_status = None  # unreadable evidence is preserved, not replaced
+    if previous_status not in (None, "passed"):
+        return report_path
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
+    return report_path.with_name(
+        f"{report_path.stem}.failed-{stamp}{report_path.suffix}"
+    )
 
 
 @contextmanager
@@ -1225,10 +1344,9 @@ def helper_probe(executable, root, agent, provider, report):
         )
         gate(
             "parent_abort_prevents_late_child_delivery",
-            alive["requests_after_release"] == alive["requests_before_release"]
-            and alive["steps_left_after_release"] >= 1,
+            abort_gate_supported(alive),
             **alive,
-            note="Observed before client.stop(): after abort, releasing the held child response produced no further model request while the parent process was still alive; the child answer and parent answer steps stayed unconsumed",
+            note="Observed before client.stop() and only counted while the parent RPC session still answered get_subagents: after abort, releasing the held child response produced no further model request and the child answer and parent answer steps stayed unconsumed; an unresponsive parent fails this gate regardless of request counts",
         )
 
     required = (
@@ -1360,11 +1478,22 @@ def main():
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous_handler)
         report["seconds"] = round(time.monotonic() - started, 3)
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(json.dumps(report, indent=2) + "\n")
+        # Acquisition, environment and probe failures are different results; an
+        # unsupported capability is a measured gate, never a failure class.
+        report["failure_class"] = failure_class(report)
+        report["probes"] = probe_status(report)
+        destination = evidence_destination(report_path, report)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(report, indent=2) + "\n")
         # Bounded CI log evidence, including failures, without another action pin.
         print(json.dumps(report, indent=2))
-        print(f"Compatibility evidence: {report_path}", file=sys.stderr)
+        print(f"Compatibility evidence: {destination}", file=sys.stderr)
+        if destination != report_path:
+            print(
+                f"Existing passing evidence kept at {report_path}; this failed run "
+                "was written separately",
+                file=sys.stderr,
+            )
     return 0 if report["status"] == "passed" else 1
 
 

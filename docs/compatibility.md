@@ -28,6 +28,30 @@ task, cancellation, and teardown bounds. Network transfer speed can make the
 first download exceed the deadline; rerun the same command after resolving the
 network issue. An incomplete download is removed rather than cached.
 
+The command runs in three phases, and the report says which one failed:
+
+1. `binary_preflight` names the pinned asset for this platform and decides
+   whether the binary comes from `--omp`, from an existing cache entry, or has
+   to be downloaded. A missing pin, an unwritable cache or a supplied path that
+   is not a file is an **environment** failure; nothing is downloaded or run.
+2. `official_binary_acquisition` downloads into the cache only when preflight
+   found no binary. A timeout or a digest mismatch here is an **acquisition**
+   failure. `official_binary_sha256` then compares the binary on disk with the
+   pin, whatever its source.
+3. Every later check is a probe of the running OMP. Only a failure there is a
+   **probe** failure. An unsupported helper capability is a measured gate in
+   `delegation.unsatisfied_gates`, not a failure of any class.
+
+The report records `failure_class` (`environment`, `acquisition`, `probe`, or
+`null`) and `probes` (`not_run`, `failed`, `passed`). A run that failed before
+the probes therefore says `probes: "not_run"` and never counts as compatibility
+evidence. A failed rerun does not overwrite a passing report at the same
+`--report` path: it is written next to it as `<name>.failed-<timestamp>.json`
+and the passing file is kept. Cached binaries are reused across runs, so a
+compatibility-only rerun with the same `--cache-dir` (or `--omp`) repeats the
+probes without downloading again and without repeating unrelated test or
+package checks.
+
 To check a binary already on disk, add `--omp /absolute/path/to/omp`. The provided
 binary must still match the pinned official asset digest; its actual digest and
 `--version` output are recorded. The Homebrew `omp` 18.1.13 binary for Darwin
