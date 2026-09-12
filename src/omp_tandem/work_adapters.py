@@ -19,7 +19,13 @@ from uuid import UUID, uuid4
 
 from .models import TaskOutcome
 from .reviews import ReviewRequest
-from .work_items import _withhold, model_selection, shell_permission
+from .work_items import (
+    _withhold,
+    model_selection,
+    review_inputs,
+    review_scope,
+    shell_permission,
+)
 
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 STARTUP_SECONDS = 45
@@ -164,6 +170,7 @@ class _Adapter:
     def _pin_snapshot(self, attempt, plan):
         """Capture the exact submitted commit as an immutable review bundle."""
         summary = self.bridge.reviews.create(_pin_snapshot_request(attempt, plan))
+        _verify_snapshot(self.bridge.reviews, summary["review_id"], attempt, plan)
         self.bridge.work_items.bind_review(attempt["attempt_id"], summary["review_id"])
         return self.bridge.work_items.attempt(attempt["attempt_id"])
 
@@ -219,9 +226,14 @@ class _Adapter:
         if (
             attempt["kind"] == "review"
             and attempt.get("protocol") == "independent_first"
-            and not attempt.get("review_id")
         ):
-            attempt = self._pin_snapshot(attempt, plan)
+            _pin_snapshot_request(attempt, plan)
+            if not attempt.get("review_id"):
+                attempt = self._pin_snapshot(attempt, plan)
+            else:
+                _verify_snapshot(
+                    self.bridge.reviews, attempt["review_id"], attempt, plan
+                )
         path = Path(workspace["path"]).resolve(strict=True)
         if not path.is_dir() or not path.is_relative_to(
             (self.bridge.scope.directory / "worktrees").resolve()
@@ -294,27 +306,35 @@ class _Adapter:
 
 
 def _pin_snapshot_request(attempt, plan):
-    step = next(step for step in plan["steps"] if step["id"] == attempt["step_id"])
+    if attempt.get("review_scope") != review_scope(attempt, plan):
+        raise ValueError(
+            "Review snapshot inputs differ from reserved applicability scope"
+        )
     submission = attempt["submission"]
     return ReviewRequest(
-        requirements="\n".join(
-            [
-                f"Plan goal: {plan['goal']}",
-                f"Step {step['id']}: {step['goal']}",
-                "Global acceptance:",
-                *(f"- {item}" for item in plan["acceptance"]),
-            ]
-        ),
-        criteria=list(step["acceptance"]),
-        base=submission["base_commit"],
-        source="commit",
-        commit=submission["commit"],
+        **review_inputs(attempt, plan),
         author_proposal=str(submission.get("answer") or ""),
         author_rationale="\n".join(
             str(item) for item in submission.get("evidence") or []
         ),
         external_boundaries=["managed review reads committed bytes only; no shell"],
     )
+
+
+def _verify_snapshot(reviews, review_id, attempt, plan):
+    """Verify saved capture inputs before binding or launching the reviewer."""
+    request = _pin_snapshot_request(attempt, plan)
+    manifest = reviews._manifest(review_id)
+    if (
+        manifest["requirements"] != request.requirements
+        or manifest["criteria"] != request.criteria
+        or manifest["source"] != request.source
+        or manifest["selection"] != "commit_changes"
+        or manifest["git"]["base_commit"] != request.base
+        or manifest["git"]["commit"] != request.commit
+        or manifest["context_paths"] != request.context_paths
+    ):
+        raise ValueError("Captured review differs from prospective snapshot identity")
 
 
 class OmpWorkAdapter(_Adapter):

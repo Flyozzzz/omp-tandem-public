@@ -1454,6 +1454,116 @@ class IndependentReviewTests(WorkItemsTests):
             review["shell_check_policy"], "blocked_no_stage_scoped_execution"
         )
 
+    def _waived_shell_review(self):
+        self.agreed()
+        self.authorize(allow_shell=True)
+        self.submit(self.reserve())
+        with self.assertRaises(ValueError):
+            self.reserve(actor="claude", kind="review")
+        blocker = self.view()["steps"][0]["blockers"][-1]
+        self.change(
+            "unblock",
+            actor="operator",
+            step_id="backend",
+            blocker_id=blocker["blocker_id"],
+            resolution="not_applicable",
+            note="Review without shell for this submitted context",
+            evidence=["Operator accepts the unexecuted shell-check limitation"],
+        )
+        return self.view()["steps"][0]["blockers"][-1]
+
+    def _assert_applicability_required(self, historical):
+        before = self.view()["authorization"]["launches"]
+        with self.assertRaises(ValueError):
+            self.reserve(actor="claude", kind="review")
+        current = self.view()
+        self.assertEqual(current["authorization"]["launches"], before)
+        self.assertIn(historical, current["steps"][0]["blockers"])
+        self.assertEqual(
+            current["steps"][0]["blockers"][-1]["reason"],
+            "applicability_review_required",
+        )
+
+    def test_shell_waiver_does_not_transfer_to_new_plan_grant_submission(self):
+        historical = self._waived_shell_review()
+        revised = plan()
+        revised["steps"][0]["acceptance"] = ["Revised observable behavior"]
+        self.change("propose", plan=revised)
+        self.agreed()
+        self.authorize(allow_shell=True)
+        self.submit(self.reserve())
+        # Propose adds provenance to the historical blocker, not fresh authority.
+        historical = self.view()["steps"][0]["blockers"][0]
+        self._assert_applicability_required(historical)
+
+    def test_shell_waiver_does_not_transfer_to_new_grant(self):
+        historical = self._waived_shell_review()
+        self.authorize(allow_shell=True)
+        self._assert_applicability_required(historical)
+
+    def test_shell_waiver_does_not_transfer_to_new_submission(self):
+        historical = self._waived_shell_review()
+        review = self.reserve(actor="claude", kind="review")
+        self.report(review)
+        self.change(
+            "reject",
+            actor="claude",
+            token=review["token"],
+            step_id="backend",
+            submission_id=review["submission"]["submission_id"],
+            note="Observable contract needs correction",
+            evidence=["Boundary case fails"],
+        )
+        self.store.finish_attempt(
+            review["attempt_id"],
+            outcome="success",
+            answer="Rejected",
+            evidence=["Boundary case fails"],
+            cost_usd=0.1,
+            output=None,
+        )
+        self.submit(self.reserve())
+        self._assert_applicability_required(historical)
+
+    def test_legacy_unscoped_shell_waiver_is_only_historical(self):
+        self._waived_shell_review()
+        with self.store._transaction() as db:
+            card = self.store._load(db, self.work_id)
+            blocker = card["steps"][0]["blockers"][-1]
+            for resolution in blocker["resolution_history"]:
+                resolution.pop("scope", None)
+            db.execute(
+                "UPDATE work_cards SET card=? WHERE work_id=?",
+                (json.dumps(card), self.work_id),
+            )
+        self._assert_applicability_required(self.view()["steps"][0]["blockers"][-1])
+
+    def test_unmarked_operator_resolution_does_not_authorize_shell_review(self):
+        self._waived_shell_review()
+        with self.store._transaction() as db:
+            card = self.store._load(db, self.work_id)
+            card["steps"][0]["blockers"][-1].pop("policy")
+            db.execute(
+                "UPDATE work_cards SET card=? WHERE work_id=?",
+                (json.dumps(card), self.work_id),
+            )
+        with self.assertRaises(ValueError):
+            self.reserve(actor="claude", kind="review")
+        blocker = self.view()["steps"][0]["blockers"][-1]
+        self.assertEqual(blocker["policy"], "shell_review")
+        self.assertIsNone(blocker["resolved_at"])
+
+    def test_exact_shell_waiver_scope_reuses_without_new_effects(self):
+        historical = self._waived_shell_review()
+        before = self.view()
+        self.assertIsNone(self.store._block_shell_review(self.work_id, "backend"))
+        self.assertIsNone(self.store._block_shell_review(self.work_id, "backend"))
+        self.assertEqual(self.view(), before)
+        review = self.reserve(actor="claude", kind="review")
+        self.assertEqual(
+            review["review_scope"], historical["resolution_history"][-1]["scope"]
+        )
+
     def test_participant_cannot_forge_or_waive_the_shell_policy_blocker(self):
         self.agreed()
         self.authorize(allow_shell=True)

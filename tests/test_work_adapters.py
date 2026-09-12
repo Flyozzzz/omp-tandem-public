@@ -14,6 +14,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from omp_tandem.work_adapters import ClaudeWorkAdapter, OmpWorkAdapter
+from omp_tandem.work_items import review_inputs, review_scope
 
 
 class AttemptStore:
@@ -464,6 +465,30 @@ class IndependentReviewAdapterTests(WorkAdapterTests):
             dependencies=[{"submission_id": "dep", "answer": self.SENTINEL}],
         )
         self.attempt.pop("allow_tests", None)
+        self.attempt["review_scope"] = review_scope(self.attempt, self.plan)
+        inputs = review_inputs(self.attempt, self.plan)
+        self.manifest = {
+            **inputs,
+            "selection": "commit_changes",
+            "git": {"base_commit": inputs["base"], "commit": inputs["commit"]},
+        }
+        self.bridge.reviews = SimpleNamespace(_manifest=lambda _: self.manifest)
+
+    def test_changed_prospective_inputs_refuse_launch(self):
+        self._review_attempt()
+        self.plan["steps"][0]["acceptance"] = ["Different review criterion"]
+        adapter = self.adapter(self.result_program())
+        with self.assertRaises(ValueError):
+            self.launch(adapter)
+        self.assertFalse((self.state / "work-adapters").exists())
+
+    def test_mismatched_saved_capture_refuses_launch(self):
+        self._review_attempt()
+        self.manifest["git"]["commit"] = "d" * 40
+        adapter = self.adapter(self.result_program())
+        with self.assertRaises(ValueError):
+            self.launch(adapter)
+        self.assertFalse((self.state / "work-adapters").exists())
 
     def test_review_launch_reads_snapshot_only_and_hides_author_material(self):
         self._review_attempt()

@@ -115,6 +115,45 @@ def independent_stage(bound: dict | None) -> bool:
     )
 
 
+def review_inputs(attempt: dict, plan: dict) -> dict:
+    """Prospective immutable capture inputs, excluding author interpretation."""
+    step = next(step for step in plan["steps"] if step["id"] == attempt["step_id"])
+    submission = attempt["submission"]
+    return {
+        "requirements": "\n".join(
+            [
+                f"Plan goal: {plan['goal']}",
+                f"Step {step['id']}: {step['goal']}",
+                "Global acceptance:",
+                *(f"- {item}" for item in plan["acceptance"]),
+            ]
+        ),
+        "criteria": list(step["acceptance"]),
+        "base": submission["base_commit"],
+        "source": "commit",
+        "commit": submission["commit"],
+        "context_paths": sorted(step.get("review_context_paths", [])),
+    }
+
+
+def review_scope(attempt: dict, plan: dict) -> dict:
+    """Versioned applicability identity available before capture or expenditure."""
+    return {
+        "work_id": attempt["work_id"],
+        "step_id": attempt["step_id"],
+        "plan_revision": attempt["plan_revision"],
+        "submission_id": attempt["submission"]["submission_id"],
+        "base_commit": attempt["submission"]["base_commit"],
+        "commit": attempt["submission"]["commit"],
+        "authorization_id": attempt.get("authorization_id"),
+        "policy": "shell_review",
+        "policy_version": 1,
+        "snapshot_input_fingerprint": hashlib.sha256(
+            _json(review_inputs(attempt, plan)).encode()
+        ).hexdigest(),
+    }
+
+
 def _withhold(record):
     if isinstance(record, dict) and any(key in record for key in AUTHOR_FIELDS):
         return {
@@ -1228,6 +1267,14 @@ class WorkStore:
                     "actor": actor,
                     "at": now,
                     "plan_revision": card["plan_revision"],
+                    **(
+                        {"scope": self._review_scope(card, step)}
+                        if actor == "operator"
+                        and blocker["actor"] == "operator"
+                        and blocker.get("policy") == "shell_review"
+                        and step is not None
+                        else {}
+                    ),
                 }
             )
             blocker.update(
@@ -1799,6 +1846,12 @@ class WorkStore:
                 )
             if kind == "implement" and not grant["allow_work"]:
                 raise ValueError("Operator did not grant implementation permission")
+            if kind == "review" and shell_permission(grant):
+                step = self._step(card, step_id)
+                if not self._shell_waiver(step, self._review_scope(card, step)):
+                    raise ValueError(
+                        "Review waiver applicability changed before reservation"
+                    )
             active = [item for item in self._attempts(db) if item["state"] in _ACTIVE]
             if len(active) >= 4:
                 raise ValueError(
@@ -1850,6 +1903,9 @@ class WorkStore:
                     "review_stage": "independent",
                     "independent_report": None,
                     "comparison_opened_at": None,
+                    "review_scope": self._review_scope(
+                        card, step, autonomous=autonomous
+                    ),
                     # Arbitrary shell for a reviewer would bypass the snapshot reader;
                     # no stage-scoped execution path exists yet, so it is blocked here.
                     "shell_check_policy": "blocked_no_stage_scoped_execution"
@@ -1884,6 +1940,38 @@ class WorkStore:
         "stage-scoped execution path exists"
     )
 
+    @staticmethod
+    def _review_scope(card, step, *, autonomous=True):
+        return review_scope(
+            {
+                "work_id": card["work_id"],
+                "step_id": step["id"],
+                "plan_revision": card["plan_revision"],
+                "submission": step["submission"],
+                "authorization_id": (card.get("authorization") or {}).get(
+                    "authorization_id"
+                )
+                if autonomous
+                else None,
+            },
+            card["plan"],
+        )
+
+    @staticmethod
+    def _shell_waiver(step, scope):
+        return any(
+            blocker.get("policy") == "shell_review"
+            and blocker["actor"] == "operator"
+            and blocker.get("resolved_at") is not None
+            and blocker.get("resolved_by") == "operator"
+            and any(
+                resolution.get("actor") == "operator"
+                and resolution.get("scope") == scope
+                for resolution in blocker.get("resolution_history", [])
+            )
+            for blocker in step["blockers"]
+        )
+
     def _block_shell_review(self, work_id, step_id):
         """Record an explicit pre-launch blocker instead of silently dropping shell."""
         with self._transaction() as db:
@@ -1907,8 +1995,8 @@ class WorkStore:
                     "Review launch is blocked until the operator resolves the "
                     "recorded shell-check blocker"
                 )
-            if any(blocker.get("resolved_by") == "operator" for blocker in recorded):
-                # The operator explicitly decided; the review proceeds without shell.
+            scope = self._review_scope(card, step)
+            if self._shell_waiver(step, scope):
                 return None
             policy_blocker = self._blocker(
                 "operator",
@@ -1919,6 +2007,11 @@ class WorkStore:
                 step["id"],
             )
             policy_blocker["policy"] = "shell_review"
+            policy_blocker["reason"] = (
+                "applicability_review_required"
+                if recorded
+                else "shell_review_requires_operator"
+            )
             step["blockers"].append(policy_blocker)
             self._record(
                 db,
@@ -1927,7 +2020,7 @@ class WorkStore:
                 "operator",
                 {
                     "step_id": step["id"],
-                    "reason": "shell grant meets independent review",
+                    "reason": policy_blocker["reason"],
                 },
             )
             return (
