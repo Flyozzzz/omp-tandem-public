@@ -590,6 +590,184 @@ def completed(result, answer):
     )
 
 
+def schema_keywords(schema):
+    """Count schema keywords, not property/definition names or example payloads."""
+    counts = {}
+
+    def visit(node):
+        if not isinstance(node, dict):
+            return
+        for key, value in node.items():
+            counts[key] = counts.get(key, 0) + 1
+            if key in ("properties", "$defs", "definitions", "patternProperties"):
+                for child in value.values():
+                    visit(child)
+            elif key in ("anyOf", "oneOf", "allOf", "prefixItems"):
+                for child in value:
+                    visit(child)
+            elif key in (
+                "items",
+                "additionalProperties",
+                "unevaluatedProperties",
+                "contains",
+                "not",
+                "if",
+                "then",
+                "else",
+                "propertyNames",
+            ):
+                visit(value)
+
+    visit(schema)
+    return dict(sorted(counts.items()))
+
+
+def schema_census(registered, wire):
+    from omp_tandem.runtime_identity import schema_digest
+
+    before, after = schema_keywords(registered), schema_keywords(wire)
+    differences = []
+
+    def compare(left, right, path):
+        if left == right:
+            return
+        if isinstance(left, dict) and isinstance(right, dict):
+            for key in sorted(left.keys() | right.keys()):
+                pointer = path + "/" + key.replace("~", "~0").replace("/", "~1")
+                if key not in left or key not in right:
+                    differences.append(
+                        {
+                            "path": pointer,
+                            "change": "added" if key not in left else "removed",
+                            "registered": left.get(key),
+                            "wire": right.get(key),
+                        }
+                    )
+                else:
+                    compare(left[key], right[key], pointer)
+        elif (
+            isinstance(left, list)
+            and isinstance(right, list)
+            and len(left) == len(right)
+        ):
+            for index, (a, b) in enumerate(zip(left, right, strict=True)):
+                compare(a, b, path + "/" + str(index))
+        else:
+            differences.append(
+                {"path": path, "change": "changed", "registered": left, "wire": right}
+            )
+
+    compare(registered, wire, "")
+    return {
+        "registered_sha256": schema_digest(registered),
+        "wire_sha256": schema_digest(wire),
+        "registered_keywords": before,
+        "wire_keywords": after,
+        "keyword_count_differences": {
+            key: {"registered": before.get(key, 0), "wire": after.get(key, 0)}
+            for key in sorted(before.keys() | after.keys())
+            if before.get(key, 0) != after.get(key, 0)
+        },
+        "differences": differences,
+    }
+
+
+def exercise_schema_callbacks(executable, root, agent, report):
+    from omp_tandem.bridge import Bridge
+    from omp_tandem.native_worker import NATIVE_SCHEMAS
+    from omp_tandem.runtime_identity import runtime_identity
+
+    project = root / "schema-project"
+    project.mkdir()
+    bridge = Bridge(
+        root / "schema-state",
+        str(executable),
+        MODEL,
+        project_root=project,
+        channel_enabled=False,
+        webhook_enabled=False,
+        migrate_legacy=False,
+    )
+    try:
+        with (
+            Provider() as provider,
+            check(report, "registered_wire_schema_callbacks") as evidence,
+        ):
+            provider.configure(agent)
+            invalid = [
+                {
+                    "outcome": "success",
+                    "answer": "invalid",
+                    "summary": "invalid",
+                    "checks": [{"name": "probe", "result": result}],
+                }
+                for result in ("failed", "not_run")
+            ] + [{"outcome": "blocked", "answer": "invalid", "summary": "invalid"}]
+            provider.prepare(
+                [
+                    ("tandem_work", {"request": {"action": "list"}}),
+                    *(("tandem_finish", value) for value in invalid),
+                    finish("short-success"),
+                    "Ended.",
+                ]
+            )
+            started = bridge.start(
+                prompt="Exercise registered callbacks with deterministic fixture arguments.",
+                cwd=str(project),
+                mode="think",
+                execution={"thinking": "off", "timeout_seconds": 60},
+            )
+            result = await_task(bridge, started["task_id"])
+            completed(result, "short-success")
+            observed = list(tool_results(provider.requests[-1]).values())
+            finishes = [text for name, text in observed if name == "tandem_finish"]
+            require(len(finishes) == 4, f"Missing E2 callback results: {observed}")
+            for text in finishes[:3]:
+                require(
+                    'Validation failed for tool "tandem_finish"' in text,
+                    f"Invalid outcome was not refused: {text}",
+                )
+            require(
+                "tandem_work" in provider.results(), "Work callback was not exercised"
+            )
+            wire = {
+                tool["function"]["name"]: tool["function"]["parameters"]
+                for tool in provider.requests[0]["tools"]
+            }
+            evidence.update(
+                configured_api="openai-completions",
+                exercised_apis=["openai-completions"],
+                untested_apis="All provider APIs other than openai-completions; not enumerated as supported",
+                boundary="Pinned OMP and localhost fixture only; no universal schema parity claim",
+                schemas={
+                    name: schema_census(NATIVE_SCHEMAS[name], wire[name])
+                    for name in ("tandem_finish", "tandem_work")
+                },
+                callback_results=observed,
+                runtime_identity=runtime_identity(),
+                task_id=started["task_id"],
+            )
+            provider.prepare(["No structured finish."])
+            missing = bridge.start(
+                prompt="Missing-finish fixture.",
+                cwd=str(project),
+                mode="think",
+                execution={"thinking": "off", "timeout_seconds": 60},
+            )
+            missing_result = await_task(bridge, missing["task_id"])
+            require(
+                missing_result.get("outcome") != "success",
+                "Missing finish incorrectly became success",
+            )
+            evidence["missing_finish"] = {
+                "task_id": missing["task_id"],
+                "status": missing_result["status"],
+                "outcome": missing_result.get("outcome"),
+            }
+    finally:
+        bridge.shutdown()
+
+
 def exercise(executable, root, provider, report):
     from omp_rpc import RpcClient
 
@@ -1524,6 +1702,8 @@ def main():
                 with Provider() as provider:
                     provider.configure(agent)
                     report["phase"] = "probes"
+                    exercise_schema_callbacks(executable, root, agent, report)
+                    provider.configure(agent)
                     exercise(executable, root, provider, report)
                     helper_probe(executable, root, agent, provider, report)
         report["phase"] = "complete"
