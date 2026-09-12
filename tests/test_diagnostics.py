@@ -33,6 +33,48 @@ class DiagnosticTests(RpcHarness):
         self.assertFalse(mismatch["project"]["matches_expected"])
         self.assertEqual(await self.call("tandem_list"), [])
 
+    async def test_identity_matches_registered_mcp_and_native_schemas(self):
+        import hashlib
+        import json
+
+        from omp_tandem.models import outcome_schema
+        from omp_tandem.work_items import WorkCommand
+
+        def digest(schema):
+            return hashlib.sha256(
+                json.dumps(
+                    schema, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+
+        scope = await self.call("tandem_scope")
+        identity = scope["runtime_identity"]
+        schemas = identity["schema_digests"]
+        self.assertEqual(schemas["tandem_finish"], digest(outcome_schema()))
+        self.assertEqual(
+            schemas["tandem_work"], digest(WorkCommand.model_json_schema())
+        )
+        for tool in await self.client.list_tools():
+            self.assertEqual(
+                schemas["surfaces"]["mcp"][tool.name], digest(tool.inputSchema)
+            )
+        tools = self.bridge.runtime.worker.worker_tools(
+            {"task_id": "schema-observation"}
+        )
+        for tool in tools:
+            self.assertEqual(
+                schemas["surfaces"]["native"][tool.name], digest(tool.parameters)
+            )
+        local = await self.call("tandem_diagnose")
+        self.assertEqual(local["runtime_identity"], identity)
+        self.assertEqual(await self.call("tandem_list"), [])
+        original = identity["loaded_module_path"]
+        identity["loaded_module_path"] = "consumer-mutated"
+        self.assertEqual(
+            (await self.call("tandem_scope"))["runtime_identity"]["loaded_module_path"],
+            original,
+        )
+
     async def test_followup_inspects_same_probe_without_another_paid_turn(self):
         first = await self.call("tandem_diagnose", live=True, wait_seconds=0)
         for _ in range(30):

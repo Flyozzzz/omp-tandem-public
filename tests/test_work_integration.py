@@ -136,6 +136,47 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.mutate(self.omp, identifier, "agree")
         return identifier
 
+    async def test_public_default_summary_and_native_wait_observe_committed_change(
+        self,
+    ):
+        identifier = await self.create(owner="omp")
+        response = await self.omp.call_tool(
+            "tandem_work", {"request": {"action": "get", "work_id": identifier}}
+        )
+        summary = to_jsonable_python(response.data)
+        self.assertNotIn("plan", summary)
+        self.assertNotIn("markdown", summary)
+        self.assertEqual([step["id"] for step in summary["steps"]], ["change"])
+        worker = self.omp_bridge.runtime.worker
+        tool = next(
+            item
+            for item in worker.worker_tools({"task_id": "wait-fixture"})
+            if item.name == "tandem_work"
+        )
+        request = tool.parse_params(
+            {"request": {"action": "get", "work_id": identifier}, "wait_seconds": 1}
+        )
+        mutation = {
+            "action": "agree",
+            "work_id": identifier,
+            "expected_revision": summary["revision"],
+            "operation_id": str(uuid4()),
+        }
+        with patch(
+            "omp_tandem.native_worker.time.sleep",
+            side_effect=lambda _: self.omp_bridge.work_items.perform(
+                mutation, actor="claude"
+            ),
+        ):
+            observed = json.loads(
+                tool.execute(
+                    request, HostToolContext("wait", threading.Event(), lambda _: None)
+                )
+            )
+        self.assertEqual(observed["revision"], summary["revision"] + 1)
+        self.assertNotIn("plan", observed)
+        self.assertEqual(observed["steps"][0]["state"], "ready")
+
     async def context_attempt(self, paths):
         (self.root / "caller.py").write_text("pinned caller\n")
         self.git("add", "caller.py")
@@ -315,6 +356,58 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT question_id FROM questions WHERE task_id=?", (task_id,)
             ).fetchone()
         return self.omp_bridge.reply(task_id, question["question_id"], answer)
+
+    async def test_result_identifies_manual_review_without_claiming_confinement(self):
+        _, task_id, _, _, _ = await self.clarification_task()
+        result = self.omp_bridge.view(task_id)
+        attempt = result["execution"]["attempt"]
+        self.assertEqual(attempt["mode"], "manual")
+        self.assertEqual(attempt["declared_review_protocol"], "independent_first")
+        self.assertEqual(attempt["disclosure_provenance"], "manual_disclosed")
+        self.assertEqual(attempt["review_stage"], "independent")
+        self.assertFalse(attempt["grant"]["valid"])
+        self.assertNotIn("Author interpretation sentinel", json.dumps(result))
+
+    async def test_result_identifies_managed_grant_and_revocation(self):
+        identifier = await self.create(owner="omp")
+        store = self.omp_bridge.work_items
+        store.authorize(
+            identifier,
+            budget_seconds=60,
+            max_launches=2,
+            max_cost_usd=1,
+            allow_work=True,
+            allow_shell=False,
+        )
+        attempt = store.reserve(
+            identifier,
+            "change",
+            actor="omp",
+            kind="implement",
+            owner_id="fixture-supervisor",
+            autonomous=True,
+        )
+        task_id, conversation_id = str(uuid4()), str(uuid4())
+        lease = self.omp_bridge.tasks.lock(conversation_id)
+        self.addCleanup(lease.close)
+        now = time.time()
+        with closing(self.omp_bridge.tasks.connect()) as db, db:
+            db.execute(
+                "INSERT INTO tasks(task_id,conversation_id,created,updated,cwd,mode,model,prompt,status,deadline) VALUES (?,?,?,?,?,'work','unused','Managed fixture','running',?)",
+                (task_id, conversation_id, now, now, str(self.root), now + 60),
+            )
+        store.started(
+            attempt["attempt_id"], workspace=str(self.root), native_task_id=task_id
+        )
+        context = self.omp_bridge.view(task_id)["execution"]["attempt"]
+        self.assertEqual(context["mode"], "managed")
+        self.assertTrue(context["grant"]["present"])
+        self.assertTrue(context["grant"]["valid"])
+        store.revoke(identifier)
+        context = self.omp_bridge.view(task_id)["execution"]["attempt"]
+        self.assertFalse(context["grant"]["valid"])
+        self.assertEqual(context["grant"]["reason"], "revoked")
+        self.assertEqual(context["mode"], "managed")
 
     async def test_independent_registered_clarification_never_delivers_author_text(
         self,

@@ -285,9 +285,11 @@ class WorkItemsTests(unittest.TestCase):
             actor="omp",
             presentation=WorkPresentation(view="step"),
         )
-        self.assertEqual(selected["step"]["submission"], full["steps"][1]["submission"])
         self.assertEqual(
-            selected["step"]["criteria"], full["plan"]["steps"][1]["acceptance"]
+            selected["step"]["submissions"], [full["steps"][1]["submission"]]
+        )
+        self.assertEqual(
+            selected["step"]["acceptance"], full["plan"]["steps"][1]["acceptance"]
         )
         selected = perform_work(
             self.store, request, actor="omp", presentation=WorkPresentation(view="full")
@@ -302,6 +304,17 @@ class WorkItemsTests(unittest.TestCase):
         )
         self.assertEqual(set(rendered), {"markdown"})
         self.assertIn(full["plan"]["steps"][0]["acceptance"][0], rendered["markdown"])
+        accepted = perform_work(
+            self.store,
+            {**request, "step_id": "step0"},
+            actor="omp",
+            presentation=WorkPresentation(view="step"),
+        )["step"]
+        self.assertEqual(
+            {item["kind"] for item in accepted["attempts"]}, {"implement", "review"}
+        )
+        self.assertEqual(accepted["submissions"], [full["steps"][0]["submission"]])
+        self.assertEqual(accepted["review_acceptance"], full["steps"][0]["acceptance"])
 
     def test_large_summary_has_explicit_continuation(self):
         from omp_tandem.work_access import perform_work
@@ -2183,8 +2196,10 @@ class IndependentReviewTests(WorkItemsTests):
         )
 
 
-def measure_view_fixture():
+def measure_view_fixture(*, include_schemas=False):
     """Repeatable transport-size and indexed-observation experiment: run this module."""
+    import asyncio
+    from contextlib import closing
     from time import perf_counter
 
     from omp_tandem.work_access import perform_work
@@ -2214,12 +2229,73 @@ def measure_view_fixture():
         for _ in range(100):
             case.store.progress(case.work_id)
         sizes["progress_query_mean_seconds"] = (perf_counter() - start) / 100
-        with sqlite3.connect(case.store.database) as db:
+        for label, operation in (
+            ("full_get_mean_seconds", lambda: case.store.perform(get, actor="omp")),
+            (
+                "summary_get_mean_seconds",
+                lambda: perform_work(case.store, get, actor="omp"),
+            ),
+        ):
+            start = perf_counter()
+            for _ in range(20):
+                operation()
+            sizes[label] = (perf_counter() - start) / 20
+        with closing(sqlite3.connect(case.store.database)) as db:
             sizes["progress_query_plan"] = db.execute(
                 "EXPLAIN QUERY PLAN SELECT revision,status,updated_at FROM work_cards WHERE work_id=?",
                 (case.work_id,),
             ).fetchall()
-        print(json.dumps(sizes, ensure_ascii=False))
+        if include_schemas:
+            from fastmcp import Client
+
+            from omp_tandem.api import build_server
+            from omp_tandem.bridge import Bridge
+            from omp_tandem.runtime_identity import runtime_identity
+
+            async def wire():
+                bridge = Bridge(
+                    case.scope.base,
+                    "unused",
+                    None,
+                    project_root=case.root,
+                    channel_enabled=False,
+                    webhook_enabled=False,
+                    migrate_legacy=False,
+                )
+                async with Client(build_server(bridge)) as client:
+                    mcp = next(
+                        tool.inputSchema
+                        for tool in await client.list_tools()
+                        if tool.name == "tandem_work"
+                    )
+                    native = next(
+                        tool.parameters
+                        for tool in bridge.runtime.worker.worker_tools(
+                            {"task_id": "wire-fixture"}
+                        )
+                        if tool.name == "tandem_work"
+                    )
+                    # Lossless common-definition factoring keeps the evidence readable.
+                    definitions = mcp.get("$defs")
+                    if definitions == native.get("$defs"):
+                        return {
+                            "shared_$defs": definitions,
+                            "mcp": {
+                                key: value
+                                for key, value in mcp.items()
+                                if key != "$defs"
+                            },
+                            "native": {
+                                key: value
+                                for key, value in native.items()
+                                if key != "$defs"
+                            },
+                        }
+                    return {"mcp": mcp, "native": native}
+
+            sizes["wire_schema"] = asyncio.run(wire())
+            sizes["runtime_identity"] = runtime_identity()
+        print(json.dumps(sizes, ensure_ascii=False, indent=2))
     finally:
         case.doCleanups()
 
@@ -2228,6 +2304,6 @@ if __name__ == "__main__":
     import sys
 
     if "--measure-view" in sys.argv:
-        measure_view_fixture()
+        measure_view_fixture(include_schemas="--schemas" in sys.argv)
     else:
         unittest.main()

@@ -9,6 +9,7 @@ from .artifacts import ArtifactStore
 from .execution import conversation_usage, task_usage
 from .models import CheckRun, assess_checks
 from .project_context import ProjectContextStore
+from .runtime_identity import runtime_identity
 from .runtime_models import ACTIVE, TaskSummary
 from .task_contracts import current_task, work_policy
 from .task_interaction import CHECK_RUN_ARTIFACT
@@ -57,6 +58,7 @@ class TaskResults:
             else "",
             "next_action": action,
         }
+        result["runtime_identity"] = runtime_identity()
         if task.get("review_run_id"):
             result["review_run_id"] = task["review_run_id"]
         if task.get("review_id"):
@@ -78,6 +80,30 @@ class TaskResults:
                 "thinking": task.get("actual_thinking"),
             },
         }
+        result["execution"]["models"] = {
+            "requested": {
+                "value": (result["execution"].get("requested") or {}).get("model"),
+                "source": "execution.requested.model"
+                if "model" in (result["execution"].get("requested") or {})
+                else "not_requested"
+                if task.get("execution_json")
+                else "not_recorded",
+            },
+            "effective": {
+                "value": (result["execution"].get("effective") or {}).get("model"),
+                "source": "execution.effective.model"
+                if task.get("execution_json")
+                else "not_recorded",
+            },
+            "observed": {
+                "value": task.get("actual_model"),
+                "source": "native_get_state"
+                if task.get("actual_model")
+                else "not_observed",
+            },
+        }
+        attempt, attempt_context = self._attempt_context(task_id, task)
+        result["execution"]["attempt"] = attempt_context
         with closing(self.tasks.connect()) as db:
             turns = [
                 dict(row)
@@ -131,7 +157,7 @@ class TaskResults:
         result["check_runs"] = assess_checks(runs)
         result["check_runs"]["unreadable_records"] = unreadable
         result["facts"] = self._facts(
-            task_id, task, status, report, result["check_runs"]
+            task_id, task, status, report, result["check_runs"], attempt
         )
         if task["project_context_id"]:
             result["project_context"] = self.projects.info(task["project_context_id"])
@@ -223,7 +249,77 @@ class TaskResults:
                 )
         return runs, unreadable
 
-    def _facts(self, task_id, task, status, report, checks):
+    def _attempt_context(self, task_id, task):
+        with closing(self.tasks.connect()) as db:
+            try:
+                row = db.execute(
+                    "SELECT a.attempt,c.card FROM work_attempts a JOIN work_cards c ON c.work_id=a.work_id WHERE a.native_task_id=?",
+                    (task_id,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                row = None
+        attempt = json.loads(row["attempt"]) if row else None
+        card = json.loads(row["card"]) if row else None
+        grant = card["authorization"] if card else None
+        managed = bool(attempt and attempt["autonomous"])
+        reason = (
+            "not_present"
+            if not grant
+            else "not_bound"
+            if not managed or grant["authorization_id"] != attempt["authorization_id"]
+            else "revoked"
+            if grant["revoked_at"] is not None
+            else "expired"
+            if grant["deadline"] <= time.time()
+            else "plan_changed"
+            if grant["plan_revision"] != card["plan_revision"]
+            else "paused"
+            if card["status"] == "paused"
+            else None
+        )
+        review = bool(
+            (attempt and attempt["kind"] == "review") or task.get("review_id")
+        )
+        protocol = (
+            (
+                attempt.get("protocol", "legacy_disclosure")
+                if attempt
+                else "independent_first"
+            )
+            if review
+            else None
+        )
+        return attempt, {
+            "mode": "managed" if managed else "manual",
+            "source": "work_attempt.autonomous" if attempt else "interactive_task",
+            "attempt_id": attempt["attempt_id"] if attempt else None,
+            "state": attempt["state"] if attempt else task["status"],
+            "lifetime": "operator_supervisor" if managed else "attached_client",
+            "grant": {
+                "present": grant is not None,
+                "valid": reason is None,
+                "reason": reason,
+                "source": "work_card.authorization" if card else "not_recorded",
+            },
+            "declared_review_protocol": protocol,
+            "review_stage": attempt.get("review_stage")
+            if attempt
+            else task.get("review_stage"),
+            "disclosure_provenance": (
+                "legacy_disclosure"
+                if protocol == "legacy_disclosure"
+                else "manual_disclosed"
+                if review and attempt and not managed
+                else "pinned_snapshot_reader"
+                if review
+                and (task.get("review_id") or (attempt and attempt.get("review_id")))
+                else "snapshot_not_bound"
+                if review
+                else None
+            ),
+        }
+
+    def _facts(self, task_id, task, status, report, checks, attempt):
         """Four separately observed facts; none is inferred from another.
 
         execution: how the worker turn ended; delivery: what the final report
@@ -249,16 +345,7 @@ class TaskResults:
         else:
             delivery = "missing"
         verdict = {"status": "none", "attempt_id": None, "kind": None}
-        with closing(self.tasks.connect()) as db:
-            try:
-                row = db.execute(
-                    "SELECT attempt FROM work_attempts WHERE native_task_id=?",
-                    (task_id,),
-                ).fetchone()
-            except sqlite3.OperationalError:
-                row = None
-        if row is not None:
-            attempt = json.loads(row["attempt"])
+        if attempt is not None:
             verdict = {
                 "status": attempt.get("verdict") or "none",
                 "attempt_id": attempt.get("attempt_id"),

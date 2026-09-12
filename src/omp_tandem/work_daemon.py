@@ -345,8 +345,14 @@ def main(argv=None):
                     else {"action": "list"},
                     actor="operator",
                 )
+                from .runtime_identity import runtime_identity
                 from .work_items import present_work
 
+                if args.view == "step":
+                    result = store.step_material(
+                        result, step_id=args.step_id, actor="operator"
+                    )
+                result["runtime_identity"] = runtime_identity()
                 result = present_work(
                     result,
                     actor="operator",

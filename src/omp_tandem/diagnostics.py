@@ -7,6 +7,7 @@ import time
 from contextlib import closing
 from pathlib import Path
 
+from .runtime_identity import runtime_identity
 from .runtime_models import ACTIVE
 
 
@@ -51,6 +52,7 @@ class Diagnostics:
             )
         return {
             "status": "blocked" if issues else "local_ready",
+            "runtime_identity": runtime_identity(),
             "project": {
                 **scope,
                 "expected_project": expected,

@@ -114,6 +114,92 @@ class BootstrapTests(unittest.TestCase):
             else []
         )
 
+    def test_runtime_identity_keeps_startup_checkout_and_editable_provenance(self):
+        from importlib import metadata
+
+        from omp_tandem.runtime_identity import RuntimeIdentity
+
+        info = self.root / "omp_tandem-9.1.0.dist-info"
+        info.mkdir()
+        (info / "METADATA").write_text("Name: omp-tandem\nVersion: 9.1.0\n")
+        (info / "direct_url.json").write_text(
+            json.dumps({"url": self.root.as_uri(), "dir_info": {"editable": True}})
+        )
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.root),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+            check=True,
+        )
+        source = self.root / "src/omp_tandem/bootstrap.py"
+        captured = RuntimeIdentity.capture(
+            module_path=source, distribution=metadata.Distribution.at(info)
+        )
+        original = captured.view()
+        self.assertEqual(original["distribution_origin"], "editable")
+        self.assertEqual(original["exact_build"], "unknown")
+        self.assertEqual(original["package_version"], "9.1.0")
+        self.assertFalse(original["source_checkout"]["dirty"])
+        source.write_text("changed after startup\n")
+        (info / "METADATA").write_text("Name: omp-tandem\nVersion: 9.2.0\n")
+        self.assertEqual(captured.view(), original)
+        newer = RuntimeIdentity.capture(
+            module_path=source, distribution=metadata.Distribution.at(info)
+        ).view()
+        self.assertEqual(newer["package_version"], "9.2.0")
+        self.assertTrue(newer["source_checkout"]["dirty"])
+
+    def test_runtime_wheel_identity_requires_verified_record_bytes(self):
+        import base64
+        import hashlib
+        from importlib import metadata
+
+        from omp_tandem.runtime_identity import RuntimeIdentity
+
+        info = self.root / "omp_tandem-9.1.0.dist-info"
+        info.mkdir()
+        (info / "METADATA").write_text("Name: omp-tandem\nVersion: 9.1.0\n")
+        (info / "WHEEL").write_text("Wheel-Version: 1.0\n")
+        package = self.root / "src/omp_tandem"
+        records = []
+        for path in [*package.glob("*.py"), info / "METADATA", info / "WHEEL"]:
+            data = path.read_bytes()
+            digest = (
+                base64.urlsafe_b64encode(hashlib.sha256(data).digest())
+                .decode()
+                .rstrip("=")
+            )
+            records.append(f"{path.relative_to(self.root)},sha256={digest},{len(data)}")
+        (info / "RECORD").write_text("\n".join(records) + "\n")
+        source = package / "bootstrap.py"
+        identity = RuntimeIdentity.capture(
+            module_path=source, distribution=metadata.Distribution.at(info)
+        )
+        self.assertEqual(identity.view()["distribution_origin"], "installed_wheel")
+        self.assertNotEqual(identity.view()["exact_build"], "unknown")
+        source.write_text("changed installed bytes\n")
+        newer = RuntimeIdentity.capture(
+            module_path=source, distribution=metadata.Distribution.at(info)
+        )
+        self.assertEqual(newer.view()["exact_build"], "unknown")
+        self.assertEqual(newer.view()["distribution_origin"], "unpinned")
+        self.assertNotEqual(identity.view()["exact_build"], "unknown")
+
     def test_cold_then_warm_reuses_validated_noneditable_runtime_outside_checkout(self):
         cwd = Path.cwd()
         python = bootstrap.prepare_runtime(self.root)

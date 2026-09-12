@@ -157,6 +157,14 @@ def perform_work(
             "error": {"code": "cursor_stale"},
             "current": present_work(result, actor=actor),
         }
+    elif options.view == "step" and command.action == "get":
+        result = store.step_material(
+            result,
+            step_id=command.step_id,
+            actor=actor,
+            attempt_token=token,
+            limit=options.limit,
+        )
     return present_work(
         result,
         actor=actor,

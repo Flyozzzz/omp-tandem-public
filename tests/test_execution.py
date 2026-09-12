@@ -211,6 +211,17 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(
             first["execution"]["actual"], {"model": "local/peer", "thinking": "low"}
         )
+        self.assertEqual(
+            first["execution"]["models"]["observed"],
+            {"value": "local/peer", "source": "native_get_state"},
+        )
+        self.assertIsNone(first["execution"]["models"]["requested"]["value"])
+        self.assertEqual(
+            first["execution"]["models"]["effective"]["value"], "local/peer"
+        )
+        self.assertEqual(first["execution"]["attempt"]["mode"], "manual")
+        self.assertFalse(first["execution"]["attempt"]["grant"]["valid"])
+        self.assertFalse(first["execution"]["attempt"]["grant"]["present"])
         self.assertEqual(first["usage"]["task"]["tokens"]["total"]["value"], 40)
         self.assertGreater(first["usage"]["task"]["duration_seconds"], 0)
         follow = self.bridge.runtime.start(

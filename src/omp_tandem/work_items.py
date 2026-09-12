@@ -588,7 +588,22 @@ def present_work(
             spec = next(
                 item for item in payload["plan"]["steps"] if item["id"] == step_id
             )
-            result["step"] = {**spec, **step, "criteria": spec["acceptance"]}
+            result["step"] = {
+                **spec,
+                **{
+                    key: value
+                    for key, value in step.items()
+                    if key not in {"attempt", "submission", "acceptance"}
+                },
+                "acceptance": spec["acceptance"],
+                "review_acceptance": step["acceptance"],
+                "attempts": step.get(
+                    "attempts", [step["attempt"]] if step["attempt"] else []
+                ),
+                "submissions": step.get(
+                    "submissions", [step["submission"]] if step["submission"] else []
+                ),
+            }
         else:
             result["paused"] = payload["status"] == "paused"
             grant = payload["authorization"]
@@ -705,6 +720,8 @@ def present_work(
                     "deadline",
                 }
             }
+    if "runtime_identity" in payload:
+        result["runtime_identity"] = payload["runtime_identity"]
     if format == "markdown":
         # Render exactly the selected material, without a second JSON copy.
         return {
@@ -1232,6 +1249,61 @@ class WorkStore:
                 raise ValueError("Unknown work item")
             return dict(row)
 
+    def step_material(self, current, *, step_id, actor, attempt_token=None, limit=50):
+        """Historical step material uses the same snapshot disclosure projection."""
+        if not step_id:
+            raise ValueError("view=step requires step_id")
+        step = self._step(current, step_id)
+        with self._read_connection() as db:
+            bound = (
+                self._authenticate(db, attempt_token, actor) if attempt_token else None
+            )
+            revision = db.execute(
+                "SELECT revision FROM work_cards WHERE work_id=?", (current["work_id"],)
+            ).fetchone()[0]
+            if revision != current["revision"]:
+                safe = redact_author(
+                    self._view(db, self._load(db, current["work_id"])), bound
+                )
+                return {
+                    "error": {"code": "cursor_stale"},
+                    "current": present_work(safe, actor=actor),
+                }
+            rows = db.execute(
+                "SELECT event FROM work_events WHERE work_id=? ORDER BY revision",
+                (current["work_id"],),
+            ).fetchall()
+            events = redact_author(
+                {"events": [json.loads(row[0]) for row in rows]}, bound
+            )["events"]
+            projected = [
+                historical
+                for event in events
+                for historical in event["snapshot"]["steps"]
+                if historical["id"] == step_id
+            ]
+            projected.append(step)
+        attempts, submissions = {}, {}
+        for snapshot in projected:
+            if snapshot.get("attempt"):
+                attempts[snapshot["attempt"]["attempt_id"]] = snapshot["attempt"]
+            if snapshot.get("submission"):
+                submissions[snapshot["submission"]["submission_id"]] = snapshot[
+                    "submission"
+                ]
+        for name, records in (("attempts", attempts), ("submissions", submissions)):
+            step[name] = list(records.values())[-limit:]
+            if len(records) > limit:
+                step.setdefault("continuation", []).append(
+                    {
+                        "section": name,
+                        "remaining_ids": list(records)[:-limit],
+                        "action": "history",
+                        "include_snapshots": True,
+                    }
+                )
+        return current
+
     def history_page(
         self,
         current,
@@ -1279,11 +1351,8 @@ class WorkStore:
                     "error": {"code": "cursor_stale"},
                     "current": present_work(current, actor=actor),
                 }
-            expression = (
-                "event" if include_snapshots else "json_remove(event, '$.snapshot')"
-            )
             rows = db.execute(
-                f"SELECT {expression} FROM work_events WHERE work_id=? AND revision>? AND revision<=? ORDER BY revision LIMIT ?",
+                "SELECT event FROM work_events WHERE work_id=? AND revision>? AND revision<=? ORDER BY revision LIMIT ?",
                 (current["work_id"], after, revision, limit + 1),
             ).fetchall()
         events = [json.loads(row[0]) for row in rows[:limit]]
@@ -1303,7 +1372,9 @@ class WorkStore:
         )
         result = redact_author(result, bound)
         for event in result["events"]:
-            if "snapshot" in event:
+            if not include_snapshots:
+                event.pop("snapshot", None)
+            elif "snapshot" in event:
                 event["snapshot"].pop("markdown", None)
         return result
 

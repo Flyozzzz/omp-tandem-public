@@ -4,7 +4,6 @@
 import asyncio
 import time
 from contextlib import asynccontextmanager
-from importlib.metadata import version
 from typing import Annotated, Literal
 
 from fastmcp import Context
@@ -19,6 +18,7 @@ from .models import ArtifactInfo, TaskContract, TurnContract
 from .project_context import ProjectContext
 from .prompts import coordinator_instructions
 from .reviews import PublicationBusy, ReviewRequest, publication_lock
+from .runtime_identity import register_schemas, runtime_identity
 from .runtime_models import ACTIVE, Mode, TaskSummary
 from .work_items import WorkCommand, WorkPresentation
 from .workspace import client_root_paths
@@ -60,6 +60,8 @@ def build_server(configuration: Bridge | RuntimeOptions):
     @asynccontextmanager
     async def lifespan(_server):
         await runtime.start()
+        tools = await _server.get_tools()
+        register_schemas("mcp", {name: tool.parameters for name, tool in tools.items()})
         try:
             yield {}
         finally:
@@ -67,7 +69,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
 
     mcp = ChannelFastMCP(
         "omp-tandem",
-        version=version("omp-tandem"),
+        version=runtime_identity()["package_version"],
         instructions=coordinator_instructions(channels_enabled),
         lifespan=lifespan,
         binding=runtime,
@@ -186,6 +188,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 **bridge.scope.info(),
                 "migration": bridge.migration,
                 "execution_profiles": profile_catalog(),
+                "runtime_identity": runtime_identity(),
             }
         )
 
