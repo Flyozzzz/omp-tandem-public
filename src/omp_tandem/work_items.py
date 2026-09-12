@@ -4128,7 +4128,20 @@ class WorkStore:
                 "actor": actor,
                 "at": time.time(),
                 "continuation": continuation,
+                "revision": card["revision"] + 1,
+                "withdrawn_proposal_id": (card.get("proposal") or {}).get(
+                    "proposal_id"
+                ),
             }
+            if transition and transition["phase"] in TRANSITION_OPEN:
+                transition.update(
+                    phase="cancelled",
+                    cancelled_at=closure["at"],
+                    closure_revision=closure["revision"],
+                )
+                card.setdefault("transition_history", []).append(transition)
+            card["transition"] = None
+            card["proposal"] = None
             card["closure"] = closure
             card["status"] = "cancelled"
             if card["authorization"]:

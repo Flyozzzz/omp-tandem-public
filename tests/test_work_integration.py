@@ -548,6 +548,160 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def cancel_negotiation(self, identifier, before):
+        proposal_id = before["proposal"]["proposal_id"]
+        transition = before.get("transition")
+        request = (
+            "cancel",
+            identifier,
+            "--disposition",
+            "cancelled",
+            "--expected-revision",
+            str(before["revision"]),
+            "--operation-id",
+            "cancel-negotiation",
+            "--note",
+            "Close this card and its pending negotiation",
+            "--evidence",
+            "Operator inspected all execution dispositions",
+        )
+        cancelled = await self.daemon(*request)
+        self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
+        closed = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        self.assertEqual(closed["revision"], before["revision"] + 1)
+        self.assertEqual(closed["status"], "cancelled")
+        self.assertIsNone(closed["proposal"])
+        self.assertIsNone(closed["transition"])
+        self.assertEqual(closed["closure"]["withdrawn_proposal_id"], proposal_id)
+        self.assertEqual(closed["closure"]["revision"], closed["revision"])
+        self.assertFalse(any(action["allowed"] for action in closed["next_actions"]))
+        if transition:
+            archived = closed["transition_history"][-1]
+            self.assertEqual(
+                closed["transition_history"][:-1], before["transition_history"]
+            )
+            self.assertEqual(archived["transition_id"], transition["transition_id"])
+            self.assertEqual(archived["proposal_id"], proposal_id)
+            self.assertEqual(archived["phase"], "cancelled")
+            self.assertEqual(
+                archived["closure_revision"], closed["closure"]["revision"]
+            )
+            self.assertEqual(archived["inventory"], transition["inventory"])
+        else:
+            self.assertEqual(closed["transition_history"], before["transition_history"])
+        summary = await self.call(
+            self.claude, {"action": "get", "work_id": identifier}, view="summary"
+        )
+        self.assertIsNone(summary["proposal"])
+        self.assertIsNone(summary["transition"])
+        inspected = await self.daemon("transition", identifier, "inspect")
+        self.assertEqual(inspected.returncode, 0, inspected.stderr)
+        inspected = json.loads(inspected.stdout)
+        self.assertIsNone(inspected["proposal"])
+        self.assertIsNone(inspected["transition"])
+        self.assertEqual(inspected["commands"], [])
+        self.assertEqual(inspected["transition_history"], closed["transition_history"])
+        shown = await self.daemon("show", identifier, "--format", "markdown")
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("Closure: cancelled", shown.stdout)
+        self.assertNotIn("Pending proposal", shown.stdout)
+        self.assertNotIn("phase ready", shown.stdout)
+        self.assertNotIn("phase stopping", shown.stdout)
+        if transition:
+            self.assertIn(
+                f"Transition {transition['transition_id']} cancelled", shown.stdout
+            )
+        replay = await self.daemon(*request)
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        replayed = json.loads(replay.stdout)
+        self.assertEqual(replayed["revision"], closed["revision"])
+        self.assertEqual(replayed["transition_history"], closed["transition_history"])
+        self.assertEqual(replayed["replayed_operation"]["outcome"], closed["closure"])
+
+    async def test_cancel_closes_pending_proposal_without_transition(self):
+        identifier = await self.create()
+        current = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        pending = await self.mutate(
+            self.claude,
+            identifier,
+            "propose",
+            plan={**current["plan"], "goal": "Negotiate a different result"},
+        )
+        await self.cancel_negotiation(identifier, pending)
+
+    async def test_cancel_archives_fully_disposed_transition(self):
+        identifier = await self.create()
+        claimed = await self.mutate(self.claude, identifier, "claim", step_id="change")
+        attempt_id = claimed["claim"]["attempt_id"]
+        pending = await self.mutate(
+            self.claude,
+            identifier,
+            "propose",
+            plan={**claimed["plan"], "goal": "Negotiate a different result"},
+        )
+        begun = await self.daemon(
+            "transition",
+            identifier,
+            "begin",
+            "--proposal",
+            pending["proposal"]["proposal_id"],
+            "--expected-revision",
+            str(pending["revision"]),
+            "--operation-id",
+            "begin-negotiation",
+            "--note",
+            "Stop before renegotiating",
+        )
+        self.assertEqual(begun.returncode, 0, begun.stderr)
+        stopping = json.loads(begun.stdout)
+        refused = await self.daemon(
+            "cancel",
+            identifier,
+            "--disposition",
+            "cancelled",
+            "--expected-revision",
+            str(stopping["revision"]),
+            "--operation-id",
+            "undisposed-cancel",
+            "--note",
+            "Premature closure",
+            "--evidence",
+            "Inventory is not disposed",
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("cancel_requires_disposition", refused.stderr)
+        unchanged = await self.call(
+            self.claude, {"action": "get", "work_id": identifier}
+        )
+        self.assertEqual(unchanged["revision"], stopping["revision"])
+        self.assertEqual(unchanged["transition"], stopping["transition"])
+        resolved = await self.daemon(
+            "transition",
+            identifier,
+            "resolve",
+            "--transition",
+            stopping["transition"]["transition_id"],
+            "--attempt",
+            attempt_id,
+            "--confirm-stopped",
+            "--expected-revision",
+            str(stopping["revision"]),
+            "--operation-id",
+            "resolve-negotiation",
+            "--note",
+            "Manual execution stopped; effects inspected",
+            "--evidence",
+            "No outstanding effects or work to preserve",
+        )
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        ready = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        self.assertEqual(ready["transition"]["phase"], "ready")
+        saved_attempt = self.claude_bridge.work_items.attempt(attempt_id)
+        await self.cancel_negotiation(identifier, ready)
+        self.assertEqual(
+            self.claude_bridge.work_items.attempt(attempt_id), saved_attempt
+        )
+
     async def daemon(self, *args, project_root=None):
         return await asyncio.to_thread(
             subprocess.run,
