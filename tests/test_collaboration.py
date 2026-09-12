@@ -270,6 +270,23 @@ class CollaborationTests(RpcHarness):
         self.assertEqual(record["result"], "failed")
         self.assertEqual(record["recorded_by"], "report")
 
+    async def test_e2_missing_blocker_and_not_run_refused_by_actual_host_callback(self):
+        for scenario, field in (
+            ("not-run-outcome", "checks"),
+            ("blocked-without-reason", "blockers"),
+        ):
+            with self.subTest(scenario=scenario):
+                job = await self.start(scenario)
+                result = await self.result(job["task_id"], details=True)
+                self.assertEqual(
+                    (result["status"], result["outcome"]), ("completed", "success")
+                )
+                self.assertEqual(result["answer"], "Valid short outcome")
+                proof = await self._artifact_json(result, "runtime-refusal")
+                self.assertTrue(proof["is_error"])
+                self.assertIn(field, proof["text"])
+                self.assertEqual(result["check_runs"]["run_count"], 0)
+
     async def test_participant_lookalike_artifact_is_not_a_check_run(self):
         job = await self.start("lookalike-run")
         result = await self.result(job["task_id"], details=True)

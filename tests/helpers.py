@@ -75,6 +75,12 @@ for line in sys.stdin:
             finish({'outcome': 'success', 'summary': 'Long answer prepared', 'answer': '雪界𝄞' * 6000})
         elif scenario == 'contract-error-then-partial':
             finish({'outcome': 'success', 'summary': 'Claimed complete', 'answer': 'Everything passed', 'checks': [{'name': 'pytest', 'result': 'failed'}]})
+        elif scenario in ('not-run-outcome', 'blocked-without-reason'):
+            report = {'outcome': 'success', 'summary': 'Invalid E2', 'answer': 'Invalid E2',
+                      'checks': [{'name': 'pytest', 'result': 'not_run'}]}
+            if scenario == 'blocked-without-reason':
+                report = {'outcome': 'blocked', 'summary': 'Invalid E2', 'answer': 'Invalid E2'}
+            finish(report)
         elif scenario in ('finish-twice', 'finish-differs'):
             finish({'outcome': 'success', 'summary': 'Done', 'answer': 'Exact answer'})
         elif scenario == 'provider-refusal':
@@ -115,7 +121,11 @@ for line in sys.stdin:
         finish({'outcome': 'success', 'summary': 'Done', 'answer': 'No runs were recorded by the server'})
     elif kind == 'host_tool_result' and command['id'] == 'finish':
         text = command['result']['content'][0]['text']
-        if scenario == 'contract-error-then-partial':
+        if scenario in ('not-run-outcome', 'blocked-without-reason'):
+            emit({'type': 'host_tool_call', 'id': 'refusal-proof', 'toolCallId': 'refusal-proof-call',
+                  'toolName': 'tandem_publish_artifact', 'arguments': {
+                      'name': 'runtime-refusal', 'content': json.dumps({'is_error': bool(command.get('isError')), 'text': text})}})
+        elif scenario == 'contract-error-then-partial':
             if not (command.get('isError') and 'outcome_contract' in text):
                 end('Contract error was not surfaced: ' + text)
             else:
@@ -133,6 +143,9 @@ for line in sys.stdin:
             emit({'type': 'host_tool_call', 'id': 'finish2', 'toolCallId': 'finish-call-2', 'toolName': 'tandem_finish', 'arguments': {'outcome': 'success', 'summary': 'Done', 'answer': 'A different answer'}})
         else:
             end('Recorded')
+    elif kind == 'host_tool_result' and command['id'] == 'refusal-proof':
+        scenario = 'after-refusal'
+        finish({'outcome': 'success', 'summary': 'Recorded', 'answer': 'Valid short outcome'})
     elif kind == 'host_tool_result' and command['id'] == 'finish2':
         emit({'type': 'host_tool_call', 'id': 'note', 'toolCallId': 'note-call', 'toolName': 'tandem_publish_artifact', 'arguments': {'name': 'second-finish', 'content': json.dumps({'is_error': bool(command.get('isError')), 'text': command['result']['content'][0]['text']})}})
     elif kind == 'host_tool_result' and command['id'] == 'note':

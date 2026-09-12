@@ -1615,6 +1615,18 @@ def helper_probe(executable, root, agent, provider, report):
     }
 
 
+def recorded_tool_results(results):
+    """Do not export even disposable fixture claim capabilities as evidence."""
+    recorded = dict(results)
+    if "tandem_work" in recorded:
+        work = json.loads(recorded["tandem_work"])
+        claim = work.get("claim") or {}
+        if "token" in claim:
+            claim["token"] = "<redacted-fixture-capability>"
+        recorded["tandem_work"] = json.dumps(work, ensure_ascii=False)
+    return recorded
+
+
 def fixture_command(arguments, *, cwd, evidence):
     result = subprocess.run(
         [str(value) for value in arguments],
@@ -1904,7 +1916,7 @@ async def installed_shared_flow(root, executable, report_path):
                         "submission_id": submission,
                         "task_result": result,
                         "withheld_input": True,
-                        "tool_results": provider.results(),
+                        "tool_results": recorded_tool_results(provider.results()),
                     }
                     evidence["flows"].append(row)
                     if scenario == "clarification":

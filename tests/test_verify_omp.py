@@ -37,6 +37,20 @@ def _alive(**overrides):
     return observed
 
 
+class FixtureEvidenceTests(unittest.TestCase):
+    def test_recording_hides_claim_capability_without_mutating_callback_input(self):
+        response = json.dumps(
+            {"claim": {"attempt_id": "fixture", "token": "SECRET-CAPABILITY"}}
+        )
+        original = {"tandem_work": response, "tandem_finish": "Final report recorded"}
+        recorded = verify_omp.recorded_tool_results(original)
+        self.assertNotIn("SECRET-CAPABILITY", json.dumps(recorded))
+        self.assertEqual(original["tandem_work"], response)
+        self.assertEqual(
+            json.loads(recorded["tandem_work"])["claim"]["attempt_id"], "fixture"
+        )
+
+
 class SchemaCensusTests(unittest.TestCase):
     def test_counts_schema_keywords_not_property_names_or_examples(self):
         registered = {
