@@ -100,7 +100,7 @@ For development, scale planning to uncertainty: a known local fix needs a brief 
 - `tandem_work` defaults to `view="summary"`; request `plan`, `step` or `full` explicitly. History is paged; use its cursor and refetch on `cursor_stale`. `next_actions` are hints, not authorization.
 - Every task result carries `runtime_identity`: compare the loaded package/build and registered schema surface with the checkout, rather than assuming an updated checkout changed a running server.
 - `recovery` descriptors explain report-only closure of the same claim. An operator must authorize another host with `successor` before `recover`; this does not rerun a model, tests or implementation. Independent clarification requires a new snapshot, with exact `review_context_paths`; prior waivers do not automatically cover changed inputs.
-- `wake_acknowledgment` distinguishes `acknowledged`, `deferred` and `not_attempted`. Acceptance is separate from application (`not_recorded` without evidence), `assess`, apply receipts and publication. Native usage is a scoped subtotal; Claude cost remains unknown unless separately measured.
+- `wake_acknowledgment` distinguishes `acknowledged`, `acknowledged_zero`, `deferred` and `not_attempted`. Acceptance is separate from application (`not_recorded` without evidence), `assess`, apply receipts and publication. Native usage is a scoped subtotal; Claude cost remains unknown unless separately measured.
 
 [Contract, reporting and recovery details](docs/guide.md#compact-contracts). The proposed 3.6.0 package is pending operator release confirmation; no tag or publication is implied.
 

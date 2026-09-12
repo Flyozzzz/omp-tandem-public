@@ -384,7 +384,7 @@ python -m omp_tandem.work_daemon --project-root /project --state-dir /state succ
 
 该宿主用新修订和 operation ID 调用 `recover`，再记录同一有效领取的报告与精确裁决；不会重跑模型／测试，也不改变提交、阶段、有效期或 grants。外来、过期、已退役、legacy-unbound 或尚未确认停止的领取不能获得新权限；旧回执仍可作为历史读取。末尾 `(code=cyber_policy)` 分类为 `provider_policy_refusal`，普通文字提及代码不算；审查阶段拒绝使用原因码。行政关闭不是改写提示或绕过提供商拒绝。
 
-`wake_acknowledgment` 对已观察任务／修订返回 `acknowledged`（包含零计数）、带原因的 `deferred` 或 `not_attempted`。延迟确认不否定已读取状态，后续显式读取可确认保留的提示。迟到或重复通知不调度任务、不增加授权、不确认未来修订。
+`wake_acknowledgment` 对已观察任务／修订返回 `acknowledged`、`acknowledged_zero`（零计数）、带原因的 `deferred` 或 `not_attempted`。延迟确认不否定已读取状态，后续显式读取可确认保留的提示。迟到或重复通知不调度任务、不增加授权、不确认未来修订。
 
 验收、应用与发布分开。无应用证据时为 `not_recorded`；`assess` 仅记录预期／观察 HEAD 和时间，不确定谁以何方式应用。显式 `apply --expected-head` 有单独回执。`show WORK_ID --format markdown` 生成工作报告；工具非 get 操作的 `format="markdown"` 是围栏 JSON。只对可证实关联的原生轮次去重计数，部分费用标为小计；Claude 和未归属费用仍未知。更小 JSON 不代表同比例提速或省钱。
 
@@ -473,7 +473,7 @@ python -m omp_tandem.work_daemon --project-root /project --state-dir /state succ
 {"request":{"action":"get","work_id":"WORK_ID"},"wait_seconds":0}
 ```
 
-返回的 `markdown` 是同一状态的可读任务卡；结构化字段包括 `revision`、`plan_revision`、`agreements`、步骤、阻塞、尝试、提交、`authorization`、`next_action` 和最终 `result`。进度会增加 `revision`，但不改变计划版本。`history` 的 `expected_revision` 是排除该版本及更早事件的游标：
+默认返回 JSON summary，不重复 `markdown` 字段；按需显式选择 `plan`、`step`、`full` 或 `format="markdown"`。结构化状态包括 `revision`、`plan_revision`、`agreements`、步骤、阻塞、尝试、提交、`authorization`、`next_actions` 和最终 `result`，完整材料需通过对应视图／续页读取。进度增加 `revision`，但不改变计划版本。`history` 的 `expected_revision` 排除该版本及更早事件，继续分页使用返回的 `cursor`：
 
 ```json
 {"request":{"action":"history","work_id":"WORK_ID","expected_revision":0}}

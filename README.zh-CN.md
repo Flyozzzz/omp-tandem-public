@@ -102,7 +102,7 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 - `tandem_work` 默认返回 `view="summary"`；需要时显式选择 `plan`、`step` 或 `full`。历史分页返回；按游标继续，遇到 `cursor_stale` 重新读取状态。`next_actions` 只是提示，不是授权。
 - 每个任务结果都包含 `runtime_identity`：应比较已加载软件包、构建和注册 schema 与工作副本，不能认为更新文件就更新了运行中的服务。
 - `recovery` 描述如何仅凭报告关闭同一领取。其他宿主执行 `recover` 前，操作者必须显式授权 `successor`；这不会重跑模型、测试或实现。独立阶段的澄清要求新快照及明确的 `review_context_paths`，旧豁免不会自动适用于新输入。
-- `wake_acknowledgment` 区分 `acknowledged`、`deferred`、`not_attempted`。验收与应用分离：无证据时为 `not_recorded`；`assess`、apply 回执和发布分别记录。原生用量只是限定范围的小计，未经另行测量的 Claude 费用仍未知。
+- `wake_acknowledgment` 区分 `acknowledged`、`acknowledged_zero`、`deferred`、`not_attempted`。验收与应用分离：无证据时为 `not_recorded`；`assess`、apply 回执和发布分别记录。原生用量只是限定范围的小计，未经另行测量的 Claude 费用仍未知。
 
 [契约、报告与恢复详情](docs/guide.zh-CN.md#compact-contracts)。软件包版本 3.6.0 为待操作者确认的提案，不表示已打标签或发布。
 
