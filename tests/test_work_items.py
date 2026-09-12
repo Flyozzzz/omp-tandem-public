@@ -67,6 +67,40 @@ def plan(*, parallel=False):
     }
 
 
+def six_step_fixture(case, *, count=6):
+    """A real agreed card with accepted, submitted, blocked and running work."""
+    contract = plan()
+    template = contract["steps"][0]
+    contract["steps"] = [
+        {
+            **template,
+            "id": f"step{index}",
+            "owned_files": [f"step{index}.py"],
+            "acceptance": [f"Criterion {index}: " + "observable contract " * 120],
+            "depends_on": []
+            if index < count - 1
+            else [f"step{prior}" for prior in range(count - 1)],
+        }
+        for index in range(count)
+    ]
+    case.change("propose", plan=contract)
+    case.agreed()
+    first = case.reserve("step0", autonomous=False)
+    case.submit(first)
+    reviewer = case.reserve("step0", actor="claude", kind="review", autonomous=False)
+    case.verdict(reviewer)
+    second = case.reserve("step1", autonomous=False)
+    case.submit(second)
+    case.change(
+        "block",
+        step_id="step2",
+        note="Required fixture missing",
+        condition="Restore the fixture",
+    )
+    case.reserve("step3", autonomous=False)
+    return case.view()
+
+
 class WorkItemsTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -212,6 +246,130 @@ class WorkItemsTests(unittest.TestCase):
             output=None,
             cost_usd=0.25,
         )
+
+    def test_six_step_summary_and_explicit_material(self):
+        from omp_tandem.work_access import perform_work
+        from omp_tandem.work_items import WorkPresentation
+
+        full = six_step_fixture(self)
+        request = {"action": "get", "work_id": self.work_id}
+        summary = perform_work(self.store, request, actor="omp")
+        self.assertLessEqual(
+            len(
+                json.dumps(summary, ensure_ascii=False, separators=(",", ":")).encode()
+            ),
+            16384,
+        )
+        self.assertEqual(
+            {step["id"] for step in summary["steps"]},
+            {step["id"] for step in full["steps"]},
+        )
+        blockers = [
+            item["blocker_id"]
+            for step in full["steps"]
+            for item in step["blockers"]
+            if item["resolved_at"] is None
+        ]
+        self.assertEqual(
+            {item["blocker_id"] for item in summary["blockers"]}, set(blockers)
+        )
+        self.assertNotIn("markdown", summary)
+        self.assertNotIn("plan", summary)
+        selected = perform_work(
+            self.store, request, actor="omp", presentation=WorkPresentation(view="plan")
+        )
+        self.assertEqual(selected["plan"], full["plan"])
+        selected = perform_work(
+            self.store,
+            {**request, "step_id": "step1"},
+            actor="omp",
+            presentation=WorkPresentation(view="step"),
+        )
+        self.assertEqual(selected["step"]["submission"], full["steps"][1]["submission"])
+        self.assertEqual(
+            selected["step"]["criteria"], full["plan"]["steps"][1]["acceptance"]
+        )
+        selected = perform_work(
+            self.store, request, actor="omp", presentation=WorkPresentation(view="full")
+        )
+        self.assertEqual(selected["plan"], full["plan"])
+        self.assertEqual(selected["steps"], full["steps"])
+        rendered = perform_work(
+            self.store,
+            request,
+            actor="omp",
+            presentation=WorkPresentation(view="plan", format="markdown"),
+        )
+        self.assertEqual(set(rendered), {"markdown"})
+        self.assertIn(full["plan"]["steps"][0]["acceptance"][0], rendered["markdown"])
+
+    def test_large_summary_has_explicit_continuation(self):
+        from omp_tandem.work_access import perform_work
+        from omp_tandem.work_items import WorkPresentation
+
+        full = six_step_fixture(self, count=40)
+        summary = perform_work(
+            self.store,
+            {"action": "get", "work_id": self.work_id},
+            actor="omp",
+            presentation=WorkPresentation(limit=10),
+        )
+        continuation = next(
+            item for item in summary["continuation"] if item["section"] == "steps"
+        )
+        self.assertEqual(
+            {step["id"] for step in summary["steps"]}
+            | set(continuation["remaining_ids"]),
+            {step["id"] for step in full["steps"]},
+        )
+
+    def test_history_pages_and_visibility_bound_cursors(self):
+        from omp_tandem.work_access import perform_work
+        from omp_tandem.work_items import WorkPresentation
+
+        six_step_fixture(self)
+        for _ in range(64):
+            self.change("agree")
+        request = {"action": "history", "work_id": self.work_id}
+        first = perform_work(
+            self.store, request, actor="omp", presentation=WorkPresentation(limit=10)
+        )
+        self.assertTrue(all("snapshot" not in event for event in first["events"]))
+        revisions = [event["revision"] for event in first["events"]]
+        cursor = first["next_cursor"]
+        while cursor:
+            page = perform_work(
+                self.store,
+                request,
+                actor="omp",
+                presentation=WorkPresentation(limit=10, cursor=cursor),
+            )
+            revisions.extend(event["revision"] for event in page["events"])
+            cursor = page["next_cursor"]
+        self.assertEqual(revisions, list(range(1, self.view()["revision"] + 1)))
+        explicit = perform_work(
+            self.store,
+            request,
+            actor="omp",
+            presentation=WorkPresentation(limit=1, include_snapshots=True),
+        )
+        self.assertIn("plan", explicit["events"][0]["snapshot"])
+        changed_visibility = perform_work(
+            self.store,
+            request,
+            actor="claude",
+            presentation=WorkPresentation(cursor=first["next_cursor"]),
+        )
+        self.assertEqual(changed_visibility["error"]["code"], "cursor_stale")
+        self.change("agree")
+        stale = perform_work(
+            self.store,
+            request,
+            actor="omp",
+            presentation=WorkPresentation(cursor=first["next_cursor"]),
+        )
+        self.assertEqual(stale["error"]["code"], "cursor_stale")
+        self.assertEqual(stale["current"]["revision"], self.view()["revision"])
 
     def test_authorized_models_survive_reopen_and_cannot_change_active_attempt(self):
         self.agreed()
@@ -1319,10 +1477,6 @@ class WorkItemsTests(unittest.TestCase):
         self.assertIsNone(result["steps"][0]["checkpoint"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class AttemptBudgetAndShellTests(WorkItemsTests):
     def _stored_grant(self):
         with sqlite3.connect(self.store.database) as db:
@@ -1788,6 +1942,42 @@ class IndependentReviewTests(WorkItemsTests):
         self.assertNotIn(self.SENTINEL, json.dumps(replay))
         self.assertEqual(replay["claim"]["token"], first["claim"]["token"])
 
+    def test_presentation_preserves_independent_disclosure(self):
+        from omp_tandem.work_access import perform_work
+        from omp_tandem.work_items import WorkPresentation
+
+        self.agreed()
+        self.submit(self.reserve(autonomous=False), cost=None)
+        review = self.reserve(actor="claude", kind="review", autonomous=False)
+        for view in ("summary", "plan", "step", "full"):
+            result = perform_work(
+                self.store,
+                {"action": "get", "work_id": self.work_id, "step_id": "backend"},
+                actor="claude",
+                attempt_token=review["token"],
+                presentation=WorkPresentation(view=view),
+            )
+            self.assertNotIn(self.SENTINEL, json.dumps(result))
+        for snapshots in (False, True):
+            result = perform_work(
+                self.store,
+                {"action": "history", "work_id": self.work_id},
+                actor="claude",
+                attempt_token=review["token"],
+                presentation=WorkPresentation(include_snapshots=snapshots),
+            )
+            self.assertNotIn(self.SENTINEL, json.dumps(result))
+        self.report(review)
+        self.change("compare", actor="claude", token=review["token"], step_id="backend")
+        result = perform_work(
+            self.store,
+            {"action": "get", "work_id": self.work_id, "step_id": "backend"},
+            actor="claude",
+            attempt_token=review["token"],
+            presentation=WorkPresentation(view="step"),
+        )
+        self.assertIn(self.SENTINEL, json.dumps(result))
+
     def test_inferred_reader_never_fails_open(self):
         from omp_tandem.work_access import perform_work
 
@@ -1848,3 +2038,53 @@ class IndependentReviewTests(WorkItemsTests):
         self.assertEqual(
             worker._read_artifact("native-review", request)["content"], self.SENTINEL
         )
+
+
+def measure_view_fixture():
+    """Repeatable transport-size and indexed-observation experiment: run this module."""
+    from time import perf_counter
+
+    from omp_tandem.work_access import perform_work
+
+    case = WorkItemsTests()
+    case.setUp()
+    try:
+        six_step_fixture(case)
+        while case.view()["revision"] < 64:
+            case.change("agree")
+        get = {"action": "get", "work_id": case.work_id}
+        history = {"action": "history", "work_id": case.work_id}
+        sizes = {}
+        for label, value in (
+            ("before_summary_bytes", case.store.perform(get, actor="omp")),
+            ("after_summary_bytes", perform_work(case.store, get, actor="omp")),
+            ("before_history_bytes", case.store.perform(history, actor="omp")),
+            (
+                "after_history_page_bytes",
+                perform_work(case.store, history, actor="omp"),
+            ),
+        ):
+            sizes[label] = len(
+                json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+            )
+        start = perf_counter()
+        for _ in range(100):
+            case.store.progress(case.work_id)
+        sizes["progress_query_mean_seconds"] = (perf_counter() - start) / 100
+        with sqlite3.connect(case.store.database) as db:
+            sizes["progress_query_plan"] = db.execute(
+                "EXPLAIN QUERY PLAN SELECT revision,status,updated_at FROM work_cards WHERE work_id=?",
+                (case.work_id,),
+            ).fetchall()
+        print(json.dumps(sizes, ensure_ascii=False))
+    finally:
+        case.doCleanups()
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--measure-view" in sys.argv:
+        measure_view_fixture()
+    else:
+        unittest.main()

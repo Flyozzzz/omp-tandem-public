@@ -5,13 +5,13 @@ import stat
 from contextlib import suppress
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field
 
-from .work_items import WorkCommand
+from .work_items import WorkCommand, WorkPresentation, present_work
 from .work_workspace import WorkWorkspace
 
 
-class WorkToolRequest(BaseModel):
+class WorkToolRequest(WorkPresentation):
     model_config = ConfigDict(extra="forbid")
     request: WorkCommand
     wait_seconds: int = Field(default=0, ge=0, le=25)
@@ -34,8 +34,30 @@ def read_work_token(path: Path) -> str:
     return token
 
 
-def perform_work(store, request, *, actor, attempt_token=None, claims=None):
+def observation_token(store, command, *, actor, attempt_token=None, claims=None):
+    """Resolve the same reader binding before entering a cheap wait loop."""
+    if attempt_token:
+        return attempt_token
+    direct = (claims or {}).get((command.work_id, command.step_id))
+    if direct:
+        return direct
+    held = [
+        token
+        for (work_id, _), token in (claims or {}).items()
+        if work_id == command.work_id
+    ]
+    if len(held) == 1:
+        with suppress(ValueError):
+            store.authenticate(held[0])
+            return held[0]
+    return None
+
+
+def perform_work(
+    store, request, *, actor, attempt_token=None, claims=None, presentation=None
+):
     command = WorkCommand.model_validate(request)
+    options = presentation or WorkPresentation()
     key = (command.work_id, command.step_id)
     token = attempt_token or (
         claims.get(key) if claims is not None and command.action != "claim" else None
@@ -72,7 +94,12 @@ def perform_work(store, request, *, actor, attempt_token=None, claims=None):
             # Only a retired inferred credential falls back to an unbound read;
             # a refusal of the bound read itself must not fail open.
             token = None
-    result = store.perform(command, actor=actor, attempt_token=token)
+    domain_command = (
+        command.model_copy(update={"action": "get"})
+        if command.action == "history"
+        else command
+    )
+    result = store.perform(domain_command, actor=actor, attempt_token=token)
     if claims is not None and result.get("claim", {}).get("token"):
         claim = result["claim"]
         claims[(result["work_id"], claim["step_id"])] = claim["token"]
@@ -95,4 +122,26 @@ def perform_work(store, request, *, actor, attempt_token=None, claims=None):
             field: bound[field]
             for field in ("attempt_id", "work_id", "step_id", "kind")
         }
-    return result
+    if command.action == "history":
+        result = store.history_page(
+            result,
+            actor=actor,
+            limit=options.limit,
+            cursor=options.cursor,
+            include_snapshots=options.include_snapshots,
+            after=command.expected_revision or 0,
+            attempt_token=token,
+        )
+    elif options.cursor:
+        return {
+            "error": {"code": "cursor_stale"},
+            "current": present_work(result, actor=actor),
+        }
+    return present_work(
+        result,
+        actor=actor,
+        view=options.view,
+        format=options.format,
+        limit=options.limit,
+        step_id=command.step_id,
+    )

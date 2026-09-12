@@ -109,13 +109,33 @@ class Bridge:
             self.channel.owner,
         )
 
-    def work(self, request):
+    def work_observation(self, request):
+        from .work_access import observation_token
+        from .work_items import WorkCommand
+
+        command = WorkCommand.model_validate(request)
+        token = observation_token(
+            self.work_items,
+            command,
+            actor=self.work_participant,
+            attempt_token=self.work_token,
+            claims=self._work_claims,
+        )
+        return self.work_items.progress(
+            command.work_id,
+            actor=self.work_participant,
+            attempt_token=token,
+            step_id=command.step_id,
+        )
+
+    def work(self, request, *, presentation=None):
         result = perform_work(
             self.work_items,
             request,
             actor=self.work_participant,
             attempt_token=self.work_token,
             claims=self._work_claims,
+            presentation=presentation,
         )
         if result.get("work_id") and result.get("revision") is not None:
             self.channel.store.acknowledge_work(

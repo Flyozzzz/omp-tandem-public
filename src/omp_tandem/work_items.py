@@ -517,6 +517,197 @@ def _public_attempt(attempt):
     }
 
 
+class WorkPresentation(_Model):
+    """Transport options, deliberately outside exact operation identity."""
+
+    view: Literal["summary", "plan", "step", "full"] = "summary"
+    format: Literal["json", "markdown"] = "json"
+    limit: int = Field(default=50, ge=1, le=200)
+    cursor: str | None = None
+    include_snapshots: bool = False
+
+
+def present_work(
+    payload, *, actor, view="summary", format="json", limit=50, step_id=None
+):
+    """Reduce an already authorized, stage-projected response; never redact here."""
+    if "items" in payload:
+        items = payload["items"]
+        result = {
+            "items": [
+                present_work(item, actor=actor, view=view, limit=limit)
+                for item in items[:limit]
+            ]
+        }
+        if len(items) > limit:
+            result["continuation"] = {
+                "section": "items",
+                "remaining_work_ids": [item["work_id"] for item in items[limit:]],
+                "action": "get",
+            }
+    elif "plan" not in payload or view == "full":
+        result = {key: value for key, value in payload.items() if key != "markdown"}
+    else:
+        result = {
+            key: payload[key]
+            for key in (
+                "work_id",
+                "revision",
+                "plan_revision",
+                "status",
+                "visibility",
+                "participant",
+                "bound_attempt",
+            )
+            if key in payload
+        }
+        result["title"] = payload["plan"]["title"]
+        result["role"] = actor
+        result["pointers"] = {
+            "plan": {"view": "plan"},
+            "step": {"view": "step", "required_fields": ["step_id"]},
+            "history": {"action": "history"},
+            "full": {"view": "full"},
+        }
+        if view == "plan":
+            result["plan"] = payload["plan"]
+            result["agreements"] = payload["agreements"]
+        elif view == "step":
+            if not step_id:
+                raise ValueError("view=step requires step_id")
+            step = next(
+                (item for item in payload["steps"] if item["id"] == step_id), None
+            )
+            if step is None:
+                raise ValueError("Unknown step")
+            spec = next(
+                item for item in payload["plan"]["steps"] if item["id"] == step_id
+            )
+            result["step"] = {**spec, **step, "criteria": spec["acceptance"]}
+        else:
+            result["paused"] = payload["status"] == "paused"
+            grant = payload["authorization"]
+            result["authorization"] = (
+                None
+                if grant is None
+                else {
+                    key: grant.get(key)
+                    for key in (
+                        "authorization_id",
+                        "plan_revision",
+                        "deadline",
+                        "revoked_at",
+                        "unknown_cost",
+                    )
+                }
+            )
+            result["agreements"] = {
+                principal: {
+                    "plan_revision": record["plan_revision"],
+                    "at": record["at"],
+                }
+                for principal, record in payload["agreements"].items()
+            }
+            result["steps"] = []
+            blockers = list(payload["blockers"])
+            for step in payload["steps"]:
+                blockers.extend(step["blockers"])
+                compact = {
+                    key: step[key]
+                    for key in ("id", "state", "owner", "reviewer", "depends_on")
+                }
+                compact["submission"] = (
+                    None
+                    if not step["submission"]
+                    else {
+                        key: step["submission"][key]
+                        for key in ("submission_id", "commit")
+                    }
+                )
+                attempt = step["attempt"]
+                compact["attempt"] = (
+                    None
+                    if not attempt
+                    else {
+                        key: attempt.get(key)
+                        for key in ("attempt_id", "actor", "kind", "stage", "state")
+                    }
+                )
+                compact["unresolved_blocker_count"] = len(
+                    WorkStore._unresolved(payload, step)
+                )
+                result["steps"].append(compact)
+            unresolved = [
+                blocker for blocker in blockers if blocker["resolved_at"] is None
+            ]
+            result["blockers"] = unresolved[:limit]
+            if len(unresolved) > limit:
+                result.setdefault("continuation", []).append(
+                    {
+                        "section": "blockers",
+                        "remaining_ids": [
+                            item["blocker_id"] for item in unresolved[limit:]
+                        ],
+                        "view": "full",
+                    }
+                )
+            if len(result["steps"]) > limit:
+                result.setdefault("continuation", []).append(
+                    {
+                        "section": "steps",
+                        "remaining_ids": [
+                            item["id"] for item in result["steps"][limit:]
+                        ],
+                        "view": "step",
+                        "required_fields": ["step_id"],
+                    }
+                )
+                result["steps"] = result["steps"][:limit]
+            if len(_json(result).encode()) > 16384:
+                # Keep identifiers and explicit section pointers when material must
+                # be read separately. Never cut a reason or acceptance string.
+                result["blockers"] = [
+                    {
+                        "blocker_id": item["blocker_id"],
+                        "origin": item["origin"],
+                        "detail": {"view": "full"},
+                    }
+                    for item in unresolved
+                ]
+                result["continuation"] = [
+                    *result.get("continuation", []),
+                    {
+                        "section": "summary",
+                        "reason": "size_limit",
+                        "view": "full",
+                        "limit_bytes": 16384,
+                    },
+                ]
+        if payload.get("claim"):
+            result["claim"] = {
+                key: value
+                for key, value in payload["claim"].items()
+                if key
+                in {
+                    "attempt_id",
+                    "step_id",
+                    "actor",
+                    "kind",
+                    "state",
+                    "token",
+                    "deadline",
+                }
+            }
+    if format == "markdown":
+        # Render exactly the selected material, without a second JSON copy.
+        return {
+            "markdown": "```json\n"
+            + json.dumps(result, ensure_ascii=False, indent=2)
+            + "\n```"
+        }
+    return result
+
+
 class WorkStore:
     def __init__(self, database: Path, scope: ProjectScope):
         self.database = Path(database)
@@ -557,6 +748,17 @@ class WorkStore:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS work_cards (work_id TEXT PRIMARY KEY, card TEXT NOT NULL)"
             )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(work_cards)")}
+            for name, kind in (
+                ("revision", "INTEGER"),
+                ("status", "TEXT"),
+                ("updated_at", "REAL"),
+            ):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE work_cards ADD COLUMN {name} {kind}")
+                    db.execute(
+                        f"UPDATE work_cards SET {name}=json_extract(card, '$.{name}')"
+                    )
             db.execute(
                 "CREATE TABLE IF NOT EXISTS work_events (work_id TEXT NOT NULL, revision INTEGER NOT NULL, event TEXT NOT NULL, PRIMARY KEY(work_id, revision))"
             )
@@ -881,8 +1083,14 @@ class WorkStore:
         card["revision"] += 1
         card["updated_at"] = time.time()
         db.execute(
-            "INSERT INTO work_cards VALUES (?,?) ON CONFLICT(work_id) DO UPDATE SET card=excluded.card",
-            (card["work_id"], _json(card)),
+            "INSERT INTO work_cards (work_id,card,revision,status,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(work_id) DO UPDATE SET card=excluded.card, revision=excluded.revision, status=excluded.status, updated_at=excluded.updated_at",
+            (
+                card["work_id"],
+                _json(card),
+                card["revision"],
+                card["status"],
+                card["updated_at"],
+            ),
         )
         view = self._view(db, card)
         event = {
@@ -999,6 +1207,98 @@ class WorkStore:
             ):
                 raise ValueError("Attempt authorization was revoked")
         return attempt
+
+    def progress(self, work_id, *, actor=None, attempt_token=None, step_id=None):
+        """Indexed observation only; permission is rechecked before returning a view."""
+        with self._read_connection() as db:
+            if attempt_token:
+                bound = self._authenticate(db, attempt_token, actor)
+                if work_id != bound["work_id"] or (
+                    step_id is not None and step_id != bound["step_id"]
+                ):
+                    raise ValueError("Bound worker cannot observe unrelated work")
+            row = db.execute(
+                "SELECT revision,status,updated_at FROM work_cards WHERE work_id=?",
+                (work_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Unknown work item")
+            return dict(row)
+
+    def history_page(
+        self,
+        current,
+        *,
+        actor,
+        limit,
+        cursor,
+        include_snapshots,
+        after=0,
+        attempt_token=None,
+    ):
+        """Page events only after the caller obtained an authorized projected card."""
+        binding = {
+            "work_id": current["work_id"],
+            "as_of_revision": current["revision"],
+            "actor": actor,
+            "visibility": current.get("visibility", "full"),
+            "bound_attempt": current.get("bound_attempt"),
+            "include_snapshots": include_snapshots,
+            "section": "history",
+        }
+        if cursor:
+            try:
+                page = json.loads(cursor)
+                if page["binding"] != binding or type(page["after"]) is not int:
+                    raise ValueError("Cursor binding differs")
+                after = page["after"]
+            except (ValueError, KeyError, TypeError):
+                return {
+                    "error": {"code": "cursor_stale"},
+                    "current": present_work(current, actor=actor),
+                }
+        with self._read_connection() as db:
+            bound = (
+                self._authenticate(db, attempt_token, actor) if attempt_token else None
+            )
+            revision = db.execute(
+                "SELECT revision FROM work_cards WHERE work_id=?", (current["work_id"],)
+            ).fetchone()[0]
+            if revision != current["revision"]:
+                current = redact_author(
+                    self._view(db, self._load(db, current["work_id"])), bound
+                )
+                return {
+                    "error": {"code": "cursor_stale"},
+                    "current": present_work(current, actor=actor),
+                }
+            expression = (
+                "event" if include_snapshots else "json_remove(event, '$.snapshot')"
+            )
+            rows = db.execute(
+                f"SELECT {expression} FROM work_events WHERE work_id=? AND revision>? AND revision<=? ORDER BY revision LIMIT ?",
+                (current["work_id"], after, revision, limit + 1),
+            ).fetchall()
+        events = [json.loads(row[0]) for row in rows[:limit]]
+        result = {
+            "work_id": current["work_id"],
+            "revision": revision,
+            "as_of_revision": revision,
+            "events": events,
+            "next_cursor": _json({"binding": binding, "after": events[-1]["revision"]})
+            if len(rows) > limit
+            else None,
+        }
+        bound = (
+            {"kind": "review", "protocol": "independent_first"}
+            if current.get("visibility") == "independent_stage"
+            else None
+        )
+        result = redact_author(result, bound)
+        for event in result["events"]:
+            if "snapshot" in event:
+                event["snapshot"].pop("markdown", None)
+        return result
 
     def perform(
         self,

@@ -128,6 +128,11 @@ def parser():
     apply.add_argument("--expected-head", required=True)
     show = commands.add_parser("show", help="Read a shared task or list project tasks")
     show.add_argument("work_id", nargs="?")
+    show.add_argument(
+        "--view", choices=("summary", "plan", "step", "full"), default="summary"
+    )
+    show.add_argument("--format", choices=("json", "markdown"), default="json")
+    show.add_argument("--step-id")
     return root
 
 
@@ -340,9 +345,23 @@ def main(argv=None):
                     else {"action": "list"},
                     actor="operator",
                 )
+                from .work_items import present_work
+
+                result = present_work(
+                    result,
+                    actor="operator",
+                    view=args.view,
+                    format=args.format,
+                    step_id=args.step_id,
+                )
         finally:
             bridge.shutdown()
-    print(json.dumps(result, ensure_ascii=False), flush=True)
+    print(
+        result["markdown"]
+        if args.command == "show" and args.format == "markdown"
+        else json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+        flush=True,
+    )
     return 0
 
 

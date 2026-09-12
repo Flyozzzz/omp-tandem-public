@@ -20,7 +20,7 @@ from .project_context import ProjectContext
 from .prompts import coordinator_instructions
 from .reviews import PublicationBusy, ReviewRequest, publication_lock
 from .runtime_models import ACTIVE, Mode, TaskSummary
-from .work_items import WorkCommand
+from .work_items import WorkCommand, WorkPresentation
 from .workspace import client_root_paths
 
 
@@ -78,6 +78,11 @@ def build_server(configuration: Bridge | RuntimeOptions):
         request: WorkCommand,
         ctx: Context,
         wait_seconds: Annotated[int, Field(ge=0, le=25)] = 0,
+        view: Literal["summary", "plan", "step", "full"] = "summary",
+        format: Literal["json", "markdown"] = "json",
+        limit: Annotated[int, Field(ge=1, le=200)] = 50,
+        cursor: str | None = None,
+        include_snapshots: bool = False,
     ) -> dict:
         """Maintain one durable shared task and its role-bound checklist.
 
@@ -94,16 +99,24 @@ def build_server(configuration: Bridge | RuntimeOptions):
         bridge = await runtime.get(ctx)
         if not restricted_work:
             await bridge.channel.bind(ctx)
-        result = await asyncio.to_thread(bridge.work, request)
-        work_id = result.get("work_id")
-        revision = result.get("revision")
-        if wait_seconds and request.action == "get" and work_id:
+        options = WorkPresentation(
+            view=view,
+            format=format,
+            limit=limit,
+            cursor=cursor,
+            include_snapshots=include_snapshots,
+        )
+        if wait_seconds and request.action == "get" and request.work_id:
+            state = await asyncio.to_thread(bridge.work_observation, request)
             deadline = time.monotonic() + wait_seconds
-            while result.get("revision") == revision and time.monotonic() < deadline:
+            while time.monotonic() < deadline:
                 await asyncio.sleep(min(0.2, max(0, deadline - time.monotonic())))
-                result = await asyncio.to_thread(
-                    bridge.work, {"action": "get", "work_id": work_id}
+                observed = await asyncio.to_thread(
+                    bridge.work_items.progress, request.work_id
                 )
+                if observed != state:
+                    break
+        result = await asyncio.to_thread(bridge.work, request, presentation=options)
         # Each session observes the same durable card; channel delivery only hints.
         result["delivery"] = bridge.channel.delivery
         result["delivery_instructions"] = (

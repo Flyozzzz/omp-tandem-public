@@ -23,7 +23,7 @@ from .runtime_models import (
 from .task_contracts import TaskMessages
 from .task_interaction import TaskInteraction
 from .task_store import TaskStore
-from .work_access import WorkToolRequest, perform_work
+from .work_access import WorkToolRequest, observation_token, perform_work
 from .work_items import shell_permission
 from .worker_turn import TurnCancelled, wait_for_turn
 
@@ -58,31 +58,40 @@ class NativeWorker:
             def shared_work(request, context):
                 if context.cancelled:
                     raise Cancelled()
-                result = perform_work(
-                    self.work_items,
-                    request.request,
-                    actor="omp",
-                    attempt_token=attempt["token"] if attempt else None,
-                    claims=claims,
-                )
-                revision = result.get("revision")
                 deadline = time.monotonic() + request.wait_seconds
-                while (
+                if (
                     request.request.action == "get"
-                    and result.get("revision") == revision
-                    and time.monotonic() < deadline
+                    and request.wait_seconds
+                    and request.request.work_id
                 ):
-                    if context.cancelled:
-                        raise Cancelled()
-                    time.sleep(min(0.2, max(0, deadline - time.monotonic())))
-                    result = perform_work(
+                    token = observation_token(
                         self.work_items,
                         request.request,
                         actor="omp",
                         attempt_token=attempt["token"] if attempt else None,
                         claims=claims,
                     )
-                return json.dumps(result, ensure_ascii=False)
+                    state = self.work_items.progress(
+                        request.request.work_id,
+                        actor="omp",
+                        attempt_token=token,
+                        step_id=request.request.step_id,
+                    )
+                    while time.monotonic() < deadline:
+                        if context.cancelled:
+                            raise Cancelled()
+                        time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+                        if self.work_items.progress(request.request.work_id) != state:
+                            break
+                result = perform_work(
+                    self.work_items,
+                    request.request,
+                    actor="omp",
+                    attempt_token=attempt["token"] if attempt else None,
+                    claims=claims,
+                    presentation=request,
+                )
+                return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
             work_tools = (
                 host_tool(

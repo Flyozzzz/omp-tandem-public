@@ -83,8 +83,10 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             timeout=15,
         ).stdout.strip()
 
-    async def call(self, client, request):
-        result = await client.call_tool("tandem_work", {"request": request})
+    async def call(self, client, request, **presentation):
+        result = await client.call_tool(
+            "tandem_work", {"request": request, "view": "full", **presentation}
+        )
         return to_jsonable_python(result.data)
 
     async def mutate(self, client, work_id, action, **values):
@@ -468,14 +470,17 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.mutate(self.claude, identifier, "propose", plan=replacement)
         await self.mutate(self.claude, identifier, "agree")
         await self.mutate(self.omp, identifier, "agree")
-        shown = await self.daemon("show", identifier)
+        shown = await self.daemon("show", identifier, "--view", "full")
         self.assertEqual(shown.returncode, 0, shown.stderr)
         card = json.loads(shown.stdout)
         orphan = card["blockers"][0]
         self.assertEqual(orphan["blocker_id"], original["blocker_id"])
         self.assertEqual(orphan["origin"], {"plan_revision": 1, "step_id": "change"})
-        self.assertIn(original["blocker_id"], card["markdown"])
-        self.assertIn(original["condition"], card["markdown"])
+        rendered = await self.daemon(
+            "show", identifier, "--view", "full", "--format", "markdown"
+        )
+        self.assertIn(original["blocker_id"], rendered.stdout)
+        self.assertIn(original["condition"], rendered.stdout)
         self.assertEqual(card["steps"][0]["state"], "blocked")
         with self.assertRaises(ToolError):
             await self.mutate(self.claude, identifier, "claim", step_id="replacement")
@@ -519,7 +524,7 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 grant["model_provenance"], {"claude": "explicit", "omp": "explicit"}
             )
-            shown = await self.daemon("show", identifier)
+            shown = await self.daemon("show", identifier, "--view", "full")
             self.assertEqual(shown.returncode, 0, shown.stderr)
             self.assertEqual(json.loads(shown.stdout)["authorization"], grant)
             for command in ("run", "start"):
@@ -567,7 +572,7 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             grant["model_provenance"], {"claude": "default", "omp": "default"}
         )
-        shown = await self.daemon("show")
+        shown = await self.daemon("show", "--view", "full")
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertEqual(json.loads(shown.stdout)["items"][0]["authorization"], grant)
 
