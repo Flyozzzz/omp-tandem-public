@@ -87,7 +87,7 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 
 `tandem_work` 是宿主与 OMP 共用的持久任务卡，不是普通对话或一次性审查的替代品。`claim` 只领取工作，不启动模型、不编辑文件；手动提交必须引用真实的完整 Git 提交哈希及证据。若要在关闭客户端后继续工作，需要用户另行批准并执行操作者 CLI 的有界授权与 `run`／`start`。在线唤醒通知不会启动已退出的客户端，机器关机时不会执行。完整的 JSON、授权、停止、异常恢复和显式应用命令见[共享任务指南](docs/guide.zh-CN.md#shared-work)。
 
-## 3.5.0 的两个入口
+## 两个入口
 
 - **已准备的变更：** 使用 `tandem_review_run` 和 `source="staged"` 审查待提交的索引快照；只读，不实现修改或运行测试。
 - **共同开发：** 使用 `tandem_work` 保存两个智能体的计划、文件归属、领取、真实提交和交叉验收。claim/submit 要求**绑定的项目根本身是已有 HEAD 提交的 Git 仓库**。从父目录启动可能出现 `Work execution requires a Git repository with an immutable HEAD commit`；任务 `cwd` 不能修复启动边界。
@@ -96,6 +96,15 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 - **迁移与限制：** 未解决的阻塞跨 `propose` 保留；删除步骤后转为卡片级阻塞，只有阻塞作者或操作者才能凭证据解除。旧授权保留“总预算 / `max_launches`”的单次上限和 `allow_tests` 解码；旧审查标为 `legacy_disclosure`，不追认独立性。迁移不会重启执行；停止、恢复和显式 apply 仍是不同操作。
 
 [命令与迁移详情](docs/guide.zh-CN.md#shared-work)。[助手兼容性](docs/helper-compatibility.md)记录了**五个未满足的门槛**：子工具继承父限制、项目替换 scout、任务级设置快照、父用量独立核算、每次 spawn 的额外模型调用。助手保持禁用（`delegation.available=false`）；未发布 C–F 阶段或助手节省费用的承诺。
+
+## 精简状态与恢复
+
+- `tandem_work` 默认返回 `view="summary"`；需要时显式选择 `plan`、`step` 或 `full`。历史分页返回；按游标继续，遇到 `cursor_stale` 重新读取状态。`next_actions` 只是提示，不是授权。
+- 每个任务结果都包含 `runtime_identity`：应比较已加载软件包、构建和注册 schema 与工作副本，不能认为更新文件就更新了运行中的服务。
+- `recovery` 描述如何仅凭报告关闭同一领取。其他宿主执行 `recover` 前，操作者必须显式授权 `successor`；这不会重跑模型、测试或实现。独立阶段的澄清要求新快照及明确的 `review_context_paths`，旧豁免不会自动适用于新输入。
+- `wake_acknowledgment` 区分 `acknowledged`、`deferred`、`not_attempted`。验收与应用分离：无证据时为 `not_recorded`；`assess`、apply 回执和发布分别记录。原生用量只是限定范围的小计，未经另行测量的 Claude 费用仍未知。
+
+[契约、报告与恢复详情](docs/guide.zh-CN.md#compact-contracts)。软件包版本 3.6.0 为待操作者确认的提案，不表示已打标签或发布。
 
 ## 工作原理
 

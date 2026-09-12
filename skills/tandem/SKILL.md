@@ -47,6 +47,20 @@ Unresolved blockers keep ID/origin/history across `propose`; removed steps leave
 
 See the detailed guide's shared-tasks section for the exact MCP JSON and operator CLI. Task revisions do not silently expand permissions or rewrite prior evidence.
 
+## Read compact state and preserve boundaries
+
+Use sibling presentation parameters `view=summary|plan|step|full`, `format=json|markdown`, `limit`, `cursor`, `include_snapshots`; keep them outside `request` and mutation identity. Summary is the default, history is paged without snapshots by default, and JSON does not duplicate Markdown. Follow continuation pointers; `cursor_stale` requires a fresh observation. `next_actions` are prerequisites/hints, not authority or automatic retry instructions. `show WORK_ID --format markdown` produces the human work report; non-get tool actions with Markdown format render fenced JSON.
+
+Every task result includes `runtime_identity`: distinguish loaded package/version/verified RECORD build and registered schema digests from the checkout, as well as requested/effective/observed models and manual/managed/grant/disclosure provenance. Editable/unverifiable builds stay unknown. Do not restart a running user session, migrate grants or run a hidden provider probe to resolve identity.
+
+Before comparison, independent clarification returns `clarification_requires_new_snapshot`; do not answer it with author text. This includes native manual review claims, not only managed task bindings. Declare exact relative `review_context_paths` in a new agreed snapshot; no globs, traversal, symlink dereference, live fallback or ownership expansion. Waivers are tied to plan/submission/grant and prospective snapshot inputs. Historical decisions cannot authorize changed inputs. Protocol gates do not erase prior disclosure or create an OS sandbox.
+
+Read `recovery` descriptors and reason codes before acting. An operator may explicitly run `successor ATTEMPT_ID --host HOST_OWNER --principal claude|omp --note ...` through the prepared `omp_tandem.work_daemon` CLI after confirmed stop. Only that host may `recover` the same valid claim for report-only closure, then record report/optional compare/exact verdict. No worker/model/test launch, expiry extension, new submission or inherited managed authority. Foreign/retired/expired/legacy-unbound/unconfirmed-stop claims stay refused; old receipts remain historical, not new authority. Preserve provider failure facts: terminal `(code=cyber_policy)` means `provider_policy_refusal`; prose alone does not. Review-phase refusals use reason codes. Administrative closure is not a provider retry.
+
+`wake_acknowledgment` states are `acknowledged` (including zero), `deferred` with reason, and `not_attempted`, scoped to observed work/revision. A deferred ack does not mean the read failed; later explicit observations can acknowledge retained hints. Duplicate/late wakes do not dispatch work or grant permission.
+
+Acceptance, application and publication remain separate. No application evidence means `not_recorded`; `assess` records Git HEAD/time observations, not actor/method; explicit apply receipts record separate operations. Count only provably linked native turns once, label partial subtotals, and keep Claude/unattributed costs unknown. Preserve original failed runs alongside applicable later passes; equal immutable trees require matching remaining check inputs. Do not infer cost/latency savings from smaller payloads. One observed `TemporaryDirectory` cleanup failure in `tests/test_review_runs.py` passed on reruns but remains unexplained; pinned wire evidence covers exercised APIs only.
+
 ## Plan before nontrivial development
 
 For a feature, behavioral fix, architectural change, or other nontrivial development, the default sequence is **understand → independently assess → compare → plan → implement → cross-check**. Do not begin implementation edits or send a `work` implementation task before the planning phase is complete.

@@ -41,6 +41,18 @@ uv run --no-project --python '>=3.12' python -I "$TANDEM_ROOT/server.py" --docto
 
 `--doctor` reports executable/dependency prerequisites without installing application dependencies or probing provider authentication. Do not mistake an executable's presence for working provider credentials. The prerequisite diagnostic handler only checks whether `uv` and `omp` are on `PATH`; separate Claude session handlers establish and invalidate watchdog ownership without calling a model.
 
+### Loaded runtime, compact state and recovery
+
+Inspect `runtime_identity` from the connected runtime and every task result, not only files on disk: package version, distribution origin, exact build verified against `RECORD`, checkout observation and registered schema digests are separate facts. Editable/unverifiable builds remain unknown; requested/effective/observed models and manual/managed/grant/disclosure provenance are not interchangeable. Updating a checkout does not update the already loaded server. Do not interrupt user sessions or migrate grants during diagnosis.
+
+`tandem_work` defaults to `view="summary"`; sibling `view=plan|step|full`, `format`, `limit`, `cursor`, `include_snapshots` select permitted material. History is paged without snapshots by default; follow continuations and refetch after `cursor_stale`. `next_actions` are hints. `wake_acknowledgment` distinguishes `acknowledged` (zero is valid), `deferred` and `not_attempted`; a deferred ack is not a failed state read or permission to relaunch.
+
+Before independent comparison, `clarification_requires_new_snapshot` cannot be answered with author text, including native manual claims. Missing unchanged files need exact `review_context_paths` and a new agreed snapshot; changed plan/submission/grant/input bytes cannot inherit an old waiver. Manual disclosure is not snapshot confinement.
+
+Recovery descriptors expose permitted material and reason codes, never secrets. Only an explicit operator `omp_tandem.work_daemon ... successor ATTEMPT_ID --host HOST_OWNER --principal claude|omp --note ...` authorizes that host to `recover` the same stopped valid claim for report-only closure. It does not launch a model/test, extend expiry, change submission/stage or migrate grants. Foreign/retired/expired/legacy-unbound/unconfirmed-stop claims cannot gain authority. Preserve `(code=cyber_policy)` as `provider_policy_refusal`; a prose mention is not that code. Review-phase refusals use reason codes; recovery is not provider-policy reformulation.
+
+Use `show WORK_ID --format markdown` for the report; non-get tool Markdown is fenced JSON. Missing application evidence is `not_recorded`, not applied: `assess` records expected/observed HEAD/time, while explicit apply receipts are separate from acceptance/publication. Native linked usage is counted once and may be only a subtotal; Claude/unattributed cost remains unknown. Existing receipts stay historical and do not restore permission. Keep failed-run evidence, including the unexplained one-off `TemporaryDirectory` cleanup failure in `tests/test_review_runs.py`; rerun success does not explain it.
+
 ## 2. Install missing external tools once
 
 Present the appropriate official method and run only the user's chosen method after approval. Do not execute every alternative. No Bun installation is required for the Homebrew or standalone OMP options.

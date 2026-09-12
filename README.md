@@ -85,7 +85,7 @@ For development, scale planning to uncertainty: a known local fix needs a brief 
 
 `tandem_work` exposes the same durable card to both participants, including a readable Markdown view. Work survives a conversation ending; **a saved task is not a running agent**. Existing-client work is manual; opt-in unattended execution uses a separate bounded controller, dedicated Claude/OMP attempts and isolated Git worktrees. Accepted results are not silently merged into your current branch. [Shared-task workflow and operator commands](docs/guide.md#shared-tasks).
 
-## Two entry paths in 3.5.0
+## Two entry paths
 
 - **Prepared change:** use `tandem_review_run` with `source="staged"` for the intended commit's index snapshot; it is a read-only review, not implementation or test execution.
 - **Shared development:** use `tandem_work` for a two-agent plan, file ownership, claims, committed submissions and distinct review. The bound **project root must be a Git repository with a HEAD commit** for claim/submit; launching from its parent folder can produce `Work execution requires a Git repository with an immutable HEAD commit`. A task `cwd` cannot repair the launch boundary.
@@ -94,6 +94,15 @@ For development, scale planning to uncertainty: a known local fix needs a brief 
 - **Migration and limits:** unresolved blockers survive `propose`; removed steps leave card-level blockers. Only the blocker author/operator can resolve them with evidence. Legacy grants retain total-budget/`max_launches` attempt ceilings and `allow_tests` decoding; legacy review attempts are labelled `legacy_disclosure`, not retrospectively independent. No migration restarts work. Acceptance does not apply code: stop/recovery and explicit operator apply remain separate.
 
 [Operator commands and migration details](docs/guide.md#shared-tasks). [Helper compatibility](docs/helper-compatibility.md) records **five unsatisfied gates**: child-tool restriction inheritance, project scout replacement, task-wide settings snapshots, exclusive parent usage, and extra model calls per spawn. Helpers remain disabled (`delegation.available=false`); stages C–F and helper savings are not released.
+
+## Compact state and recovery
+
+- `tandem_work` defaults to `view="summary"`; request `plan`, `step` or `full` explicitly. History is paged; use its cursor and refetch on `cursor_stale`. `next_actions` are hints, not authorization.
+- Every task result carries `runtime_identity`: compare the loaded package/build and registered schema surface with the checkout, rather than assuming an updated checkout changed a running server.
+- `recovery` descriptors explain report-only closure of the same claim. An operator must authorize another host with `successor` before `recover`; this does not rerun a model, tests or implementation. Independent clarification requires a new snapshot, with exact `review_context_paths`; prior waivers do not automatically cover changed inputs.
+- `wake_acknowledgment` distinguishes `acknowledged`, `deferred` and `not_attempted`. Acceptance is separate from application (`not_recorded` without evidence), `assess`, apply receipts and publication. Native usage is a scoped subtotal; Claude cost remains unknown unless separately measured.
+
+[Contract, reporting and recovery details](docs/guide.md#compact-contracts). The proposed 3.6.0 package is pending operator release confirmation; no tag or publication is implied.
 
 ## How it works
 

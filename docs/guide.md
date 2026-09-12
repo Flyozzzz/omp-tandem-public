@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Version: 3.5.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Package proposal: 3.6.0 (operator confirmation pending)** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -394,9 +394,32 @@ Use `tandem_review_run` to review a prepared commit's staged/index snapshot with
 
 For shared claim/submit, the **bound project root itself must be a Git repository with an immutable HEAD commit**. A session launched from a parent directory may fail with `Work execution requires a Git repository with an immutable HEAD commit`. Open the correct repository or correct the client's project-root binding; task `cwd` cannot change that boundary. An intentionally new repository needs its initial commit before execution.
 
-`tandem_work` maintains a project-scoped task independently of individual conversations and native turns. Its `get` result includes the agreed plan, versioned checklist, roles, dependencies, blockers, submissions, acceptance evidence, authorization summary and a `markdown` rendering of that same state. SQLite is authoritative; two agents do not overwrite a shared Markdown file.
+`tandem_work` maintains a project-scoped task independently of individual conversations and native turns. Its default `get` is a bounded summary; explicit views expose permitted plan, step and historical material. JSON does not duplicate a Markdown rendering. SQLite is authoritative; two agents do not overwrite a shared Markdown file.
 
 The two participant seats are `claude` and `omp`. The host MCP seat defaults to `claude`; an operator configuring a second peer client can set `--work-participant omp`. Native OMP host tools use `omp`. These are attributed participant seats, not cryptographic model-identity claims. Managed workers instead receive an attempt-bound capability: they cannot choose their identity or act on unrelated assignments. Capabilities and provider configuration must never be published.
+
+<a id="compact-contracts"></a>
+### Compact contracts, identity and closure
+
+Presentation parameters are siblings of `request`: `view="summary"|"plan"|"step"|"full"`, `format="json"|"markdown"`, `limit`, `cursor`, `include_snapshots`. For a selected step, set `request.step_id`. History is paged and omits snapshots by default; follow the returned continuation rather than assuming the first page is complete. Cursors are bound to work, revision, section and visibility; `cursor_stale` requires a fresh read. `next_actions` includes prerequisites and current identifiers, but does not grant authority or justify automatic retries. Mutation CAS and `operation_id` semantics are unchanged.
+
+`runtime_identity` is attached to every task result and records the loaded package version, distribution origin, verified `RECORD` build when available, source-checkout observation and registered schema digests. Editable/unverifiable builds stay `unknown`; a changed checkout does not change a running server. Requested/effective/observed models, manual/managed mode, grant and disclosure provenance remain distinct. Identity collection does not make a hidden provider call.
+
+Independent review uses `report` → optional one `compare` → exact `accept`/`reject`; successful delivery is not a verdict. Before comparison, clarification returns `clarification_requires_new_snapshot` and closes the affected stage rather than delivering author text. Supply missing unchanged files through exact relative `review_context_paths` in a new agreed snapshot: no globs, traversal, symlink dereference or live fallback. A waiver is bound to plan, submission, grant and prospective snapshot inputs; historical decisions remain visible but cannot authorize changed material. Manual/disclosed review does not establish OS confinement.
+
+The `recovery` descriptor exposes claim/stage/submission, saved material, allowed actions and stop/reconciliation prerequisites, never a credential. Codes such as `recovery_not_authorized` are conditions, not retry instructions. After confirmed stop, the operator may explicitly authorize one host/principal using:
+
+```sh
+python -m omp_tandem.work_daemon --project-root /project --state-dir /state successor ATTEMPT_ID --host HOST_OWNER --principal claude --note 'Report-only closure from preserved evidence'
+```
+
+Use the package's prepared interpreter. The authorized host then sends `tandem_work` action `recover` with fresh revision/operation ID, records a report and exact verdict on the same valid claim. This neither reruns models/tests nor changes the submission, stage, expiry or grants. Foreign, expired, retired, legacy-unbound and unconfirmed-stop claims cannot gain fresh authority; old receipts remain readable historical evidence. Provider refusal is preserved: a terminal `(code=cyber_policy)` suffix yields `provider_policy_refusal`; mere prose containing the code does not. Review-phase refusals are reason codes. Administrative closure is not reformulation or a provider-policy retry.
+
+`wake_acknowledgment` reports `acknowledged` (including count zero), `deferred` with reason, or `not_attempted`, scoped to the observed work/revision. A deferred acknowledgment does not invalidate the state read; a later explicit observation can acknowledge retained hints. Late/duplicate hints do not dispatch work, widen grants or acknowledge future revisions.
+
+Acceptance, application and publication are separate. Without application evidence, state is `not_recorded`, not “applied.” Operator `assess` records expected/observed HEAD and time without identifying who/how; an explicit `apply --expected-head` receipt separately records the application operation. `show WORK_ID --format markdown` renders the work report; `format="markdown"` on non-get tool actions is fenced JSON. Reports count provably linked native turns once and label partial cost subtotals; Claude and unattributed costs remain unknown. Smaller JSON is not a proportional latency or cost claim.
+
+Checks keep the original failure, later applicable pass, delivery and acceptance distinct. Equal immutable-tree evidence is reusable only when other check inputs match; metadata-sensitive commands and changed scope are not interchangeable. One `TemporaryDirectory` cleanup failure in `tests/test_review_runs.py` was observed and passed on reruns; its cause remains unexplained. The pinned compatibility census covers only exercised `openai-completions`, not every API; helpers remain disabled.
 
 ### Agree one plan, then divide the work
 

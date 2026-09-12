@@ -3,9 +3,9 @@
 The pinned combination is **official OMP 18.1.13** with the Python RPC SDK
 at **`daf07999c2fee9b22edc7bf8fea1fb6272e0df5e`**. The checked-in
 [local verification report](compatibility-result.json) passed on Darwin arm64 /
-Python 3.13 with the integrated 3.5.0 source (accepted A–B chain plus G0);
-temporary paths are redacted. This is evidence for that exact combination, not a
-supported-version range or proof of every provider. The report also contains the
+Python 3.13. Its `tandem`, `provenance` and installed-flow `runtime_identity`
+fields identify the exercised bytes and environments. This is evidence for that
+exact combination, not a supported-version range or proof of every provider. The report also contains the
 stage-G0 helper (native `task` subagent) probes described in
 [helper-compatibility.md](helper-compatibility.md); their capability gates are
 recorded separately from check success and `delegation.available` is `false`.
@@ -28,7 +28,7 @@ task, cancellation, and teardown bounds. Network transfer speed can make the
 first download exceed the deadline; rerun the same command after resolving the
 network issue. An incomplete download is removed rather than cached.
 
-The command runs in three phases, and the report says which one failed:
+The command distinguishes acquisition, setup and probe phases:
 
 1. `binary_preflight` names the pinned asset for this platform and decides
    whether the binary comes from `--omp`, from an existing cache entry, or has
@@ -110,6 +110,25 @@ The checks exercise:
    `supported` is a documented blocker, not a failed run; see
    [helper-compatibility.md](helper-compatibility.md).
 
+8. A registered-versus-wire keyword census for `tandem_finish` and `tandem_work`
+   on the actually exercised configured API, `openai-completions`. It records
+   canonical/registered digests, wire digests, keyword counts and JSON-pointer
+   differences. Other provider APIs are explicitly untested. Invalid success
+   with failed/not-run checks and blocked without reasons are refused by the
+   real OMP registered-tool path; upstream schema validation may report a
+   variant's `outcome` error instead of the missing field. Short success reaches
+   the host callback; missing finish is not success.
+9. With `--installed-wheel /absolute/path/to/built.whl`, uv installs frozen
+   runtime dependencies and that wheel into a new temporary venv before provider
+   environment isolation. A separate `python -I` process requires
+   `distribution_origin=installed_wheel` and a verified RECORD build. New fixture
+   cards exercise manual MCP agreement/claim/submission, native OMP review claim
+   and withheld author input, saved finding, missing-finish failure, operator
+   `successor`, report-only same-claim `recover`, independent report, comparison
+   and exact verdict. Another native manual claim exercises clarification refusal
+   and rejected late reply. The Claude seat uses FastMCP Client, not a Claude
+   model; no external model or existing session/grant is used.
+
 The tool restrictions tested here are tool availability, **not an OS filesystem
 sandbox**. This does not certify every native tool, interactive UI, language
 server, provider, or the absence of all network access by the OMP binary.
@@ -144,12 +163,14 @@ writes the JSON to the runner temporary directory. No additional upload-action
 pin is needed. These timings and synthetic token counts are compatibility
 fixture evidence, **not model-performance or cost benchmark results**.
 
-For a release report refresh, keep only a completed passing run; never replace
-this evidence with a failed or partial result. Preserve versions, digests,
-observations and unsupported verdicts. Redact the generated
-`tandem-real-omp-*` temporary root as `<tmp>`, including truncated path excerpts.
-Do not refresh merely to change durations or temporary paths. The 3.5.0 refresh
-records changed installed/source versions with the same helper capability verdicts.
+For a release report refresh, use an actual completed passing run and preserve
+failed attempts separately. Keep versions, digests, observations and unsupported
+verdicts. `provenance` records the exact command and verifier/lock hashes; fixture
+paths and install/CLI output remain evidence, not portable installation paths.
+The proposed 3.6.0 refresh adds schema and installed-runtime evidence. Build the
+wheel/archive with `uv run --frozen python scripts/package.py --output /tmp/tandem-int-dist`,
+then pass the resulting wheel via `--installed-wheel` together with the pinned
+`--omp` path. Packaging and installation do not publish or apply a release.
 
 ## Pin sources
 

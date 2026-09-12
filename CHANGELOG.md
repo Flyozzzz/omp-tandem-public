@@ -1,5 +1,26 @@
 # Changelog
 
+## 3.6.0 — proposed, pending operator confirmation
+
+### Changes
+
+- Bounded shared-work summary/plan/step/full views, paged history and revision/visibility-bound cursors; presentation parameters are separate from mutation identity. Prerequisite hints do not grant authority.
+- Runtime identity records loaded distribution/build, checkout observation and registered schema surfaces, separately from execution and model-selection provenance.
+- Independent clarification requires a new snapshot; exact unchanged review context and waiver applicability follow the agreed snapshot inputs. Installed-runtime verification exposed and corrected a manual-native claim binding gap in clarification/artifact disclosure guards; manual execution permissions remain unchanged.
+- Canonical structured outcomes reject contradictory success/current-check combinations and blocked reports without reasons. Immutable check history preserves original failures and applicable later results.
+- Operator-authorized same-claim report-only recovery, explicit application observations/receipts, Markdown work reports and scoped native usage attribution.
+- Wake acknowledgments distinguish acknowledged, deferred and not attempted without dispatching work. Verifier preflight, acquisition/setup/probe failure classes, live-parent abort evidence and registered-versus-wire schema census have separate observations.
+- Fresh installed-wheel fixture exercises real MCP, pinned OMP RPC/localhost model callbacks and successor CLI with new temporary cards; this is bounded compatibility evidence, not an external-model evaluation.
+
+### Remaining limits
+
+- Package version is a proposal, not a tag, published release or applied result. Existing tags and archives are unchanged.
+- Wire census covers exercised `openai-completions` only. Other APIs remain untested; provider transformations and validation diagnostics are recorded rather than declared universally equivalent. Missing structured finish remains a failure.
+- Every task result carries runtime identity; editable/unverifiable exact builds stay unknown. Review-phase refusals are reason codes; `(code=cyber_policy)` remains a provider-policy refusal, not an automatic retry.
+- Non-get tool actions with `format=markdown` render fenced JSON. Application is `not_recorded` without evidence; Claude/unattributed costs are unknown and native values may be subtotals.
+- One observed `TemporaryDirectory` cleanup failure in `tests/test_review_runs.py` passed on reruns but remains unexplained. The historical wake failure also remains unexplained; deterministic interleavings specify behavior, not its original cause.
+- Helpers remain disabled with the same five unsatisfied gates in [helper compatibility](docs/helper-compatibility.md). No new helper execution is enabled.
+
 ## 3.5.0 — 2026-09-11
 
 ### Features

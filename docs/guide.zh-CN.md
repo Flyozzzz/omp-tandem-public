@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**版本：3.5.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**软件包版本提案：3.6.0（待操作者确认）** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -366,6 +366,29 @@ Claude 插件提供轻量前置工具诊断，以及可选的独立看门狗：
 claim/submit 要求**绑定的项目根本身是已有 HEAD 提交的 Git 仓库**。从父目录启动可能出现 `Work execution requires a Git repository with an immutable HEAD commit`。请在正确仓库启动，或修正客户端的项目根绑定；任务 `cwd` 不会改变该边界。刻意新建的仓库需要先有初始提交才能执行。
 
 `tandem_work(request: WorkCommand, wait_seconds=0)` 是宿主和 OMP 共用的入口。它保存一张项目内持久任务卡：目标、版本化计划、双方共识、步骤依赖、领取记录、阻塞、不可变提交和独立验收。原有 `tandem_start`／`tandem_continue` 对话以及只读 `tandem_review_run` 保持不变；共享任务不是把一次审查变成后台实现。
+
+<a id="compact-contracts"></a>
+### 精简契约、身份与关闭
+
+展示参数与 `request` 同级：`view="summary"|"plan"|"step"|"full"`、`format="json"|"markdown"`、`limit`、`cursor`、`include_snapshots`。选择步骤时设置 `request.step_id`。默认 summary 不重复 Markdown；历史分页且默认不含快照。按返回的续页信息读取；游标绑定任务、修订、区段与可见性，`cursor_stale` 要求重新读取。`next_actions` 展示前提与标识，不授予权限，也不允许自动重试。CAS 和 `operation_id` 含义不变。
+
+每个结果附带 `runtime_identity`：已加载包版本、安装来源、经过 `RECORD` 验证的构建、工作副本观察值及已注册 schema 摘要。editable 或无法验证的构建保持 `unknown`；更新工作副本不会更新运行中的服务。请求／有效／观察到的模型、手动／受管模式、grant 和披露来源分别记录，不暗中调用模型。
+
+独立审查采用 `report` → 至多一次 `compare` → 精确 `accept`/`reject`；成功投递不等于裁决。比较前澄清返回 `clarification_requires_new_snapshot` 并关闭受影响阶段，不向模型传递作者文本。缺少的未改动文件必须以明确相对 `review_context_paths` 纳入新的已同意快照；禁止 glob、路径越界、解引用 symlink 或回退到实时文件。豁免绑定计划、提交、grant 与预期快照输入；历史保留但不授权新输入。手动披露协议不提供操作系统沙箱。
+
+`recovery` 描述领取、阶段、提交、保存材料、允许操作及停止／reconcile 前提，不暴露凭据。`recovery_not_authorized` 等是条件码，不是重试指令。确认原进程停止后，操作者用已准备的 Python 显式授权一个宿主与席位：
+
+```sh
+python -m omp_tandem.work_daemon --project-root /project --state-dir /state successor ATTEMPT_ID --host HOST_OWNER --principal claude --note '仅根据已保存证据关闭报告'
+```
+
+该宿主用新修订和 operation ID 调用 `recover`，再记录同一有效领取的报告与精确裁决；不会重跑模型／测试，也不改变提交、阶段、有效期或 grants。外来、过期、已退役、legacy-unbound 或尚未确认停止的领取不能获得新权限；旧回执仍可作为历史读取。末尾 `(code=cyber_policy)` 分类为 `provider_policy_refusal`，普通文字提及代码不算；审查阶段拒绝使用原因码。行政关闭不是改写提示或绕过提供商拒绝。
+
+`wake_acknowledgment` 对已观察任务／修订返回 `acknowledged`（包含零计数）、带原因的 `deferred` 或 `not_attempted`。延迟确认不否定已读取状态，后续显式读取可确认保留的提示。迟到或重复通知不调度任务、不增加授权、不确认未来修订。
+
+验收、应用与发布分开。无应用证据时为 `not_recorded`；`assess` 仅记录预期／观察 HEAD 和时间，不确定谁以何方式应用。显式 `apply --expected-head` 有单独回执。`show WORK_ID --format markdown` 生成工作报告；工具非 get 操作的 `format="markdown"` 是围栏 JSON。只对可证实关联的原生轮次去重计数，部分费用标为小计；Claude 和未归属费用仍未知。更小 JSON 不代表同比例提速或省钱。
+
+原始失败、后续适用通过、投递和验收分别保留。相同 immutable-tree 证据仅在其余检查输入也相同时可复用，依赖提交元数据的命令或新 scope 不等价。`tests/test_review_runs.py` 曾出现一次 `TemporaryDirectory` 清理失败，重跑通过但原因仍未知。schema 兼容性只覆盖实际执行的 `openai-completions`，不覆盖所有 API；助手仍禁用。
 
 ### 先区分身份、共识与权限
 
