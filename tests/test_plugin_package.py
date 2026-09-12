@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
+
+from scripts import package
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -135,6 +142,52 @@ class DiagnosticHookTests(unittest.TestCase):
                     ),
                     expected,
                 )
+
+
+@unittest.skipUnless(shutil.which("uv"), "Packaging requires uv")
+class DistributionTests(unittest.TestCase):
+    def test_built_artifacts_match_manifests_and_changed_input_invalidates_check(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "source"
+            output = Path(temporary) / "artifacts"
+            payloads = package.source_payloads(ROOT)
+            for name, content in payloads.items():
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+            (root / "private-session.txt").write_text("MUST-NOT-PACKAGE")
+            with (
+                patch.object(package, "ROOT", root),
+                redirect_stdout(io.StringIO()) as captured,
+            ):
+                package.main(["--output", str(output)])
+                built = json.loads(captured.getvalue())
+                package.main(["--check"])
+                for line in (output / "SHA256SUMS").read_text().splitlines():
+                    expected, name = line.split("  ", 1)
+                    self.assertEqual(
+                        hashlib.sha256((output / name).read_bytes()).hexdigest(),
+                        expected,
+                    )
+                with zipfile.ZipFile(built["archive"]) as archive:
+                    self.assertNotIn(
+                        "omp-tandem/private-session.txt", archive.namelist()
+                    )
+                    for name, content in payloads.items():
+                        self.assertEqual(archive.read("omp-tandem/" + name), content)
+                    self.assertEqual(
+                        archive.read("omp-tandem/SHA256SUMS"),
+                        (root / "SHA256SUMS").read_bytes(),
+                    )
+                with zipfile.ZipFile(built["wheel"]) as wheel:
+                    for name, content in payloads.items():
+                        if name.startswith("src/omp_tandem/"):
+                            self.assertEqual(
+                                wheel.read(name.removeprefix("src/")), content
+                            )
+                (root / "README.md").write_text("Changed distribution input")
+                with self.assertRaises(ValueError):
+                    package.main(["--check"])
 
 
 if __name__ == "__main__":
