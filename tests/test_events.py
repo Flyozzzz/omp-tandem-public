@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 from omp_tandem.events import EventConflict, EventStore, QueueFull
@@ -21,6 +22,78 @@ class EventStoreTests(unittest.TestCase):
         self.owner = str(uuid4())
         self.other = str(uuid4())
         self.task_id = str(uuid4())
+
+    def test_work_observation_acknowledges_only_owner_work_and_revision_prefix(self):
+        work_id, other_work = str(uuid4()), str(uuid4())
+        acknowledged = [
+            self.store.enqueue(
+                self.owner,
+                "work_changed",
+                {"work_id": work_id, "revision": revision},
+            )
+            for revision in (1, 2, 2)
+        ]
+        retained = [
+            self.store.enqueue(
+                owner, kind, {"work_id": identifier, "revision": revision}
+            )
+            for owner, kind, identifier, revision in (
+                (self.owner, "work_changed", work_id, 3),
+                (self.owner, "work_changed", other_work, 2),
+                (self.other, "work_changed", work_id, 2),
+                (self.owner, "webhook", work_id, 2),
+            )
+        ]
+        result = self.store.acknowledge_work(self.owner, work_id, 2)
+        self.assertEqual(
+            result, {"acknowledged": 3, "outcome": "acknowledged", "reason": None}
+        )
+        for event in acknowledged:
+            self.assertIsNotNone(self.store.get(event["event_id"])["acknowledged_at"])
+        self.assertEqual(
+            {event["event_id"] for event in self.store.pending(None)},
+            {event["event_id"] for event in retained},
+        )
+        self.assertEqual(
+            self.store.acknowledge_work(self.owner, work_id, 2),
+            {"acknowledged": 0, "outcome": "acknowledged_zero", "reason": None},
+        )
+        self.assertEqual(
+            self.store.acknowledge_work(self.owner, work_id, 3)["acknowledged"], 1
+        )
+        self.assertEqual(
+            {event["event_id"] for event in self.store.pending(None)},
+            {event["event_id"] for event in retained[1:]},
+        )
+
+    def test_shared_cache_lock_is_deferred_until_reader_releases(self):
+        work_id = str(uuid4())
+        event = self.store.enqueue(
+            self.owner, "work_changed", {"work_id": work_id, "revision": 1}
+        )
+
+        def connect():
+            return sqlite3.connect(
+                f"{self.db_path.as_uri()}?cache=shared", uri=True, isolation_level=None
+            )
+
+        with (
+            closing(connect()) as reader,
+            patch.object(self.store, "_connect", side_effect=connect),
+        ):
+            reader.execute("BEGIN")
+            reader.execute("SELECT * FROM channel_events").fetchall()
+            self.assertEqual(
+                self.store.acknowledge_work(self.owner, work_id, 1),
+                {"acknowledged": 0, "outcome": "deferred", "reason": "locked"},
+            )
+            self.assertIsNone(self.store.get(event["event_id"])["acknowledged_at"])
+            reader.rollback()
+            self.assertEqual(
+                self.store.acknowledge_work(self.owner, work_id, 1),
+                {"acknowledged": 1, "outcome": "acknowledged", "reason": None},
+            )
+        self.assertEqual(self.store.pending(self.owner), [])
 
     def test_dedupe_survives_acknowledgment_and_rejects_changed_event(self):
         first = self.store.enqueue(

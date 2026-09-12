@@ -2,13 +2,15 @@
 
 import asyncio
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
-from contextlib import closing
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, suppress
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
@@ -20,6 +22,7 @@ from pydantic_core import to_jsonable_python
 
 from omp_tandem.api import build_server
 from omp_tandem.bridge import Bridge
+from omp_tandem.events import QueueFull
 from omp_tandem.work_adapters import OmpWorkAdapter
 from omp_tandem.work_notifications import WorkNotifications
 from omp_tandem.work_supervisor import WorkSupervisor
@@ -41,7 +44,8 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.git("commit", "-qm", "initial")
         self.claude_bridge = self.bridge("claude")
         self.omp_bridge = self.bridge("omp")
-        self.claude = Client(build_server(self.claude_bridge))
+        self.claude_server = build_server(self.claude_bridge)
+        self.claude = Client(self.claude_server)
         self.omp = Client(build_server(self.omp_bridge))
         await self.claude.__aenter__()
         await self.omp.__aenter__()
@@ -1267,44 +1271,215 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.claude_bridge.wake_acknowledgments[identifier], acknowledged
         )
 
+    async def controlled_notifications(self):
+        notifications = self.claude_server.binding.work_notifications
+        await notifications.close()
+        # Stop transport bookkeeping before enabling push; tests control both writers.
+        pump = self.claude_bridge.channel.pump
+        pump.cancel()
+        with suppress(asyncio.CancelledError):
+            await pump
+        # Tests choose scan boundaries; no background producer can race an assertion.
+        self.claude_bridge.channel.confirmed = True
+        self.addCleanup(setattr, self.claude_bridge.channel, "confirmed", False)
+        return notifications
+
     async def test_committed_peer_change_generates_wake_hint_without_dispatch(self):
-        # No live-client wake guarantee is asserted; inspect actual persisted outbox.
+        """The original intermittent outbox/ack failure remains unexplained history.
+
+        These explicit commit/scan/read boundaries specify the supported contract,
+        not the cause of that historical failure or a live-client wake guarantee.
+        """
+        notifications = await self.controlled_notifications()
+        identifier = await self.create()
         channel = self.claude_bridge.channel
-        channel.confirmed = True
-        notifications = WorkNotifications(self.claude_bridge)
+        before = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        await notifications._scan()
+        observed = channel.store.pending(channel.owner, 256)
+        self.assertEqual(
+            [(event["kind"], event["payload"]) for event in observed],
+            [("work_changed", {"work_id": identifier, "revision": before["revision"]})],
+        )
+        self.assertEqual(self.claude_bridge.work_items.active_attempts(), [])
+        self.assertEqual(
+            to_jsonable_python((await self.claude.call_tool("tandem_list", {})).data),
+            [],
+        )
+        view = await self.call(self.omp, {"action": "get", "work_id": identifier})
+        self.assertEqual(view["revision"], before["revision"])
+        # Another owner observing R cannot acknowledge this owner's hint.
+        self.assertIsNone(channel.store.get(observed[0]["event_id"])["acknowledged_at"])
+        after = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        self.assertEqual(after, before)
+        self.assertEqual(channel.store.pending(channel.owner, 256), [])
+        self.assertEqual(
+            self.claude_bridge.wake_acknowledgments[identifier]["acknowledged"], 1
+        )
+
+    async def test_writer_lock_defers_ack_until_next_explicit_observation(self):
+        identifier = await self.create()
+        channel = self.claude_bridge.channel
+        before = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        hints = [
+            channel.emit("work_changed", {"work_id": identifier, "revision": revision})
+            for revision in (before["revision"] - 1, before["revision"])
+        ]
+        locked, release = threading.Event(), threading.Event()
+
+        def writer():
+            with closing(sqlite3.connect(channel.store.db_path)) as db:
+                db.execute("BEGIN IMMEDIATE")
+                locked.set()
+                release.wait()
+                db.rollback()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            held = executor.submit(writer)
+            try:
+                self.assertTrue(await asyncio.to_thread(locked.wait, 5))
+                # This is a deadlock watchdog, not scheduling or a padded retry.
+                observed = await asyncio.wait_for(
+                    self.call(self.claude, {"action": "get", "work_id": identifier}),
+                    timeout=5,
+                )
+                self.assertEqual(observed, before)
+                status = await self.claude.call_tool("tandem_channel", {})
+                deferred = to_jsonable_python(status.data)["wake_acknowledgment"]
+                self.assertEqual(deferred["outcome"], "deferred")
+                self.assertEqual(deferred["reason"], "busy")
+                self.assertEqual(deferred["acknowledged"], 0)
+                self.assertEqual(deferred["revision"], before["revision"])
+                self.assertEqual(deferred["work_id"], identifier)
+                diagnostic = await self.claude.call_tool("tandem_diagnose", {})
+                self.assertEqual(
+                    to_jsonable_python(diagnostic.data)["channel"][
+                        "wake_acknowledgment"
+                    ],
+                    deferred,
+                )
+                self.assertEqual(
+                    {
+                        event["event_id"]
+                        for event in channel.store.pending(channel.owner)
+                    },
+                    {event["event_id"] for event in hints},
+                )
+            finally:
+                release.set()
+                await asyncio.to_thread(held.result)
+        observed = await self.call(
+            self.claude, {"action": "get", "work_id": identifier}
+        )
+        self.assertEqual(observed, before)
+        acknowledged = self.claude_bridge.wake_acknowledgments[identifier]
+        self.assertEqual(acknowledged["outcome"], "acknowledged")
+        self.assertEqual(acknowledged["acknowledged"], 2)
+        self.assertIsNone(acknowledged["reason"])
+        self.assertEqual(channel.store.pending(channel.owner), [])
+
+    async def test_late_duplicate_hint_never_grants_work_or_launches(self):
+        notifications = await self.controlled_notifications()
+        identifier = await self.create()
+        channel = self.claude_bridge.channel
+        before = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        head = self.claude_bridge.work_items.event_head()
+        await notifications._scan()
+        first = channel.store.pending(channel.owner)[0]
+        payload = {"work_id": identifier, "revision": before["revision"]}
+        self.assertEqual(first["payload"], payload)
+        late = channel.emit("work_changed", payload)
+        repeated = channel.emit("work_changed", payload, dedupe_key=first["dedupe_key"])
+        self.assertEqual(repeated["event_id"], first["event_id"])
+        self.assertNotEqual(late["event_id"], first["event_id"])
+        after = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        self.assertEqual(after, before)
+        self.assertEqual(
+            self.claude_bridge.wake_acknowledgments[identifier]["acknowledged"], 2
+        )
+        self.assertEqual(channel.store.pending(channel.owner), [])
+        # Replaying an acknowledged dedupe key does not resurrect it.
+        channel.emit("work_changed", payload, dedupe_key=first["dedupe_key"])
+        self.assertEqual(channel.store.pending(channel.owner), [])
+        with self.assertRaises(ToolError):
+            await self.mutate(self.claude, identifier, "heartbeat", step_id="change")
+        self.assertEqual(self.claude_bridge.work_items.event_head(), head)
+        self.assertEqual(self.claude_bridge.work_items.active_attempts(), [])
+        self.assertIsNone(after["authorization"])
+        self.assertEqual(
+            to_jsonable_python((await self.claude.call_tool("tandem_list", {})).data),
+            [],
+        )
+
+    async def test_failed_wake_emit_retains_cursor_and_reobserves_committed_events(
+        self,
+    ):
+        notifications = await self.controlled_notifications()
+        channel = self.claude_bridge.channel
+        first, second = await self.create(), await self.create()
+        cursor = notifications.cursor
+        head = self.claude_bridge.work_items.event_head()
+        emit = channel.emit
+
+        def fail_second(kind, payload, **kwargs):
+            if payload["work_id"] == second:
+                raise QueueFull("Injected outbox failure")
+            return emit(kind, payload, **kwargs)
+
+        with (
+            patch.object(channel, "emit", side_effect=fail_second),
+            self.assertLogs("omp_tandem.work_notifications", level="ERROR"),
+        ):
+            await notifications._scan()
+        self.assertEqual(notifications.cursor, cursor)
+        partial = channel.store.pending(channel.owner)
+        self.assertEqual([event["payload"]["work_id"] for event in partial], [first])
+        # The next specified scan replays the first event idempotently and emits
+        # the retained second event, then advances the original cursor.
+        await notifications._scan()
+        self.assertEqual(notifications.cursor, head)
+        delivered = channel.store.pending(channel.owner)
+        self.assertEqual(
+            {event["payload"]["work_id"] for event in delivered}, {first, second}
+        )
+        self.assertEqual(
+            [
+                event["event_id"]
+                for event in delivered
+                if event["payload"]["work_id"] == first
+            ],
+            [partial[0]["event_id"]],
+        )
+        self.assertEqual(self.claude_bridge.work_items.event_head(), head)
+        self.assertEqual(self.claude_bridge.work_items.active_attempts(), [])
+
+    async def test_reconnect_starts_at_event_head_and_explicit_get_synchronizes(self):
+        identifier = await self.create()
+        before = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        changed = await self.mutate(self.omp, identifier, "pause")
+        reopened = self.bridge("claude")
+        notifications = WorkNotifications(reopened)
         await notifications.start()
-        try:
-            identifier = await self.create()
-            deadline = time.monotonic() + 3
-            observed = []
-            while time.monotonic() < deadline:
-                observed = [
-                    event
-                    for event in channel.store.pending(channel.owner, 256)
-                    if event["kind"] == "work_changed"
-                    and event["payload"]["work_id"] == identifier
-                ]
-                if observed:
-                    break
-                await asyncio.sleep(0.03)
-            self.assertTrue(
-                observed, "No committed shared-work event reached the outbox"
-            )
-            self.assertEqual(self.claude_bridge.work_items.active_attempts(), [])
-            view = await self.call(self.omp, {"action": "get", "work_id": identifier})
-            self.assertGreaterEqual(
-                view["revision"], observed[-1]["payload"]["revision"]
-            )
-            await self.call(self.claude, {"action": "get", "work_id": identifier})
-            remaining = {
-                event["event_id"] for event in channel.store.pending(channel.owner, 256)
-            }
-            self.assertFalse(
-                remaining.intersection(event["event_id"] for event in observed)
-            )
-        finally:
-            await notifications.close()
-            channel.confirmed = False
+        # Cancel before yielding to the scheduled loop; exercise scans explicitly.
+        await notifications.close()
+        head = reopened.work_items.event_head()
+        self.assertEqual(notifications.cursor, head)
+        self.assertEqual(
+            reopened.channel_status()["wake_acknowledgment"]["outcome"],
+            "not_attempted",
+        )
+        reopened.channel.confirmed = True
+        await notifications._scan()
+        self.assertEqual(reopened.channel.store.pending(reopened.channel.owner), [])
+        observed = reopened.work({"action": "get", "work_id": identifier})
+        self.assertEqual(observed["revision"], changed["revision"])
+        self.assertGreater(observed["revision"], before["revision"])
+        self.assertEqual(observed["status"], "paused")
+        self.assertEqual(
+            reopened.channel_status()["wake_acknowledgment"]["outcome"],
+            "acknowledged_zero",
+        )
+        self.assertEqual(reopened.work_items.active_attempts(), [])
+        self.assertEqual(reopened.work_items.event_head(), head)
 
     async def test_retired_claim_receipt_does_not_restore_write_capability(self):
         identifier = await self.create()
