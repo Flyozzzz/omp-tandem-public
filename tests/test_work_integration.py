@@ -1778,7 +1778,17 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(str(self.root), command)
         inspect = await self.daemon("transition", identifier, "inspect")
         self.assertEqual(inspect.returncode, 0, inspect.stderr)
-        self.assertEqual(len(json.loads(inspect.stdout)["commands"]), 2)
+        commands = json.loads(inspect.stdout)["commands"]
+        self.assertEqual([" begin " in c["command"] for c in commands].count(True), 1)
+        self.assertTrue(
+            any(
+                " withdraw " in c["command"]
+                and f"--proposal {pending['proposal']['proposal_id']}" in c["command"]
+                and "--expected-revision" in c["command"]
+                for c in commands
+            )
+        )
+        self.assertFalse(any(" activate " in c["command"] for c in commands))
         stale = await self.daemon(
             "transition",
             identifier,
@@ -1803,6 +1813,23 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotEqual(moved.returncode, 0)
         self.assertIn("revision", moved.stderr)
+        # A retained withdraw command for a proposal that has since been replaced
+        # must not discard the current one.
+        retained_withdraw = await self.daemon(
+            "transition",
+            identifier,
+            "withdraw",
+            "--proposal",
+            "00000000-0000-4000-8000-000000000000",
+            "--note",
+            "withdraw the proposal I observed earlier",
+        )
+        self.assertNotEqual(retained_withdraw.returncode, 0)
+        self.assertIn("proposal_mismatch", retained_withdraw.stderr)
+        still = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        self.assertEqual(
+            still["proposal"]["proposal_id"], pending["proposal"]["proposal_id"]
+        )
         begun = await self.daemon(
             "transition",
             identifier,
@@ -1832,6 +1859,21 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             json.loads(repeated.stdout)["transition"]["transition_id"], transition_id
         )
         self.assertTrue(json.loads(repeated.stdout)["replayed_operation"])
+        # The same operation id with a different command is a conflict, never a
+        # borrowed acknowledgement.
+        different = await self.daemon(
+            "transition",
+            identifier,
+            "begin",
+            "--proposal",
+            "00000000-0000-4000-8000-000000000000",
+            "--operation-id",
+            "begin-once",
+            "--note",
+            "a different command",
+        )
+        self.assertNotEqual(different.returncode, 0)
+        self.assertIn("different command", different.stderr)
         for client, step in ((self.claude, "change"), (self.omp, "docs")):
             with self.assertRaises(ToolError):
                 await self.mutate(client, identifier, "heartbeat", step_id=step)
@@ -1849,6 +1891,26 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(stalled.returncode, 0)
         report = await self.daemon("show", identifier, "--format", "markdown")
         self.assertIn("awaiting stop evidence and operator disposition", report.stdout)
+        # A disposition recorded against an older card observation is refused.
+        current = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        stale_resolve = await self.daemon(
+            "transition",
+            identifier,
+            "resolve",
+            "--transition",
+            transition_id,
+            "--expected-revision",
+            str(current["revision"] - 1),
+            "--attempt",
+            first["claim"]["attempt_id"],
+            "--confirm-stopped",
+            "--note",
+            "observed an older card",
+            "--evidence",
+            "stale",
+        )
+        self.assertNotEqual(stale_resolve.returncode, 0)
+        self.assertIn("revision", stale_resolve.stderr)
         resolved = await self.daemon(
             "transition",
             identifier,

@@ -3704,6 +3704,7 @@ class WorkStore:
                     continue
                 flags = [
                     *bound,
+                    *revision,
                     "--attempt",
                     attempt_id,
                     "--note",
@@ -3753,6 +3754,7 @@ class WorkStore:
                         work_id,
                         "withdraw",
                         *bound,
+                        *revision,
                         "--note",
                         "'…'",
                     ),
@@ -3794,6 +3796,21 @@ class WorkStore:
                 )
             commands.append(
                 {
+                    "purpose": "withdraw the pending proposal without touching execution",
+                    "command": self._operator_command(
+                        work_id,
+                        "transition",
+                        work_id,
+                        "withdraw",
+                        *bound,
+                        *revision,
+                        "--note",
+                        "'…'",
+                    ),
+                }
+            )
+            commands.append(
+                {
                     "purpose": "inspect the pending proposal and its impact",
                     "command": self._operator_command(
                         work_id, "transition", work_id, "inspect"
@@ -3802,24 +3819,39 @@ class WorkStore:
             )
         return commands
 
-    def _transition_operation(self, card, operation_id, operation):
-        """Durable operation identity: an exact repeat returns the recorded outcome."""
+    @staticmethod
+    def _transition_request(operation, **request):
+        """Canonical fingerprint of one exact operator command (verb and every argument)."""
+        return hashlib.sha256(
+            _json({"operation": operation, "request": request}).encode("utf-8")
+        ).hexdigest()
+
+    def _transition_operation(self, card, operation_id, fingerprint):
+        """Durable operation identity: only the exact same command replays its outcome.
+
+        A different command under a used identity is refused instead of being
+        acknowledged with someone else's receipt.
+        """
         if not operation_id:
             return None
         record = (card.get("transition_operations") or {}).get(operation_id)
         if record is None:
             return None
-        if record["operation"] != operation:
+        if record["fingerprint"] != fingerprint:
             raise WorkConflict("Operation ID was already used for a different command")
         return record
 
-    def _record_transition_operation(self, card, operation_id, operation, **extra):
+    def _record_transition_operation(
+        self, card, operation_id, operation, fingerprint, outcome
+    ):
+        """Store verb, exact-request fingerprint and the identities the command produced."""
         if operation_id:
             card.setdefault("transition_operations", {})[operation_id] = {
                 "operation": operation,
+                "fingerprint": fingerprint,
                 "revision": card["revision"] + 1,
                 "at": time.time(),
-                **extra,
+                "outcome": outcome,
             }
 
     @staticmethod
@@ -3918,9 +3950,16 @@ class WorkStore:
         self._require_operator(actor)
         if not note:
             raise ValueError("Begin requires a note")
+        fingerprint = self._transition_request(
+            "begin",
+            work_id=work_id,
+            note=note,
+            proposal_id=proposal_id,
+            expected_revision=expected_revision,
+        )
         with self._transaction() as db:
             card = self._load(db, work_id)
-            replay = self._transition_operation(card, operation_id, "begin")
+            replay = self._transition_operation(card, operation_id, fingerprint)
             if replay is not None:
                 return {**self._view(db, card), "replayed_operation": replay}
             self._check_expected_revision(card, expected_revision)
@@ -3935,7 +3974,6 @@ class WorkStore:
             if transition and transition["phase"] in TRANSITION_OPEN:
                 raise ValueError("transition_in_progress")
             inventory = self._transition_inventory(db, card)
-            self._record_transition_operation(card, operation_id, "begin")
             card["transition"] = {
                 "transition_id": str(uuid4()),
                 "proposal_id": proposal["proposal_id"],
@@ -3956,6 +3994,18 @@ class WorkStore:
                 "continuation": {},
             }
             self._fence(db, card, "Plan transition begun; old attempt cannot publish")
+            self._record_transition_operation(
+                card,
+                operation_id,
+                "begin",
+                fingerprint,
+                {
+                    "transition_id": card["transition"]["transition_id"],
+                    "proposal_id": proposal["proposal_id"],
+                    "phase": card["transition"]["phase"],
+                    "attempt_ids": [item["attempt_id"] for item in inventory],
+                },
+            )
             return self._record(
                 db,
                 card,
@@ -3980,6 +4030,7 @@ class WorkStore:
         abandon=False,
         saved_commit=None,
         transition_id=None,
+        expected_revision=None,
         operation_id=None,
         actor="operator",
         workspaces=None,
@@ -3987,11 +4038,24 @@ class WorkStore:
         self._require_operator(actor)
         if not note or not evidence:
             raise ValueError("Resolve requires note and evidence")
+        fingerprint = self._transition_request(
+            "resolve",
+            work_id=work_id,
+            attempt_id=attempt_id,
+            note=note,
+            evidence=list(evidence),
+            confirm_stopped=bool(confirm_stopped),
+            abandon=bool(abandon),
+            saved_commit=saved_commit,
+            transition_id=transition_id,
+            expected_revision=expected_revision,
+        )
         with self._transaction() as db:
             card = self._load(db, work_id)
-            replay = self._transition_operation(card, operation_id, "resolve")
+            replay = self._transition_operation(card, operation_id, fingerprint)
             if replay is not None:
                 return {**self._view(db, card), "replayed_operation": replay}
+            self._check_expected_revision(card, expected_revision)
             transition = card.get("transition")
             if not transition or transition["phase"] not in TRANSITION_OPEN:
                 raise ValueError("transition_not_begun")
@@ -4113,7 +4177,20 @@ class WorkStore:
                 )
                 # Same gate as operator reconciliation: abandonment pauses the card.
                 card["status"] = "paused"
-            self._record_transition_operation(card, operation_id, "resolve")
+            self._record_transition_operation(
+                card,
+                operation_id,
+                "resolve",
+                fingerprint,
+                {
+                    "transition_id": transition["transition_id"],
+                    "attempt_id": attempt_id,
+                    "disposition": "abandoned" if abandon else "superseded",
+                    "stop": stop.get("source"),
+                    "preserved_commit": (saved.get("preserved") or {}).get("commit"),
+                    "status": card["status"],
+                },
+            )
             entry.update(
                 stop=stop,
                 saved=saved,
@@ -4161,9 +4238,17 @@ class WorkStore:
         self._require_operator(actor)
         if not note:
             raise ValueError("Activate requires a note")
+        fingerprint = self._transition_request(
+            "activate",
+            work_id=work_id,
+            note=note,
+            transition_id=transition_id,
+            proposal_id=proposal_id,
+            expected_revision=expected_revision,
+        )
         with self._transaction() as db:
             card = self._load(db, work_id)
-            replay = self._transition_operation(card, operation_id, "activate")
+            replay = self._transition_operation(card, operation_id, fingerprint)
             if replay is not None:
                 return {**self._view(db, card), "replayed_operation": replay}
             self._check_expected_revision(card, expected_revision)
@@ -4214,8 +4299,18 @@ class WorkStore:
                     "inventory_not_disposed: a live attempt appeared after begin"
                 )
             was_paused = card["status"] == "paused"
-            self._record_transition_operation(card, operation_id, "activate")
             self._activate_plan(db, card, proposal["plan"])
+            self._record_transition_operation(
+                card,
+                operation_id,
+                "activate",
+                fingerprint,
+                {
+                    "transition_id": transition["transition_id"],
+                    "proposal_id": proposal["proposal_id"],
+                    "plan_revision": card["plan_revision"],
+                },
+            )
             if was_paused:
                 # Activation never clears an operator pause or unknown-cost fence.
                 card["status"] = "paused"
@@ -4295,29 +4390,61 @@ class WorkStore:
             )
 
     def transition_withdraw(
-        self, work_id, *, note, transition_id=None, operation_id=None, actor="operator"
+        self,
+        work_id,
+        *,
+        note,
+        transition_id=None,
+        proposal_id=None,
+        expected_revision=None,
+        operation_id=None,
+        actor="operator",
     ) -> dict:
         self._require_operator(actor)
         if not note:
             raise ValueError("Withdraw requires a note")
+        fingerprint = self._transition_request(
+            "withdraw",
+            work_id=work_id,
+            note=note,
+            transition_id=transition_id,
+            proposal_id=proposal_id,
+            expected_revision=expected_revision,
+        )
         with self._transaction() as db:
             card = self._load(db, work_id)
-            replay = self._transition_operation(card, operation_id, "withdraw")
+            replay = self._transition_operation(card, operation_id, fingerprint)
             if replay is not None:
                 return {**self._view(db, card), "replayed_operation": replay}
+            self._check_expected_revision(card, expected_revision)
             proposal = card.get("proposal")
             transition = card.get("transition")
-            if not proposal and not (
+            open_transition = bool(
                 transition and transition["phase"] in TRANSITION_OPEN
-            ):
+            )
+            if not proposal and not open_transition:
                 raise ValueError("no_pending_proposal")
-            if (
-                transition
-                and transition["phase"] in TRANSITION_OPEN
-                and (not transition_id or transition_id != transition["transition_id"])
-            ):
-                raise ValueError("transition_mismatch")
-            self._record_transition_operation(card, operation_id, "withdraw")
+            if open_transition:
+                # After begin the frozen transition is the identity being withdrawn.
+                if not transition_id or transition_id != transition["transition_id"]:
+                    raise ValueError("transition_mismatch")
+            elif not proposal_id or proposal_id != proposal["proposal_id"]:
+                # Before begin only the exact pending proposal can be withdrawn; a
+                # retained command must not discard whatever replaced it.
+                raise ValueError("proposal_mismatch")
+            self._record_transition_operation(
+                card,
+                operation_id,
+                "withdraw",
+                fingerprint,
+                {
+                    "proposal_id": (proposal or {}).get("proposal_id"),
+                    "transition_id": transition["transition_id"]
+                    if open_transition
+                    else None,
+                    "sticky_quiescence": open_transition,
+                },
+            )
             details = {"note": note, "proposal_id": (proposal or {}).get("proposal_id")}
             if transition and transition["phase"] in TRANSITION_OPEN:
                 # Quiescence stays sticky: fenced attempts keep needing reconciliation.

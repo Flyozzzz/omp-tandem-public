@@ -202,11 +202,13 @@ class WorkItemsTests(unittest.TestCase):
         )
 
     def withdraw(self, *, note="withdraw", **extra):
-        transition = self.view().get("transition")
+        view = self.view()
+        transition = view.get("transition")
         return self.store.transition_withdraw(
             self.work_id,
             note=note,
             transition_id=transition["transition_id"] if transition else None,
+            proposal_id=(view.get("proposal") or {}).get("proposal_id"),
             **extra,
         )
 
@@ -2418,9 +2420,28 @@ class WorkItemsTests(unittest.TestCase):
         before = self.view()
         revised = json.loads(json.dumps(before["plan"]))
         revised["steps"][1]["goal"] = "Changed"
-        self.change("propose", plan=revised)
+        first_pending = self.change("propose", plan=revised)
+        # Before begin, withdrawal binds to the exact pending proposal: a command
+        # retained for a replaced proposal cannot discard its replacement.
+        revised["steps"][1]["goal"] = "Changed again"
+        replaced = self.change("propose", plan=revised)
+        with self.assertRaisesRegex(ValueError, "proposal_mismatch"):
+            self.store.transition_withdraw(
+                self.work_id,
+                note="withdraw what I saw",
+                proposal_id=first_pending["proposal"]["proposal_id"],
+            )
+        with self.assertRaisesRegex(ValueError, "proposal_mismatch"):
+            self.store.transition_withdraw(self.work_id, note="unbound")
+        self.assertEqual(
+            self.view()["proposal"]["proposal_id"], replaced["proposal"]["proposal_id"]
+        )
         self.begin(note="begin")
-        withdrawn = self.withdraw(note="Keep the old plan")
+        begun_id = self.view()["transition"]["transition_id"]
+        withdrawn = self.withdraw(
+            note="Keep the old plan", operation_id="withdraw-once"
+        )
+        self.assertNotIn("replayed_operation", withdrawn)
         self.assertIsNone(withdrawn["proposal"])
         self.assertIsNone(withdrawn["transition"])
         self.assertEqual(withdrawn["plan_revision"], before["plan_revision"])
@@ -2433,6 +2454,19 @@ class WorkItemsTests(unittest.TestCase):
         self.assertEqual(step["state"], "recovery_required")
         with self.assertRaises((WorkConflict, ValueError)):
             self._claim("claude", {"host_owner": "claude-host"}, step_id="frontend")
+        # After the card moved on, the exact same withdraw command still replays
+        # its own recorded outcome instead of the current view alone.
+        replay = WorkStore(self.store.database, self.scope).transition_withdraw(
+            self.work_id,
+            note="Keep the old plan",
+            transition_id=begun_id,
+            proposal_id=replaced["proposal"]["proposal_id"],
+            operation_id="withdraw-once",
+        )
+        self.assertEqual(
+            replay["replayed_operation"]["outcome"]["transition_id"], begun_id
+        )
+        self.assertTrue(replay["replayed_operation"]["outcome"]["sticky_quiescence"])
         # A new proposal can still be negotiated; abandonment records a blocker.
         self.change("propose", plan=revised)
         self.begin(note="again")
@@ -2676,11 +2710,24 @@ class WorkItemsTests(unittest.TestCase):
             self.work_id,
             note="Activate the idle proposal",
             proposal_id=proposal_id,
+            expected_revision=pending["revision"],
             operation_id="activate-once",
         )
         self.assertEqual(replayed["replayed_operation"]["operation"], "activate")
+        self.assertEqual(
+            replayed["replayed_operation"]["outcome"]["proposal_id"], proposal_id
+        )
         self.assertEqual(replayed["plan_revision"], activated["plan_revision"])
         self.assertEqual(len(replayed["transition_history"]), 1)
+        # The identity is bound to the exact command: a different request under
+        # the same operation id is a conflict, not a borrowed acknowledgement.
+        with self.assertRaisesRegex(WorkConflict, "different command"):
+            self.store.transition_activate(
+                self.work_id,
+                note="Activate something else",
+                proposal_id=proposal_id,
+                operation_id="activate-once",
+            )
         with self.assertRaisesRegex(ValueError, "no_pending_proposal"):
             self.store.transition_activate(
                 self.work_id, note="again", proposal_id=proposal_id
@@ -2719,25 +2766,75 @@ class WorkItemsTests(unittest.TestCase):
             self.work_id,
             note="Begin",
             proposal_id=proposal_id,
+            expected_revision=pending["revision"],
             operation_id="begin-once",
         )
         self.assertEqual(replayed["replayed_operation"]["operation"], "begin")
+        self.assertEqual(
+            replayed["replayed_operation"]["outcome"]["transition_id"],
+            begun["transition"]["transition_id"],
+        )
         self.assertEqual(
             replayed["transition"]["transition_id"],
             begun["transition"]["transition_id"],
         )
         self.assertEqual(len(replayed["transition_history"]), history_before)
+        for variant in (
+            {"note": "Begin", "proposal_id": "other", "expected_revision": -1},
+            {"note": "a different note", "proposal_id": proposal_id},
+            {"note": "Begin", "proposal_id": proposal_id},
+        ):
+            with self.assertRaisesRegex(WorkConflict, "different command"):
+                self.store.transition_begin(
+                    self.work_id, operation_id="begin-once", **variant
+                )
         with self.assertRaisesRegex(ValueError, "transition_in_progress"):
             self.store.transition_begin(
                 self.work_id, note="Begin twice", proposal_id=proposal_id
             )
+        # Resolve and withdraw honour the observed revision like begin/activate.
+        with self.assertRaisesRegex(WorkConflict, "Expected revision"):
+            self.resolve(
+                managed["attempt_id"],
+                note="n",
+                evidence=["e"],
+                expected_revision=self.view()["revision"] - 1,
+            )
+        with self.assertRaisesRegex(WorkConflict, "Expected revision"):
+            self.withdraw(note="n", expected_revision=self.view()["revision"] + 1)
+        self.assertEqual(self.view()["transition"]["phase"], "stopping")
         self.store.confirm_stopped(managed["attempt_id"])
         # An operator note that quotes a credential must not leak it through the
         # operator's own inspect view any more than through an ordinary get.
-        self.resolve(
+        first = self.resolve(
             managed["attempt_id"],
             note=f"stopped; worker log quoted {managed['token']}",
             evidence=["e"],
+            operation_id="dispose-once",
+        )
+        # A used disposition receipt cannot acknowledge a different attempt or a
+        # different decision; the manual attempt stays undisposed.
+        with self.assertRaisesRegex(WorkConflict, "different command"):
+            self.resolve(
+                manual["attempt_id"],
+                note="discard it",
+                evidence=["other"],
+                confirm_stopped=True,
+                abandon=True,
+                operation_id="dispose-once",
+            )
+        self.assertIsNone(
+            self.view()["transition"]["inventory"][manual["attempt_id"]]["disposition"]
+        )
+        again = self.resolve(
+            managed["attempt_id"],
+            note=f"stopped; worker log quoted {managed['token']}",
+            evidence=["e"],
+            operation_id="dispose-once",
+        )
+        self.assertEqual(again["revision"], first["revision"])
+        self.assertEqual(
+            again["replayed_operation"]["outcome"]["attempt_id"], managed["attempt_id"]
         )
         self.resolve(
             manual["attempt_id"],

@@ -149,7 +149,8 @@ def parser():
     )
     transition.add_argument("--attempt", help="Attempt to dispose (resolve)")
     transition.add_argument(
-        "--proposal", help="Exact proposal id the operator observed (begin, activate)"
+        "--proposal",
+        help="Exact proposal id the operator observed (begin, activate, withdraw before begin)",
     )
     transition.add_argument(
         "--transition",
@@ -162,7 +163,7 @@ def parser():
     )
     transition.add_argument(
         "--operation-id",
-        help="Stable id for this exact operator command; an exact repeat returns the recorded outcome without new effects",
+        help="Stable id for this exact operator command; an exact repeat returns the recorded outcome without new effects, a different command under the same id is refused",
     )
     transition.add_argument("--note")
     transition.add_argument("--evidence", action="append")
@@ -455,6 +456,7 @@ def main(argv=None):
                         abandon=args.abandon,
                         saved_commit=args.saved_commit,
                         transition_id=args.transition,
+                        expected_revision=args.expected_revision,
                         operation_id=args.operation_id,
                         workspaces=WorkWorkspace(scope),
                     )
@@ -472,6 +474,8 @@ def main(argv=None):
                         args.work_id,
                         note=args.note,
                         transition_id=args.transition,
+                        proposal_id=args.proposal,
+                        expected_revision=args.expected_revision,
                         operation_id=args.operation_id,
                     )
                 if args.operation != "inspect":
