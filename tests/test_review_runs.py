@@ -16,14 +16,25 @@ from omp_tandem.review_runs import RUN_ACTIVE, ReviewRuns
 from tests.helpers import RpcHarness
 from tests.test_review_integration import REVIEW_PEER
 
-RUN_PEER = REVIEW_PEER.replace(
-    "scenario = task['task']['goal']",
-    "scenario = Path(__file__).with_name('scenario').read_text()",
-).replace(
-    "        elif scenario == 'missing-report':",
-    "        elif scenario == 'partial':\n"
-    "            finish({'outcome': 'partial', 'summary': 'Incomplete evidence', 'answer': 'Only part of the saved material was assessed.'})\n"
-    "        elif scenario == 'missing-report':",
+RUN_PEER = (
+    REVIEW_PEER.replace(
+        "scenario = task['task']['goal']",
+        "scenario = Path(__file__).with_name('scenario').read_text()\n"
+        "        if scenario == 'comparison-question':\n"
+        "            scenario = 'snapshot-reader' if task['review']['stage'] == 'independent' else 'question'",
+    )
+    .replace(
+        "        elif scenario == 'missing-report':",
+        "        elif scenario == 'partial':\n"
+        "            finish({'outcome': 'partial', 'summary': 'Incomplete evidence', 'answer': 'Only part of the saved material was assessed.'})\n"
+        "        elif scenario == 'missing-report':",
+    )
+    .replace(
+        "        if response.get('expired'):",
+        "        if response.get('clarification_requires_new_snapshot'):\n"
+        "            finish({'outcome': 'blocked', 'summary': 'New context required', 'answer': json.dumps(response), 'blockers': [response['reason']]})\n"
+        "        elif response.get('expired'):",
+    )
 )
 
 
@@ -233,33 +244,44 @@ raise SystemExit(main())
         self.assertEqual(result["outcome"], "success")
         self.assertIsNone(result["comparison"])
 
-    async def test_reply_and_cancel_are_run_scoped_and_preserve_first_result(self):
+    async def test_independent_question_requires_new_snapshot_without_waiting(self):
         (self.root / "scenario").write_text("question")
         run = await self.begin()
+        result = await self.wait_run(run["run_id"])
+        self.assertEqual(result["outcome"], "blocked")
+        self.assertIsNone(result["comparison"])
+        request = json.loads(result["independent"]["answer"])
+        self.assertTrue(request["clarification_requires_new_snapshot"])
+        with self.assertRaises(ValueError):
+            self.runs.reply(run["run_id"], request["question_id"], "AUTHOR-SENTINEL")
+        self.assertNotIn("AUTHOR-SENTINEL", json.dumps(result["independent"]))
+
+    async def test_comparison_reply_replay_remains_run_scoped(self):
+        (self.root / "scenario").write_text("comparison-question")
+        run = await self.begin()
         waiting = await self.wait_run(run["run_id"], waiting=True)
-        self.assertEqual(self.runs.state(run["run_id"]), "waiting_input")
-        replied = await asyncio.to_thread(
-            self.runs.reply, run["run_id"], waiting["question"]["question_id"], "blue"
-        )
-        self.assertEqual(replied["replied_task_id"], waiting["task_id"])
-        second = await self.wait_run(run["run_id"], waiting=True)
-        self.assertEqual(second["phase"], "comparison")
+        self.assertEqual(waiting["phase"], "comparison")
+        question_id = waiting["question"]["question_id"]
+        await asyncio.to_thread(self.runs.reply, run["run_id"], question_id, "blue")
+        result = await self.wait_run(run["run_id"])
+        self.assertEqual(result["comparison"]["answer"], "blue")
         repeated = await asyncio.to_thread(
-            self.runs.reply, run["run_id"], waiting["question"]["question_id"], "blue"
+            self.runs.reply, run["run_id"], question_id, "blue"
         )
         self.assertEqual(repeated["replied_task_id"], waiting["task_id"])
-        self.assertEqual(
-            repeated["question"]["question_id"], second["question"]["question_id"]
-        )
-        self.assertEqual(repeated["phase"], "comparison")
+
+    async def test_comparison_cancel_preserves_independent_result(self):
+        (self.root / "scenario").write_text("comparison-question")
+        run = await self.begin()
+        waiting = await self.wait_run(run["run_id"], waiting=True)
         cancelled = await asyncio.to_thread(self.runs.cancel, run["run_id"])
         self.assertEqual(cancelled["status"], "cancelled")
-        self.assertEqual(cancelled["independent"]["answer"], "blue")
+        self.assertEqual(cancelled["independent"], waiting["independent"])
         with self.assertRaises(ValueError):
-            self.runs.reply(run["run_id"], second["question"]["question_id"], "green")
+            self.runs.reply(run["run_id"], waiting["question"]["question_id"], "green")
 
     async def test_total_budget_includes_waiting_input_and_status_does_not_cancel(self):
-        (self.root / "scenario").write_text("question")
+        (self.root / "scenario").write_text("comparison-question")
         run = await self.begin(budget_seconds=30)
         waiting = await self.wait_run(run["run_id"], waiting=True)
         self.assertEqual(waiting["status"], "waiting_input")
@@ -269,7 +291,7 @@ raise SystemExit(main())
         self.expire_budget(run["run_id"])
         result = await self.wait_run(run["run_id"])
         self.assertEqual(result["status"], "failed")
-        self.assertIsNone(result["comparison"])
+        self.assertEqual(result["independent"]["outcome"], "success")
         self.assertLess(time.monotonic() - began, 2)
 
     async def test_startup_failure_is_final_and_reservation_cannot_be_replayed(self):
@@ -585,7 +607,7 @@ raise SystemExit(main())
         self.assertIsNone(result["independent"])
 
     async def test_blocked_capture_does_not_block_other_cancel_or_status(self):
-        (self.root / "scenario").write_text("question")
+        (self.root / "scenario").write_text("comparison-question")
         other = await self.begin()
         await self.wait_run(other["run_id"], waiting=True)
         control, marker, release = self.controlled_capture()
@@ -645,7 +667,7 @@ raise SystemExit(main())
         self,
     ):
         """Real held SQLite publication, including MCP's channel acknowledgement."""
-        (self.root / "scenario").write_text("question")
+        (self.root / "scenario").write_text("comparison-question")
         other = await self.begin()
         await self.wait_run(other["run_id"], waiting=True)
         capture_control, capture_marker, capture_release = self.controlled_capture()
@@ -721,7 +743,8 @@ raise SystemExit(main())
         expired = await self.wait_run(expiring["run_id"])
         self.assertEqual(cancelled["status"], "cancelled")
         self.assertEqual(expired["status"], "failed")
-        self.assertIsNone(cancelled["comparison"])
+        self.assertIsNone(cancelled["comparison"]["report"])
+        self.assertEqual(cancelled["independent"]["outcome"], "success")
         self.assertIsNone(expired["independent"])
         healthy = await self.wait_run(publisher["run_id"], waiting=True)
         self.assertEqual(healthy["status"], "waiting_input")
@@ -730,7 +753,7 @@ raise SystemExit(main())
         with closing(self.bridge.tasks.connect()) as db:
             self.assertEqual(
                 db.execute(
-                    "SELECT count(*) FROM tasks WHERE review_run_id=?",
+                    "SELECT count(*) FROM tasks WHERE review_run_id=? AND review_stage='comparison'",
                     (other["run_id"],),
                 ).fetchone()[0],
                 1,
@@ -744,7 +767,7 @@ raise SystemExit(main())
             )
             self.assertEqual(
                 db.execute(
-                    "SELECT cancel_requested FROM tasks WHERE review_run_id=?",
+                    "SELECT cancel_requested FROM tasks WHERE review_run_id=? AND review_stage='comparison'",
                     (other["run_id"],),
                 ).fetchone()[0],
                 1,

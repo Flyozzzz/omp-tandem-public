@@ -135,7 +135,7 @@ class NativeWorker:
             ),
             host_tool(
                 name="tandem_ask",
-                description="Ask the coordinator for missing information. Pauses this task until a reply or bounded timeout; never guess an unanswered decision.",
+                description="Ask the coordinator for missing information. Independent snapshot review returns clarification_requires_new_snapshot immediately and must end blocked/partial; context may contain JSON requested_paths for a new capture. Other tasks pause for a reply or bounded timeout. Never guess an unanswered decision.",
                 parameters=QuestionRequest.model_json_schema(),
                 decode=QuestionRequest.model_validate,
                 execute=lambda request, ctx: self.interaction.ask(

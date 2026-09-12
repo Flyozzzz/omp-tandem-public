@@ -5,14 +5,17 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
+from omp_rpc.host_tools import HostToolContext
 from pydantic_core import to_jsonable_python
 
 from omp_tandem.api import build_server
@@ -148,6 +151,206 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             text=True,
             timeout=30,
         )
+
+    async def clarification_task(self, *, comparison=False, bind=True):
+        identifier = await self.create()
+        await self.mutate(self.claude, identifier, "claim", step_id="change")
+        (self.root / "module.txt").write_text("after\n")
+        self.git("add", "module.txt")
+        self.git("commit", "-qm", "submitted")
+        await self.mutate(
+            self.claude,
+            identifier,
+            "submit",
+            step_id="change",
+            commit=self.git("rev-parse", "HEAD"),
+            note="Author interpretation sentinel",
+            evidence=["Submitted bytes"],
+        )
+        claim = await self.mutate(self.omp, identifier, "claim", step_id="change")
+        attempt = claim["claim"]
+        if comparison:
+            await self.mutate(
+                self.omp,
+                identifier,
+                "report",
+                step_id="change",
+                submission_id=attempt["submission"]["submission_id"],
+                resolution="success",
+                note="Independent assessment",
+                evidence=["Saved source reviewed"],
+            )
+            await self.mutate(self.omp, identifier, "compare", step_id="change")
+        task_id = str(uuid4())
+        now = time.time()
+        conversation_id = str(uuid4())
+        lease = self.omp_bridge.tasks.lock(conversation_id)
+        self.addCleanup(lease.close)
+        with closing(self.omp_bridge.tasks.connect()) as db, db:
+            db.execute(
+                "INSERT INTO tasks(task_id,conversation_id,created,updated,cwd,mode,model,prompt,status,deadline) "
+                "VALUES (?,?,?,?,?,'think','unused','Review saved source','running',?)",
+                (task_id, conversation_id, now, now, str(self.root), now + 60),
+            )
+        self.omp_bridge.work_items.started(
+            attempt["attempt_id"],
+            workspace=str(self.root),
+            native_task_id=task_id if bind else None,
+        )
+        task = self.omp_bridge.tasks.get(task_id)
+        ask = next(
+            tool
+            for tool in self.omp_bridge.runtime.worker.worker_tools(task)
+            if tool.name == "tandem_ask"
+        )
+        updates = []
+        context = HostToolContext("ask-context", threading.Event(), updates.append)
+        return identifier, task_id, ask, context, updates
+
+    def answer_pending(self, task_id, answer):
+        with closing(self.omp_bridge.tasks.connect()) as db:
+            question = db.execute(
+                "SELECT question_id FROM questions WHERE task_id=?", (task_id,)
+            ).fetchone()
+        return self.omp_bridge.reply(task_id, question["question_id"], answer)
+
+    async def test_independent_registered_clarification_never_delivers_author_text(
+        self,
+    ):
+        identifier, task_id, ask, context, updates = await self.clarification_task()
+        sentinel = "AUTHOR-CLARIFICATION-SENTINEL"
+        request = ask.parse_params(
+            {
+                "question": "Need the unchanged caller",
+                "context": json.dumps({"requested_paths": ["caller.py"]}),
+            }
+        )
+        # Baseline follows the real reply callback and returns the sentinel.
+        with patch.object(
+            self.omp_bridge.tasks.channel,
+            "signal",
+            side_effect=lambda: self.answer_pending(task_id, sentinel),
+        ):
+            delivered = ask.execute(request, context)
+        self.assertNotIn(sentinel, delivered)
+        result = json.loads(delivered)
+        self.assertTrue(result["clarification_requires_new_snapshot"])
+        self.assertEqual(result["requested_paths"], ["caller.py"])
+        self.assertNotIn(sentinel, json.dumps(updates))
+        with self.assertRaises(ToolError):
+            await self.omp.call_tool(
+                "tandem_reply",
+                {
+                    "task_id": task_id,
+                    "question_id": result["question_id"],
+                    "answer": sentinel,
+                },
+            )
+        with self.assertRaises(ValueError):
+            self.omp_bridge.reply(task_id, result["question_id"], sentinel)
+        attempt = self.omp_bridge.work_items.native_attempt(task_id)
+        self.assertEqual(attempt["review_stage"], "blocked")
+        with self.assertRaises(ToolError):
+            await self.mutate(self.omp, identifier, "compare", step_id="change")
+        with self.assertRaises(ValueError):
+            self.omp_bridge.interaction.submit_report(
+                task_id,
+                {
+                    "outcome": "success",
+                    "answer": "Complete",
+                    "summary": "Complete",
+                },
+            )
+        self.omp_bridge.interaction.submit_report(
+            task_id,
+            {
+                "outcome": "blocked",
+                "answer": delivered,
+                "summary": "Missing caller",
+                "blockers": ["Need a new capture with caller.py"],
+            },
+        )
+        with closing(self.omp_bridge.tasks.connect()) as db:
+            question = db.execute(
+                "SELECT * FROM questions WHERE task_id=?", (task_id,)
+            ).fetchone()
+        self.assertIsNone(question["answer"])
+
+    async def test_comparison_registered_clarification_delivers_permitted_answer(self):
+        _, task_id, ask, context, _ = await self.clarification_task(comparison=True)
+        with patch.object(
+            self.omp_bridge.tasks.channel,
+            "signal",
+            side_effect=lambda: self.answer_pending(
+                task_id, "permitted comparison text"
+            ),
+        ):
+            delivered = ask.execute(
+                ask.parse_params({"question": "Clarify rationale"}), context
+            )
+        self.assertEqual(json.loads(delivered)["answer"], "permitted comparison text")
+
+    async def test_answer_delivery_rechecks_newly_bound_independent_stage(self):
+        identifier, task_id, ask, context, updates = await self.clarification_task(
+            bind=False
+        )
+        sentinel = "AUTHOR-DELIVERY-SENTINEL"
+        store = self.omp_bridge.work_items
+        attempt = next(
+            item for item in store.active_attempts() if item["work_id"] == identifier
+        )
+
+        def answer_then_bind():
+            self.answer_pending(task_id, sentinel)
+            store.bind_native(attempt["attempt_id"], task_id)
+
+        with patch.object(
+            self.omp_bridge.tasks.channel, "signal", side_effect=answer_then_bind
+        ):
+            delivered = ask.execute(
+                ask.parse_params({"question": "Need context"}), context
+            )
+        self.assertNotIn(sentinel, delivered)
+        self.assertNotIn(sentinel, json.dumps(updates))
+        self.assertTrue(json.loads(delivered)["clarification_requires_new_snapshot"])
+
+    async def test_independent_reply_refuses_historical_duplicate_and_terminal_questions(
+        self,
+    ):
+        _, task_id, _, _, _ = await self.clarification_task()
+        sentinel = "AUTHOR-CLARIFICATION-SENTINEL"
+        for state in ("pending", "answered", "cancelled", "expired"):
+            question_id = str(uuid4())
+            with closing(self.omp_bridge.tasks.connect()) as db, db:
+                db.execute(
+                    "INSERT INTO questions VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        question_id,
+                        task_id,
+                        "Missing context",
+                        "",
+                        "[]",
+                        time.time(),
+                        time.time() + 60,
+                        state,
+                        sentinel if state == "answered" else None,
+                        None,
+                    ),
+                )
+            with self.subTest(state=state), self.assertRaises(ToolError):
+                await self.omp.call_tool(
+                    "tandem_reply",
+                    {
+                        "task_id": task_id,
+                        "question_id": question_id,
+                        "answer": sentinel,
+                    },
+                )
+            with closing(self.omp_bridge.tasks.connect()) as db, db:
+                db.execute(
+                    "UPDATE questions SET state='cancelled' WHERE question_id=?",
+                    (question_id,),
+                )
 
     async def test_mcp_orphan_blocker_survives_replan_and_cli_show(self):
         identifier = await self.create()

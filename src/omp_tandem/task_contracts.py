@@ -76,7 +76,7 @@ class TaskMessages:
                 "author_access": (
                     "Compare the revealed author proposal against the recorded independent assessment. Explain revisions."
                     if task["review_stage"] == "comparison"
-                    else "Author proposal and rationale are withheld. Read requirements, criteria and saved code; formulate the problem independently first."
+                    else "Author proposal and rationale are withheld. Read requirements, criteria and saved code; formulate the problem independently first. Clarification cannot add free text to this stage: tandem_ask returns clarification_requires_new_snapshot, and the stage must end blocked/partial. Put exact missing paths in context as JSON requested_paths; a new capture/attempt is required."
                 ),
                 "exposure_limit": "Code, earlier conversation or supplied context may already expose a solution; do not claim a blind review after prior exposure.",
             }

@@ -11,6 +11,7 @@ from .models import TaskOutcome
 from .project_context import ProjectContextStore
 from .runtime_models import ACTIVE, Cancelled, QuestionRequest
 from .task_store import TaskStore
+from .work_items import independent_stage
 
 
 class TaskInteraction:
@@ -20,11 +21,55 @@ class TaskInteraction:
         artifacts: ArtifactStore,
         projects: ProjectContextStore,
         findings: FindingStore,
+        work_items,
     ):
         self.tasks = tasks
         self.artifacts = artifacts
         self.projects = projects
         self.findings = findings
+        self.work_items = work_items
+
+    def _independent(self, task_id, task):
+        attempt = self.work_items.native_attempt(task_id)
+        if attempt is not None:
+            return independent_stage(attempt)
+        # Low-level snapshot tasks and review runs have the same clarification
+        # boundary; legacy managed attempts retain their recorded disclosure mode.
+        return bool(task["review_id"] and task["review_stage"] == "independent")
+
+    def _require_snapshot(self, db, task_id, question):
+        try:
+            context = json.loads(question["context"])
+        except (ValueError, TypeError):
+            context = None
+        paths = context.get("requested_paths", []) if isinstance(context, dict) else []
+        if (
+            not isinstance(paths, list)
+            or len(paths) > 256
+            or any(not isinstance(path, str) for path in paths)
+        ):
+            paths = []
+        result = {
+            "question_id": question["question_id"],
+            "clarification_requires_new_snapshot": True,
+            "reason": question["question"],
+            "context": question["context"],
+            "requested_paths": list(dict.fromkeys(paths)),
+            "next_step": (
+                "End this stage blocked or partial. Declare the required context and "
+                "create a new immutable snapshot/attempt; do not reply with free text."
+            ),
+        }
+        db.execute(
+            "UPDATE questions SET state='context_required' WHERE question_id=?",
+            (question["question_id"],),
+        )
+        db.execute(
+            "UPDATE tasks SET status='running', activity='Clarification requires new snapshot', updated=? WHERE task_id=?",
+            (time.time(), task_id),
+        )
+        self.work_items.block_review_context(db, task_id, result)
+        return json.dumps(result, ensure_ascii=False)
 
     def submit_report(self, task_id, report):
         report = TaskOutcome.model_validate(report)
@@ -40,6 +85,16 @@ class TaskInteraction:
             if task is None or task["cancel_requested"] or task["status"] != "running":
                 raise ValueError(
                     "Task is not running or still has an unanswered question"
+                )
+            if (
+                report.outcome not in ("blocked", "partial")
+                and db.execute(
+                    "SELECT 1 FROM questions WHERE task_id=? AND state='context_required'",
+                    (task_id,),
+                ).fetchone()
+            ):
+                raise ValueError(
+                    "Clarification requires a new snapshot; this stage must remain blocked or partial"
                 )
             snapshot = (
                 self.projects.get(task["project_context_id"])
@@ -81,12 +136,14 @@ class TaskInteraction:
         return "Final report recorded. End this turn now; do not perform more work."
 
     def ask(self, task_id, request, context):
+        if context.cancelled:
+            raise Cancelled()
         request = QuestionRequest.model_validate(request)
         question_id, now = str(uuid4()), time.time()
         with closing(self.tasks.connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             task = db.execute(
-                "SELECT status, deadline, cancel_requested, report_json, question_timeout_seconds, review_run_id FROM tasks WHERE task_id=?",
+                "SELECT * FROM tasks WHERE task_id=?",
                 (task_id,),
             ).fetchone()
             if (
@@ -118,6 +175,18 @@ class TaskInteraction:
                     None,
                 ),
             )
+            if self._independent(task_id, task):
+                result = self._require_snapshot(
+                    db,
+                    task_id,
+                    {
+                        "question_id": question_id,
+                        "question": request.question,
+                        "context": request.context,
+                    },
+                )
+                db.commit()
+                return result
             db.execute(
                 "UPDATE tasks SET status='waiting_input', activity='Waiting for clarification', updated=? WHERE task_id=?",
                 (now, task_id),
@@ -145,7 +214,7 @@ class TaskInteraction:
             with closing(self.tasks.connect()) as db:
                 db.execute("BEGIN IMMEDIATE")
                 task = db.execute(
-                    "SELECT status, cancel_requested FROM tasks WHERE task_id=?",
+                    "SELECT * FROM tasks WHERE task_id=?",
                     (task_id,),
                 ).fetchone()
                 question = db.execute(
@@ -157,6 +226,12 @@ class TaskInteraction:
                     or task["status"] not in ACTIVE
                 ):
                     raise Cancelled()
+                if question["state"] == "context_required" or self._independent(
+                    task_id, task
+                ):
+                    result = self._require_snapshot(db, task_id, question)
+                    db.commit()
+                    return result
                 if question["state"] == "answered":
                     db.commit()
                     return json.dumps(
@@ -206,6 +281,13 @@ class TaskInteraction:
             ).fetchone()
             if row is None:
                 raise ValueError("Unknown question_id for this task")
+            task = db.execute(
+                "SELECT * FROM tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if row["state"] == "context_required" or self._independent(task_id, task):
+                raise ValueError(
+                    "Clarification requires a new immutable snapshot/attempt; free-text replies cannot enter this independent stage"
+                )
             if row["state"] == "answered" and row["answer"] == answer:
                 return {
                     "task_id": task_id,
@@ -213,9 +295,6 @@ class TaskInteraction:
                     "accepted": True,
                     "next_action": "wait",
                 }
-            task = db.execute(
-                "SELECT status, cancel_requested FROM tasks WHERE task_id=?", (task_id,)
-            ).fetchone()
             if row["state"] != "pending" or time.time() >= row["deadline"]:
                 raise ValueError("Question is no longer pending or has expired")
             if task["status"] != "waiting_input" or task["cancel_requested"]:

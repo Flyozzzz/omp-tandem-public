@@ -143,7 +143,9 @@ def _prompt(attempt, plan, workspace):
             "own assessment first with tandem_work action=report (resolution success|partial|blocked, "
             "note, evidence, exact submission_id). Only a success report may open action=compare, "
             "which reveals the author's note through the author section; then accept or reject. "
-            "You may reject or block directly from the independent report.\n"
+            "You may reject or block directly from the independent report. "
+            "Missing context requires a new snapshot/attempt, not free-text clarification "
+            "within this stage; record blocked/partial and identify exact missing paths.\n"
             if independent
             else ""
         )

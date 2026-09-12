@@ -1390,6 +1390,13 @@ class WorkStore:
                     )
                 if bound.get("protocol") != "independent_first":
                     raise ValueError("Legacy review attempts have no independent stage")
+                if (
+                    bound.get("clarification_request")
+                    and command.resolution == "success"
+                ):
+                    raise ValueError(
+                        "Clarification requires a new snapshot; this stage is blocked"
+                    )
                 if bound.get("independent_report"):
                     raise ValueError("Independent report is immutable")
                 if command.resolution not in {"success", "partial", "blocked"}:
@@ -1431,6 +1438,10 @@ class WorkStore:
                 ):
                     raise ValueError(
                         "Only the bound distinct reviewer may open comparison"
+                    )
+                if bound.get("clarification_request"):
+                    raise ValueError(
+                        "Clarification requires a new snapshot; comparison remains closed"
                     )
                 report = bound.get("independent_report")
                 if not report or report["outcome"] != "success":
@@ -2117,6 +2128,42 @@ class WorkStore:
                 "SELECT attempt FROM work_attempts WHERE native_task_id=?", (task_id,)
             ).fetchone()
             return json.loads(row["attempt"]) if row else None
+
+    def block_review_context(self, db, task_id, request):
+        """Close clarification within the caller's task/question transaction."""
+        row = db.execute(
+            "SELECT attempt FROM work_attempts WHERE native_task_id=?", (task_id,)
+        ).fetchone()
+        attempt = json.loads(row["attempt"]) if row else None
+        if not independent_stage(attempt) or attempt.get("clarification_request"):
+            return
+        self._authenticate(db, attempt["token"])
+        card = self._load(db, attempt["work_id"])
+        step = self._step(card, attempt["step_id"])
+        blocker = self._blocker(
+            attempt["actor"],
+            request["reason"],
+            request["next_step"],
+            attempt["plan_revision"],
+            attempt["step_id"],
+        )
+        blocker["reason"] = "clarification_requires_new_snapshot"
+        step["blockers"].append(blocker)
+        intent = attempt.get("block_intent") or {"blocker_ids": [], "at": time.time()}
+        intent["blocker_ids"].append(blocker["blocker_id"])
+        attempt.update(
+            clarification_request=request,
+            review_stage="blocked",
+            block_intent=intent,
+        )
+        self._save_attempt(db, attempt)
+        self._record(
+            db,
+            card,
+            "clarification_requires_new_snapshot",
+            attempt["actor"],
+            {"attempt_id": attempt["attempt_id"], "request": request},
+        )
 
     def active_attempts(self, owner_id: str | None = None) -> list[dict]:
         with self._read_connection() as db:

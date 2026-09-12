@@ -413,6 +413,8 @@ class ReviewRuns:
                 and replied["state"] == "answered"
                 and replied["answer"] == answer
             ):
+                # Exact retries still pass the shared task/stage disclosure guard.
+                self.reply_task(replied["task_id"], question_id, answer)
                 return {**self.view(run_id), "replied_task_id": replied["task_id"]}
             if (
                 run_id in self.pending_stops

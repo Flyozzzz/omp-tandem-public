@@ -77,7 +77,7 @@ class Bridge:
         self._work_claims = {}
         messages = TaskMessages(self.scope, self.projects, self.reviews)
         self.interaction = TaskInteraction(
-            self.tasks, self.artifacts, self.projects, self.findings
+            self.tasks, self.artifacts, self.projects, self.findings, self.work_items
         )
         self.results = TaskResults(self.tasks, self.artifacts, self.projects)
         worker = NativeWorker(
