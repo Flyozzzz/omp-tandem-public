@@ -179,7 +179,11 @@ class WorkWorkspace:
         root = self.scope.root
         top = self._git(root, "rev-parse", "--show-toplevel").decode().strip()
         if Path(top).resolve() != root:
-            raise ValueError("The project root must be the Git repository root")
+            raise ValueError(
+                f"Pinned project root {root} differs from detected Git repository {top}. "
+                "Launch Tandem at the repository where work belongs and create a new card; "
+                "existing cards cannot be repinned."
+            )
         # Checkout/status may execute configured clean/smudge filters. Refuse them,
         # rather than treating worktree isolation as a sandbox for repository code.
         filters = self._git(
@@ -200,14 +204,97 @@ class WorkWorkspace:
             .strip()
         )
 
-    def _commit(self, value: str) -> str:
+    def observe_repository(self, plan: dict, *, action: str, required=False) -> dict:
+        """Observe only the pinned root and declared ancestors; never search children."""
+        self._identity()
+        paths = {
+            _path(path)
+            for step in plan["steps"]
+            for field in ("owned_files", "review_context_paths")
+            for path in step.get(field, [])
+        }
+        root = self.scope.root
+        observation = {
+            "project_root": str(root),
+            "scope_id": self.scope.key,
+            "git_toplevel": None,
+            "head": None,
+            "status": "unverified",
+            "provenance": {"action": action, "observed_at": time.time()},
+        }
+        try:
+            top = self._git(root, "rev-parse", "--show-toplevel").decode().strip()
+            observation["git_toplevel"] = str(Path(top).resolve())
+            self._repository()
+            observation["head"] = (
+                self._git(root, "rev-parse", "--verify", "HEAD^{commit}")
+                .decode()
+                .strip()
+            )
+        except ValueError as error:
+            if paths or required:
+                raise ValueError(
+                    f"Repository validation failed for pinned root {root}: {str(error)[:2000]}. "
+                    "Declared paths and claims require the correct Git launch scope with a HEAD commit."
+                ) from None
+            observation["reason"] = str(error)[:2000]
+            return observation
+        for relative in sorted(paths):
+            # Gitlinks belong to the parent; their contents belong to the child.
+            entries = self._git(root, "ls-tree", "-z", "HEAD", "--", relative)
+            exact_gitlink = entries.startswith(b"160000 commit ")
+            current = root
+            parts = relative.split("/")
+            for index, part in enumerate(parts):
+                current = current / part
+                if current.is_symlink():
+                    raise ValueError(
+                        f"Declared path {relative!r} in pinned root {root} crosses "
+                        f"symbolic link {current}; declare exact non-symlink paths."
+                    )
+                if index == len(parts) - 1 and exact_gitlink:
+                    break
+                prefix = "/".join(parts[: index + 1])
+                entry = self._git(root, "ls-tree", "-z", "HEAD", "--", prefix)
+                marker = current / ".git"
+                if entry.startswith(b"160000 commit ") or (
+                    current.is_dir() and (marker.exists() or marker.is_symlink())
+                ):
+                    raise ValueError(
+                        f"Declared path {relative!r} belongs to detected repository boundary {current}, "
+                        f"not pinned root {root}. Launch Tandem at {current} and create "
+                        "a separate card in that scope; do not repin this card. "
+                        "The child repository was not opened or searched."
+                    )
+                if not current.exists():
+                    break
+                if index < len(parts) - 1 and not current.is_dir():
+                    raise ValueError(
+                        f"Declared path {relative!r} in pinned root {root} has non-directory ancestor {current}"
+                    )
+        observation["status"] = "verified"
+        return observation
+
+    def _commit(self, value: str, *, role: str = "Git") -> str:
         if not isinstance(value, str) or not _COMMIT.fullmatch(value):
             raise ValueError("An immutable full Git commit ID is required")
-        actual = (
-            self._git(self.scope.root, "rev-parse", "--verify", f"{value}^{{commit}}")
-            .decode()
-            .strip()
-        )
+        try:
+            actual = (
+                self._git(
+                    self.scope.root, "rev-parse", "--verify", f"{value}^{{commit}}"
+                )
+                .decode()
+                .strip()
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"{role} commit {value} could not be resolved in pinned repository "
+                f"{self.scope.root}: {str(error)[:2000]}. Verify the exact hash in this "
+                "repository. If work belongs to a nested or different repository, launch "
+                "Tandem there, create a separate card, and ask the operator to stop/dispose "
+                "and cancel or supersede this card with continuation provenance; never "
+                "substitute an unrelated commit. No other repository was searched."
+            ) from None
         if actual != value:
             raise ValueError("The submitted object must itself be a commit")
         return actual
@@ -698,8 +785,8 @@ class WorkWorkspace:
                 raise ValueError(
                     "Only a manual implementation claim can adopt a submitted commit"
                 )
-            source = self._commit(attempt.get("source_commit"))
-            commit = self._commit(commit)
+            source = self._commit(attempt.get("source_commit"), role="Source")
+            commit = self._commit(commit, role="Submitted")
             if (
                 self._git(
                     self.scope.root,

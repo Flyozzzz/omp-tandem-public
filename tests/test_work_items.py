@@ -141,6 +141,168 @@ class WorkItemsTests(unittest.TestCase):
             actor="claude",
         )["work_id"]
 
+    def test_repository_observations_never_repin_creation_or_existing_attempt(self):
+        created = self.view()
+        initial = created["repository"]["initial_observation"]["head"]
+        self.agreed()
+        claim = self.change("claim", actor="omp", step_id="backend")["claim"]
+        self._git_commit("backend.py", "changed\n", "observed head moves")
+        proposed = self.change("propose", plan=plan())
+        self.assertNotEqual(proposed["repository_observation"]["head"], initial)
+        self.assertEqual(proposed["repository"], created["repository"])
+        self.assertEqual(
+            self.store.attempt(claim["attempt_id"])["source_commit"], initial
+        )
+        self.assertEqual(claim["repository_observation"]["head"], initial)
+
+    def test_claim_rechecks_paths_after_repository_boundary_appears(self):
+        new_plan = plan()
+        new_plan["steps"][0]["owned_files"] = ["child/new.py"]
+        self.revise(new_plan)
+        self.agreed()
+        child = self.root / "child"
+        child.mkdir()
+        subprocess.run(["git", "init", "-q", str(child)], check=True)
+        before = self.view()
+        with self.assertRaisesRegex(ValueError, "repository boundary"):
+            self.change("claim", actor="omp", step_id="backend")
+        self.assertEqual(self.view()["revision"], before["revision"])
+        self.assertEqual(self.store.active_attempts(), [])
+        with self.assertRaisesRegex(ValueError, "repository boundary"):
+            self.change("propose", plan=new_plan)
+        self.assertEqual(self.view()["revision"], before["revision"])
+
+    def test_cancel_requires_disposed_attempts_and_exact_operator_receipts(self):
+        self.agreed()
+        claim = self.change("claim", actor="omp", step_id="backend")["claim"]
+        request = {
+            "disposition": "superseded",
+            "note": "Wrong repository",
+            "evidence": ["Operator inspected external effects"],
+            "expected_revision": self.view()["revision"],
+            "operation_id": "close",
+            "continuation_root": "/operator/repo:child",
+            "continuation_work_id": "replacement",
+        }
+        with self.assertRaisesRegex(ValueError, "trusted operator"):
+            self.store.cancel(self.work_id, actor="omp", **request)
+        with self.assertRaisesRegex(ValueError, "cancel_requires_disposition"):
+            self.store.cancel(self.work_id, **request)
+        self.change("pause")
+        request["expected_revision"] = self.view()["revision"]
+        with self.assertRaisesRegex(ValueError, "cancel_requires_disposition"):
+            self.store.cancel(self.work_id, **request)
+        self.store.confirm_stopped(claim["attempt_id"])
+        self.change(
+            "reconcile",
+            actor="operator",
+            resolution="abandon",
+            note="Execution stopped and inspected",
+            evidence=["No unresolved effects"],
+        )
+        old = self.store.attempt(claim["attempt_id"])
+        request["expected_revision"] = self.view()["revision"]
+        closed = self.store.cancel(self.work_id, **request)
+        self.assertEqual(closed["status"], "cancelled")
+        self.assertIsNone(closed["result"])
+        self.assertEqual(self.store.attempt(claim["attempt_id"]), old)
+        self.assertEqual(self.store.ready(), [])
+        replay = self.store.cancel(self.work_id, **request)
+        self.assertEqual(replay["revision"], closed["revision"])
+        self.assertEqual(replay["replayed_operation"]["outcome"], closed["closure"])
+        with self.assertRaisesRegex(WorkConflict, "different command"):
+            self.store.cancel(self.work_id, **{**request, "note": "Changed"})
+        with self.assertRaisesRegex(WorkConflict, "Expected revision"):
+            self.store.link(
+                self.work_id,
+                predecessor_root="/previous",
+                predecessor_work_id="prior",
+                note="Provenance only",
+                evidence=["Operator asserted"],
+                expected_revision=request["expected_revision"],
+                operation_id="link",
+            )
+        linked = self.store.link(
+            self.work_id,
+            predecessor_root="/previous:scope",
+            predecessor_work_id="prior",
+            note="Provenance only",
+            evidence=["Operator asserted"],
+            expected_revision=closed["revision"],
+            operation_id="link",
+        )
+        self.assertEqual(linked["status"], "cancelled")
+        self.assertEqual(linked["closure"], closed["closure"])
+        self.assertEqual(linked["agreements"], closed["agreements"])
+        self.assertEqual(
+            linked["predecessors"][0]["target_verification"], "not_performed"
+        )
+        self.assertEqual(self.store.attempt(claim["attempt_id"]), old)
+
+    def test_cancelled_card_refuses_every_participant_mutation(self):
+        created_receipt = self.store.perform(
+            {
+                "action": "create",
+                "plan": plan(),
+                "expected_revision": 0,
+                "operation_id": "create",
+            },
+            actor="claude",
+        )
+        closed = self.store.cancel(
+            self.work_id,
+            disposition="cancelled",
+            note="No execution required",
+            evidence=["Operator decision"],
+            expected_revision=self.view()["revision"],
+            operation_id="cancel",
+        )
+        for action in (
+            "agree",
+            "propose",
+            "claim",
+            "recover",
+            "heartbeat",
+            "block",
+            "unblock",
+            "submit",
+            "accept",
+            "reject",
+            "report",
+            "compare",
+            "pause",
+            "resume",
+            "reconcile",
+        ):
+            with (
+                self.subTest(action=action),
+                self.assertRaisesRegex(ValueError, "work_terminal"),
+            ):
+                self.change(action, plan=plan() if action == "propose" else None)
+        for method, fields in (
+            (self.store.transition_begin, {"proposal_id": "old"}),
+            (self.store.transition_activate, {"proposal_id": "old"}),
+            (self.store.transition_withdraw, {"proposal_id": "old"}),
+        ):
+            with self.assertRaisesRegex(ValueError, "work_terminal"):
+                method(self.work_id, note="No revival", **fields)
+        self.assertEqual(self.view()["revision"], closed["revision"])
+        actions = self.store.next_actions(self.view(), actor="claude")
+        agree = next(item for item in actions if item["action"] == "agree")
+        self.assertFalse(agree["allowed"])
+        self.assertEqual(agree["blocked_reason"], "work_terminal")
+        self.assertFalse(any(item["allowed"] for item in actions))
+        historical = self.store.perform(
+            {
+                "action": "create",
+                "plan": plan(),
+                "expected_revision": 0,
+                "operation_id": "create",
+            },
+            actor="claude",
+        )
+        self.assertEqual(historical, created_receipt)
+
     def view(self):
         return self.store.perform(
             {"action": "get", "work_id": self.work_id}, actor="claude"
@@ -1089,7 +1251,8 @@ class WorkItemsTests(unittest.TestCase):
         from omp_tandem.work_items import WorkPresentation
 
         with patch(
-            "omp_tandem.work_items.subprocess.run", side_effect=AssertionError("git")
+            "omp_tandem.work_workspace.subprocess.run",
+            side_effect=AssertionError("git"),
         ):
             self.store.perform({"action": "get", "work_id": self.work_id}, actor="omp")
             self.store.perform({"action": "list"}, actor="omp")

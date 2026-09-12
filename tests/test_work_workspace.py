@@ -646,6 +646,102 @@ class WorkWorkspaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must descend"):
             self.workspaces.adopt_submission(attempt, plan, unrelated)
 
+    def test_declared_paths_detect_only_relevant_repository_boundaries(self):
+        child = self.root / "child"
+        child.mkdir()
+        self.git(child, "init", "-q")
+        safe = self.plan(("edit", ["new/deep/file.txt"], []))
+        observed = self.workspaces.observe_repository(safe, action="create")
+        self.assertEqual(observed["status"], "verified")
+        for field in ("owned_files", "review_context_paths"):
+            declared = self.plan(("edit", [], []))
+            declared["steps"][0][field] = ["child/new/deep/file.txt"]
+            with self.subTest(field=field), self.assertRaises(ValueError) as raised:
+                self.workspaces.observe_repository(
+                    declared, action="claim", required=True
+                )
+            message = str(raised.exception)
+            for value in (
+                "child/new/deep/file.txt",
+                str(self.root),
+                str(child),
+                "separate card",
+            ):
+                self.assertIn(value, message)
+        linked = self.root / "linked"
+        self.git(self.root, "worktree", "add", "--detach", str(linked), self.source)
+        self.assertTrue((linked / ".git").is_file())
+        with self.assertRaisesRegex(ValueError, "repository boundary"):
+            self.workspaces.observe_repository(
+                self.plan(("edit", ["linked/new.txt"], [])), action="create"
+            )
+        (self.root / "alias").symlink_to(child, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "symbolic link"):
+            self.workspaces.observe_repository(
+                self.plan(("edit", ["alias/new.txt"], [])), action="create"
+            )
+
+    def test_gitlink_entry_belongs_to_parent_but_child_contents_do_not(self):
+        self.git(
+            self.root,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{self.source},module",
+        )
+        self.git(self.root, "commit", "-qm", "gitlink")
+        parent = self.workspaces.observe_repository(
+            self.plan(("edit", ["module"], [])), action="create"
+        )
+        self.assertEqual(parent["status"], "verified")
+        self.assertFalse((self.root / "module").exists())
+        with self.assertRaisesRegex(ValueError, "repository boundary"):
+            self.workspaces.observe_repository(
+                self.plan(("edit", ["module/new.txt"], [])),
+                action="claim",
+                required=True,
+            )
+
+    def test_non_git_pathless_planning_is_unverified_not_executable(self):
+        root = self.home / "planning"
+        root.mkdir()
+        workspaces = WorkWorkspace(resolve_scope(self.home / "other-state", root))
+        pathless = self.plan(("edit", [], []))
+        observed = workspaces.observe_repository(pathless, action="create")
+        self.assertEqual(observed["status"], "unverified")
+        self.assertIsNone(observed["head"])
+        with self.assertRaisesRegex(ValueError, "correct Git launch scope"):
+            workspaces.observe_repository(pathless, action="claim", required=True)
+        with self.assertRaisesRegex(ValueError, "correct Git launch scope"):
+            workspaces.observe_repository(
+                self.plan(("edit", ["new.txt"], [])), action="create"
+            )
+
+    def test_unresolved_commits_identify_source_or_submission_and_repository(self):
+        attempt = self.attempt()
+        attempt["autonomous"] = False
+        missing = "a" * 40
+        for role in ("Source", "Submitted"):
+            with self.subTest(role=role):
+                attempt["source_commit"] = missing if role == "Source" else self.source
+                with self.assertRaises(ValueError) as raised:
+                    self.workspaces.adopt_submission(
+                        attempt, self.plan(("edit", [], [])), missing
+                    )
+                message = str(raised.exception)
+                for value in (
+                    f"{role} commit {missing}",
+                    str(self.root),
+                    "separate card",
+                ):
+                    self.assertIn(value, message)
+        with self.assertRaisesRegex(ValueError, "full Git commit ID"):
+            self.workspaces.adopt_submission(
+                {**attempt, "source_commit": self.source},
+                self.plan(("edit", [], [])),
+                "HEAD",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

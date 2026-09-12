@@ -300,7 +300,255 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse((handle.directory / "launch.json").exists())
 
-    async def daemon(self, *args):
+    async def test_outer_nested_repository_handover_cli_mcp(self):
+        outer = self.root
+        child = outer / "child:repository"
+        child.mkdir()
+        self.git("-C", str(child), "init", "-q")
+        (child / "module.txt").write_text("child base\n")
+        self.git("-C", str(child), "add", "module.txt")
+        self.git("-C", str(child), "commit", "-qm", "child initial")
+        child_base = self.git("-C", str(child), "rev-parse", "HEAD")
+        original = await self.create()
+        before = await self.call(self.claude, {"action": "get", "work_id": original})
+        known_plan = json.loads(json.dumps(before["plan"]))
+        known_plan["steps"][0]["owned_files"] = ["child:repository/new/module.txt"]
+        with self.assertRaises(ToolError) as early:
+            await self.call(
+                self.claude,
+                {
+                    "action": "create",
+                    "plan": known_plan,
+                    "expected_revision": 0,
+                    "operation_id": str(uuid4()),
+                },
+            )
+        self.assertIn(str(child), str(early.exception))
+        self.assertIn(str(outer), str(early.exception))
+        self.assertEqual(
+            len(
+                self.claude_bridge.work_items.perform(
+                    {"action": "list"}, actor="operator"
+                )["items"]
+            ),
+            1,
+        )
+        claimed = await self.mutate(self.claude, original, "claim", step_id="change")
+        attempt_id = claimed["claim"]["attempt_id"]
+        source = claimed["claim"]["source_commit"]
+        self.assertNotEqual(source, child_base)
+        with self.assertRaises(ToolError) as failed_submit:
+            await self.mutate(
+                self.claude,
+                original,
+                "submit",
+                step_id="change",
+                commit=child_base,
+                note="Work was done in the child",
+                evidence=["Child Git commit"],
+            )
+        for expected in ("Submitted commit " + child_base, str(outer), "separate card"):
+            self.assertIn(expected, str(failed_submit.exception))
+        saved = self.claude_bridge.work_items.attempt(attempt_id)
+        self.assertIsNone(saved["submission_intent"])
+        self.assertEqual(saved["source_commit"], source)
+        self.assertEqual(
+            (await self.call(self.claude, {"action": "get", "work_id": original}))[
+                "revision"
+            ],
+            claimed["revision"],
+        )
+        await self.mutate(self.claude, original, "pause")
+        disposed = await self.daemon(
+            "reconcile",
+            original,
+            "change",
+            "--resolution",
+            "abandon",
+            "--confirm-stopped",
+            "--note",
+            "Manual execution stopped; child result retained",
+            "--evidence",
+            "Inspected effects; no unresolved work in outer repository",
+        )
+        self.assertEqual(disposed.returncode, 0, disposed.stderr)
+        old_attempt = self.claude_bridge.work_items.attempt(attempt_id)
+        old_history = self.claude_bridge.work_items.perform(
+            {"action": "history", "work_id": original}, actor="operator"
+        )["events"]
+        child_bridges = [
+            Bridge(
+                self.state,
+                "unused",
+                "unused",
+                project_root=child,
+                channel_enabled=False,
+                webhook_enabled=False,
+                migrate_legacy=False,
+                work_participant=actor,
+            )
+            for actor in ("claude", "omp")
+        ]
+        for bridge in child_bridges:
+            self.addCleanup(bridge.shutdown)
+        async with (
+            Client(build_server(child_bridges[0])) as author,
+            Client(build_server(child_bridges[1])) as reviewer,
+        ):
+            replacement = await self.call(
+                author,
+                {
+                    "action": "create",
+                    "plan": before["plan"],
+                    "expected_revision": 0,
+                    "operation_id": str(uuid4()),
+                },
+            )
+            successor = replacement["work_id"]
+            self.assertEqual(replacement["agreements"], {})
+            self.assertIsNone(replacement["authorization"])
+            self.assertEqual(replacement["repository"]["project_root"], str(child))
+            with self.assertRaises(ToolError):
+                await self.call(author, {"action": "get", "work_id": original})
+            current = await self.call(
+                self.claude, {"action": "get", "work_id": original}
+            )
+            closure = await self.daemon(
+                "cancel",
+                original,
+                "--disposition",
+                "superseded",
+                "--expected-revision",
+                str(current["revision"]),
+                "--operation-id",
+                "scope-cancel",
+                "--note",
+                "Original card pinned the wrong repository",
+                "--evidence",
+                "Stopped and disposed original manual attempt",
+                "--continuation-root",
+                str(child),
+                "--continuation-work-id",
+                successor,
+            )
+            self.assertEqual(closure.returncode, 0, closure.stderr)
+            closed = json.loads(closure.stdout)
+            linked = await self.daemon(
+                "link",
+                successor,
+                "--predecessor-root",
+                str(outer),
+                "--predecessor-work-id",
+                original,
+                "--expected-revision",
+                str(replacement["revision"]),
+                "--operation-id",
+                "scope-link",
+                "--note",
+                "Independent continuation after mistaken outer card",
+                "--evidence",
+                "Operator recorded predecessor; no foreign read or transferred acceptance",
+                project_root=child,
+            )
+            self.assertEqual(linked.returncode, 0, linked.stderr)
+            self.assertEqual(json.loads(linked.stdout)["agreements"], {})
+            self.assertEqual(
+                json.loads(linked.stdout)["predecessors"][0]["reciprocal_link"],
+                "unverified",
+            )
+            await self.mutate(author, successor, "agree")
+            await self.mutate(reviewer, successor, "agree")
+            child_claim = await self.mutate(
+                author, successor, "claim", step_id="change"
+            )
+            self.assertEqual(child_claim["claim"]["source_commit"], child_base)
+            (child / "module.txt").write_text("independently reviewed child output\n")
+            self.git("-C", str(child), "add", "module.txt")
+            self.git("-C", str(child), "commit", "-qm", "child implementation")
+            commit = self.git("-C", str(child), "rev-parse", "HEAD")
+            submission = await self.mutate(
+                author,
+                successor,
+                "submit",
+                step_id="change",
+                commit=commit,
+                note="Child implementation",
+                evidence=["Exact child commit"],
+            )
+            submission_id = submission["steps"][0]["submission"]["submission_id"]
+            await self.mutate(reviewer, successor, "claim", step_id="change")
+            self.assertEqual(
+                self.git("-C", str(child), "show", commit + ":module.txt"),
+                "independently reviewed child output",
+            )
+            await self.mutate(
+                reviewer,
+                successor,
+                "report",
+                step_id="change",
+                submission_id=submission_id,
+                resolution="success",
+                note="Read the exact child commit and checked agreed output",
+                evidence=[commit + ":module.txt equals agreed output"],
+            )
+            accepted = await self.mutate(
+                reviewer,
+                successor,
+                "accept",
+                step_id="change",
+                submission_id=submission_id,
+                note="Independent child-scope acceptance",
+                evidence=["Exact committed output inspected by distinct reviewer"],
+            )
+            self.assertEqual(accepted["status"], "completed")
+            self.assertEqual(accepted["result"]["commit"], commit)
+            self.assertEqual(accepted["steps"][0]["acceptance"]["actor"], "omp")
+        final = await self.call(self.claude, {"action": "get", "work_id": original})
+        self.assertEqual(final["status"], "cancelled")
+        self.assertIsNone(final["result"])
+        self.assertEqual(final["closure"], closed["closure"])
+        self.assertEqual(self.claude_bridge.work_items.attempt(attempt_id), old_attempt)
+        history = self.claude_bridge.work_items.perform(
+            {"action": "history", "work_id": original}, actor="operator"
+        )["events"]
+        self.assertEqual(history[: len(old_history)], old_history)
+        with self.assertRaises(ToolError):
+            await self.mutate(self.omp, original, "agree")
+        markdown = await self.daemon("show", original, "--format", "markdown")
+        self.assertEqual(markdown.returncode, 0, markdown.stderr)
+        self.assertIn(successor, markdown.stdout)
+        child_markdown = await self.daemon(
+            "show", successor, "--format", "markdown", project_root=child
+        )
+        self.assertEqual(child_markdown.returncode, 0, child_markdown.stderr)
+        self.assertIn(original, child_markdown.stdout)
+        print(
+            "SCOPE_E2E "
+            + json.dumps(
+                {
+                    "outer_root": str(outer),
+                    "child_root": str(child),
+                    "original_work_id": original,
+                    "successor_work_id": successor,
+                    "outer_source": source,
+                    "rejected_child_commit": child_base,
+                    "accepted_child_commit": commit,
+                    "original_status": final["status"],
+                    "successor_status": accepted["status"],
+                    "early_refusal": str(early.exception),
+                    "submit_refusal": str(failed_submit.exception),
+                    "original_history_prefix_unchanged": len(old_history),
+                    "original_attempt_unchanged": True,
+                    "fresh_agreements": True,
+                    "cross_scope_read_refused": True,
+                    "reciprocal_link": "unverified",
+                    "surface": "FastMCP clients + real operator CLI subprocesses + real Git",
+                },
+                sort_keys=True,
+            )
+        )
+
+    async def daemon(self, *args, project_root=None):
         return await asyncio.to_thread(
             subprocess.run,
             [
@@ -309,7 +557,7 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "-m",
                 "omp_tandem.work_daemon",
                 "--project-root",
-                str(self.root),
+                str(project_root or self.root),
                 "--state-dir",
                 str(self.state),
                 *args,
@@ -1229,7 +1477,8 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("not_recorded", accepted["next_action"])
         self.assertNotIn("not merged", accepted["next_action"])
         with patch(
-            "omp_tandem.work_items.subprocess.run", side_effect=AssertionError("git")
+            "omp_tandem.work_workspace.subprocess.run",
+            side_effect=AssertionError("git"),
         ):
             summary = await self.call(
                 self.claude, {"action": "get", "work_id": identifier}, view="summary"

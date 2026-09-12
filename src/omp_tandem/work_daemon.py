@@ -181,6 +181,26 @@ def parser():
         "--saved-commit",
         help="Manual implementation attempt: exact commit in the pinned repository holding its preserved work",
     )
+    cancel = commands.add_parser(
+        "cancel", help="Close a disposed card without acceptance; never stops execution"
+    )
+    link = commands.add_parser(
+        "link",
+        help="Record predecessor provenance in this scope without opening the predecessor",
+    )
+    for command in (cancel, link):
+        command.add_argument("work_id")
+        command.add_argument("--expected-revision", type=int, required=True)
+        command.add_argument("--operation-id", required=True)
+        command.add_argument("--note", required=True)
+        command.add_argument("--evidence", action="append", required=True)
+    cancel.add_argument(
+        "--disposition", choices=("cancelled", "superseded"), required=True
+    )
+    cancel.add_argument("--continuation-root")
+    cancel.add_argument("--continuation-work-id")
+    link.add_argument("--predecessor-root", required=True)
+    link.add_argument("--predecessor-work-id", required=True)
     assess = commands.add_parser(
         "assess",
         help="Explicit isolated Git observation of the project HEAD against the final result; records it, changes nothing",
@@ -433,6 +453,28 @@ def main(argv=None):
                     "revision": result["revision"],
                     "successor": result["successor"],
                 }
+            elif args.command in {"cancel", "link"}:
+                common = {
+                    "note": args.note,
+                    "evidence": args.evidence,
+                    "expected_revision": args.expected_revision,
+                    "operation_id": args.operation_id,
+                }
+                if args.command == "cancel":
+                    result = store.cancel(
+                        args.work_id,
+                        disposition=args.disposition,
+                        continuation_root=args.continuation_root,
+                        continuation_work_id=args.continuation_work_id,
+                        **common,
+                    )
+                else:
+                    result = store.link(
+                        args.work_id,
+                        predecessor_root=args.predecessor_root,
+                        predecessor_work_id=args.predecessor_work_id,
+                        **common,
+                    )
             elif args.command == "transition":
                 if args.operation == "inspect":
                     result = store.transition_inspect(args.work_id)

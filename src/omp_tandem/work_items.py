@@ -15,7 +15,6 @@ import re
 import secrets
 import shlex
 import sqlite3
-import subprocess
 import sys
 import threading
 import time
@@ -35,6 +34,7 @@ _Identifier = Annotated[
 ]
 _Actor = Literal["claude", "omp"]
 _ACTIVE = {"reserved", "running"}
+_TERMINAL = {"completed", "cancelled"}
 
 # Historical managed Claude policy, now visible in CLI help and authorization.
 CLAUDE_DEFAULT_MODEL = "sonnet"
@@ -624,6 +624,7 @@ def _public_proposal(proposal):
             "at",
             "preview",
             "plan",
+            "repository_observation",
         )
     }
 
@@ -698,6 +699,11 @@ def present_work(
                 "next_actions",
                 "recovery",
                 "application",
+                "repository",
+                "repository_observation",
+                "closure",
+                "predecessors",
+                "provenance",
             )
             if key in payload
         }
@@ -1141,6 +1147,8 @@ class WorkStore:
         ]
 
     def _refresh(self, card):
+        if card["status"] in _TERMINAL:
+            return
         steps = {step["id"]: step for step in card["steps"]}
         for step in card["steps"]:
             if step["state"] in {"running", "recovery_required", "accepted"}:
@@ -1200,9 +1208,23 @@ class WorkStore:
         view["proposal"] = _public_proposal(card.get("proposal"))
         view["transition"] = card.get("transition")
         view["transition_history"] = card.get("transition_history") or []
+        view["repository"] = card.get("repository") or {
+            "project_root": str(self.scope.root),
+            "scope_id": self.scope.key,
+            "provenance": "legacy scope binding; no creation-time Git observation",
+        }
+        view["closure"] = card.get("closure")
+        view["predecessors"] = card.get("predecessors") or []
+        view["provenance"] = {
+            "target_verification": "not_performed",
+            "reciprocal_link": "unverified; record each direction in its own scope",
+            "authority_transfer": "none",
+        }
         view["operator_commands"] = self._operator_commands(card)
         view["next_action"] = (
-            "Resume explicitly; fenced attempts require operator reconciliation."
+            "Terminal cancellation; history is retained, not accepted. Continue only under a separately agreed card."
+            if card["status"] == "cancelled"
+            else "Resume explicitly; fenced attempts require operator reconciliation."
             if card["status"] == "paused"
             else self._transition_next_action(card)
             if (card.get("transition") or {}).get("phase") in TRANSITION_OPEN
@@ -1298,6 +1320,54 @@ class WorkStore:
             "",
             plan["goal"],
         ]
+        repository = current.get("repository") or {}
+        lines.extend(
+            [
+                "",
+                "## Repository and continuation provenance",
+                f"- Pinned project root: `{repository.get('project_root', str(self.scope.root))}`",
+                f"- Scope: `{repository.get('scope_id', self.scope.key)}`; {repository.get('provenance', 'legacy scope binding')}",
+            ]
+        )
+        for label, observation in (
+            ("Creation observation", repository.get("initial_observation")),
+            ("Latest observation", current.get("repository_observation")),
+        ):
+            if not observation:
+                lines.append(f"- {label}: not recorded")
+                continue
+            provenance = observation["provenance"]
+            lines.append(
+                f"- {label}: {observation['status']}; Git toplevel "
+                f"`{observation.get('git_toplevel') or 'unverified'}`; HEAD "
+                f"`{observation.get('head') or 'unverified'}`; "
+                f"{provenance['action']} at {self._when(provenance['observed_at'])}"
+            )
+            if observation.get("reason"):
+                lines.append("  Reason: " + observation["reason"])
+        closure = current.get("closure")
+        if closure:
+            lines.extend(
+                [
+                    f"- Closure: {closure['disposition']} by {closure['actor']} at {self._when(closure['at'])}; not acceptance",
+                    "  Reason: " + closure["note"],
+                    *("  Evidence: " + item for item in closure["evidence"]),
+                ]
+            )
+        continuation = (closure or {}).get("continuation")
+        for label, links in (
+            ("Continuation", [continuation] if continuation else []),
+            ("Predecessor", current.get("predecessors") or []),
+        ):
+            for link in links:
+                lines.append(
+                    f"- {label}: work `{link['work_id']}` in `{link['project_root']}`; "
+                    "target verification: not_performed; reciprocal link: unverified; "
+                    "no cross-scope access, agreement, grant or acceptance transfer"
+                )
+                if link.get("note"):
+                    lines.append("  Reason: " + link["note"])
+                    lines.extend("  Evidence: " + item for item in link["evidence"])
         if plan.get("context"):
             lines.extend(["", "## Context", plan["context"]])
         for title, items in (
@@ -1720,7 +1790,7 @@ class WorkStore:
             raise ValueError("Attempt credential is fenced or expired")
         card = self._load(db, attempt["work_id"])
         if (
-            card["status"] == "paused"
+            card["status"] in {"paused", "cancelled", "completed"}
             or card["plan_revision"] != attempt["plan_revision"]
         ):
             raise ValueError("Attempt is no longer current")
@@ -1898,7 +1968,7 @@ class WorkStore:
             raise ValueError("Invalid work principal")
         # Opportunistic expiry is separate from CAS; reads never wait for its write.
         self._maintenance()
-        source_commit = self._head() if command.action == "claim" else None
+        source_commit = None
         connection = (
             self._read_connection
             if command.action in {"get", "list", "history"}
@@ -2014,12 +2084,20 @@ class WorkStore:
             self._authenticate(db, attempt_token, actor)
         if command.action == "create":
             plan = command.plan.model_dump()
+            observation = self._observe_repository(plan, action="create")
             card = {
                 "work_id": str(uuid4()),
                 "revision": 0,
                 "plan_revision": 1,
                 "status": "draft",
                 "plan": plan,
+                "repository": {
+                    "project_root": str(self.scope.root),
+                    "scope_id": self.scope.key,
+                    "provenance": "creation launch scope; immutable",
+                    "initial_observation": observation,
+                },
+                "repository_observation": observation,
                 "agreements": {},
                 "steps": self._new_steps(plan),
                 "blockers": [],
@@ -2060,6 +2138,7 @@ class WorkStore:
         self, db, card, command, actor, bound, source_commit=None, origin=None
     ):
         action = command.action
+        self._require_open(card)
         if action == "recover":
             return self._recover(db, card, command, actor, origin)
         if action == "propose":
@@ -2072,6 +2151,9 @@ class WorkStore:
                     "transition_in_progress: the begun proposal is frozen; only the "
                     "operator may withdraw or activate it"
                 )
+            card["repository_observation"] = self._observe_repository(
+                plan, action="propose"
+            )
             if plan == WorkPlan.model_validate(card["plan"]).model_dump():
                 if card.get("proposal"):
                     withdrawn = card["proposal"]
@@ -2093,6 +2175,7 @@ class WorkStore:
                 "note": command.note,
                 "at": time.time(),
                 "preview": self._proposal_preview(card, plan, inventory),
+                "repository_observation": card["repository_observation"],
             }
             replaced = (card.get("proposal") or {}).get("proposal_id")
             card["proposal"] = proposal
@@ -2518,26 +2601,23 @@ class WorkStore:
                 step["state"] = "recovery_required"
 
     def _head(self):
-        result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(self.scope.root),
-                "rev-parse",
-                "--verify",
-                "HEAD^{commit}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
+        from .work_workspace import WorkWorkspace
+
+        return WorkWorkspace(self.scope).source_commit()
+
+    def _observe_repository(self, plan, *, action, required=False):
+        from .work_workspace import WorkWorkspace
+
+        return WorkWorkspace(self.scope).observe_repository(
+            plan, action=action, required=required
         )
-        commit = result.stdout.strip()
-        if result.returncode or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+
+    @staticmethod
+    def _require_open(card):
+        if card["status"] in _TERMINAL:
             raise ValueError(
-                "Work execution requires a Git repository with an immutable HEAD commit"
+                f"work_terminal: {card['status']}; execution cannot reopen"
             )
-        return commit
 
     @staticmethod
     def preview_authorization(
@@ -2657,6 +2737,7 @@ class WorkStore:
         """Pin the immutable snapshot a review attempt reads; set once."""
         with self._transaction() as db:
             attempt = self._attempt(db, attempt_id)
+            self._require_open(self._load(db, attempt["work_id"]))
             if attempt["kind"] != "review":
                 raise ValueError("Only review attempts read a pinned snapshot")
             if attempt.get("review_id") not in (None, review_id):
@@ -2668,6 +2749,7 @@ class WorkStore:
     def revoke(self, work_id) -> dict:
         with self._transaction() as db:
             card = self._load(db, work_id)
+            self._require_open(card)
             if card["authorization"]:
                 card["authorization"]["revoked_at"] = time.time()
             self._fence(db, card, "Operator revoked execution authorization")
@@ -2675,6 +2757,8 @@ class WorkStore:
 
     def _claim_reason(self, card, step, attempts):
         """The reservation gate, shared by execution and participant hints."""
+        if card["status"] in _TERMINAL:
+            return "work_terminal"
         if card["status"] == "paused":
             return "paused"
         transition = card.get("transition")
@@ -2766,6 +2850,8 @@ class WorkStore:
                     reason = "receipt_revision_stale"
                 if card["status"] == "paused":
                     reason = "paused"
+                if card["status"] in _TERMINAL:
+                    reason = "work_terminal"
                 required = ["operation_id"]
                 if action in {"submit", "report", "accept", "reject"}:
                     required += ["note", "evidence"]
@@ -2952,6 +3038,12 @@ class WorkStore:
         }
         if eligible not in self._ready(db, card):
             raise WorkConflict("Step is not ready for this actor and attempt kind")
+        observation = self._observe_repository(
+            card["plan"], action="claim", required=True
+        )
+        card["repository_observation"] = observation
+        if not autonomous:
+            source_commit = observation["head"]
         grant = card["authorization"]
         envelope = 0.0
         selection = {}
@@ -3020,6 +3112,7 @@ class WorkStore:
             "autonomous": autonomous,
             "authorization_id": grant["authorization_id"] if autonomous else None,
             "source_commit": grant["source_commit"] if autonomous else source_commit,
+            "repository_observation": observation,
             "deadline": grant["deadline"] if autonomous else now + 3600,
             "created_at": now,
             "started_at": None,
@@ -3112,6 +3205,7 @@ class WorkStore:
         """Record an explicit pre-launch blocker instead of silently dropping shell."""
         with self._transaction() as db:
             card = self._load(db, work_id)
+            self._require_open(card)
             grant = card["authorization"]
             if not grant or not shell_permission(grant):
                 return None
@@ -3173,7 +3267,7 @@ class WorkStore:
         self, work_id, step_id, *, actor, kind, owner_id, autonomous=True
     ) -> dict:
         self._maintenance()
-        source_commit = None if autonomous else self._head()
+        source_commit = None
         if autonomous and kind == "review":
             blocked = self._block_shell_review(work_id, step_id)
             if blocked:
@@ -3445,6 +3539,7 @@ class WorkStore:
                 if attempt["finish_fingerprint"] != fingerprint:
                     raise WorkConflict("Attempt completion is immutable")
                 return self._view(db, card)
+            self._require_open(card)
             if attempt["state"] not in _ACTIVE | {"recovery_required"}:
                 raise ValueError("Attempt is already terminal")
             current = (
@@ -3684,6 +3779,8 @@ class WorkStore:
         and the card revision the operator observed, so a retained command cannot
         act on a replacement identity or a moved card.
         """
+        if card["status"] in _TERMINAL:
+            return []
         work_id = card["work_id"]
         transition = card.get("transition")
         proposal = card.get("proposal")
@@ -3937,6 +4034,185 @@ class WorkStore:
             "commands": self._operator_commands(card),
         }
 
+    @staticmethod
+    def _provenance_target(root, work_id):
+        # A foreign root is an operator assertion, not a filesystem/read capability.
+        if (
+            not isinstance(root, str)
+            or not Path(root).is_absolute()
+            or any(part in {".", "..", ""} for part in root.split("/")[1:])
+            or any(ord(char) < 32 or ord(char) == 127 for char in root)
+        ):
+            raise ValueError(
+                "Link root requires an exact absolute path without traversal"
+            )
+        if not isinstance(work_id, str) or not re.fullmatch(
+            r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}", work_id
+        ):
+            raise ValueError("Link requires an exact work ID")
+        return {
+            "project_root": root,
+            "work_id": work_id,
+            "target_verification": "not_performed",
+            "reciprocal_link": "unverified",
+        }
+
+    def cancel(
+        self,
+        work_id,
+        *,
+        disposition,
+        note,
+        evidence,
+        expected_revision,
+        operation_id,
+        continuation_root=None,
+        continuation_work_id=None,
+        actor="operator",
+    ) -> dict:
+        """Truthful terminal closure, never a verdict or a stop attestation."""
+        self._require_operator(actor)
+        self._validate_provenance_command(
+            note, evidence, expected_revision, operation_id
+        )
+        if disposition not in {"cancelled", "superseded"}:
+            raise ValueError("Cancellation disposition must be cancelled or superseded")
+        continuation = None
+        if continuation_root is not None or continuation_work_id is not None:
+            continuation = self._provenance_target(
+                continuation_root, continuation_work_id
+            )
+            if (
+                continuation_root == str(self.scope.root)
+                and continuation_work_id == work_id
+            ):
+                raise ValueError("A card cannot continue in itself")
+        fingerprint = self._transition_request(
+            "cancel",
+            work_id=work_id,
+            disposition=disposition,
+            note=note,
+            evidence=evidence,
+            expected_revision=expected_revision,
+            continuation_root=continuation_root,
+            continuation_work_id=continuation_work_id,
+        )
+        with self._transaction() as db:
+            card = self._load(db, work_id)
+            replay = self._transition_operation(card, operation_id, fingerprint)
+            if replay is not None:
+                return {**self._view(db, card), "replayed_operation": replay}
+            self._check_expected_revision(card, expected_revision)
+            self._require_open(card)
+            if self._transition_inventory(db, card):
+                raise ValueError(
+                    "cancel_requires_disposition: stop and reconcile every active or "
+                    "recovery-required attempt before cancellation"
+                )
+            transition = card.get("transition")
+            if (
+                transition
+                and transition["phase"] in TRANSITION_OPEN
+                and any(
+                    not entry.get("disposition")
+                    for entry in transition["inventory"].values()
+                )
+            ):
+                raise ValueError(
+                    "cancel_requires_disposition: resolve the frozen transition inventory"
+                )
+            closure = {
+                "disposition": disposition,
+                "note": note,
+                "evidence": list(evidence),
+                "actor": actor,
+                "at": time.time(),
+                "continuation": continuation,
+            }
+            card["closure"] = closure
+            card["status"] = "cancelled"
+            if card["authorization"]:
+                card["authorization"]["revoked_at"] = time.time()
+            self._record_transition_operation(
+                card, operation_id, "cancel", fingerprint, closure
+            )
+            return self._record(db, card, "cancelled", actor, closure)
+
+    @staticmethod
+    def _validate_provenance_command(note, evidence, expected_revision, operation_id):
+        if (
+            not isinstance(note, str)
+            or not note.strip()
+            or len(note) > 16000
+            or not isinstance(evidence, list)
+            or not evidence
+            or any(
+                not isinstance(item, str) or not item.strip() or len(item) > 16000
+                for item in evidence
+            )
+            or type(expected_revision) is not int
+            or expected_revision < 1
+            or not isinstance(operation_id, str)
+            or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}", operation_id)
+        ):
+            raise ValueError(
+                "Operator provenance requires note, evidence, expected revision and exact operation ID"
+            )
+
+    def link(
+        self,
+        work_id,
+        *,
+        predecessor_root,
+        predecessor_work_id,
+        note,
+        evidence,
+        expected_revision,
+        operation_id,
+        actor="operator",
+    ) -> dict:
+        """Append predecessor provenance in THIS scope, including after terminal closure."""
+        self._require_operator(actor)
+        self._validate_provenance_command(
+            note, evidence, expected_revision, operation_id
+        )
+        predecessor = self._provenance_target(predecessor_root, predecessor_work_id)
+        if predecessor_root == str(self.scope.root) and predecessor_work_id == work_id:
+            raise ValueError("A card cannot be its own predecessor")
+        fingerprint = self._transition_request(
+            "link",
+            work_id=work_id,
+            predecessor_root=predecessor_root,
+            predecessor_work_id=predecessor_work_id,
+            note=note,
+            evidence=evidence,
+            expected_revision=expected_revision,
+        )
+        with self._transaction() as db:
+            card = self._load(db, work_id)
+            replay = self._transition_operation(card, operation_id, fingerprint)
+            if replay is not None:
+                return {**self._view(db, card), "replayed_operation": replay}
+            self._check_expected_revision(card, expected_revision)
+            if any(
+                item["project_root"] == predecessor_root
+                and item["work_id"] == predecessor_work_id
+                for item in card.get("predecessors") or []
+            ):
+                raise WorkConflict("Predecessor provenance is already recorded")
+            record = {
+                **predecessor,
+                "note": note,
+                "evidence": list(evidence),
+                "actor": actor,
+                "at": time.time(),
+            }
+            card.setdefault("predecessors", []).append(record)
+            self._record_transition_operation(
+                card, operation_id, "link", fingerprint, record
+            )
+            return self._record(db, card, "predecessor_linked", actor, record)
+
     def transition_begin(
         self,
         work_id,
@@ -3963,6 +4239,7 @@ class WorkStore:
             if replay is not None:
                 return {**self._view(db, card), "replayed_operation": replay}
             self._check_expected_revision(card, expected_revision)
+            self._require_open(card)
             proposal = card.get("proposal")
             if not proposal:
                 raise ValueError("no_pending_proposal")
@@ -4056,6 +4333,7 @@ class WorkStore:
             if replay is not None:
                 return {**self._view(db, card), "replayed_operation": replay}
             self._check_expected_revision(card, expected_revision)
+            self._require_open(card)
             transition = card.get("transition")
             if not transition or transition["phase"] not in TRANSITION_OPEN:
                 raise ValueError("transition_not_begun")
@@ -4252,6 +4530,7 @@ class WorkStore:
             if replay is not None:
                 return {**self._view(db, card), "replayed_operation": replay}
             self._check_expected_revision(card, expected_revision)
+            self._require_open(card)
             transition = card.get("transition")
             proposal = card.get("proposal")
             if not (transition and transition["phase"] in TRANSITION_OPEN):
@@ -4417,6 +4696,7 @@ class WorkStore:
             if replay is not None:
                 return {**self._view(db, card), "replayed_operation": replay}
             self._check_expected_revision(card, expected_revision)
+            self._require_open(card)
             proposal = card.get("proposal")
             transition = card.get("transition")
             open_transition = bool(
@@ -4647,6 +4927,7 @@ class WorkStore:
         with self._transaction() as db:
             attempt = self._attempt(db, attempt_id)
             card = self._load(db, attempt["work_id"])
+            self._require_open(card)
             step = self._step(card, attempt["step_id"])
             code, _ = self._recovery_target(db, card, step)
             if code and code != "recovery_not_authorized":
