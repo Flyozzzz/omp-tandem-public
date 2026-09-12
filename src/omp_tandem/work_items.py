@@ -1307,6 +1307,7 @@ class WorkStore:
                         and blocker["actor"] == "operator"
                         and blocker.get("policy") == "shell_review"
                         and step is not None
+                        and step["submission"] is not None
                         else {}
                     ),
                 }
@@ -2025,6 +2026,10 @@ class WorkStore:
             if not grant or not shell_permission(grant):
                 return None
             step = self._step(card, step_id)
+            if step["submission"] is None:
+                # No prospective review exists; reservation's readiness check
+                # rejects this request without minting a policy decision.
+                return None
             # Only the server-minted policy blocker counts: it carries a policy
             # marker no participant command can set, is owned by the operator, and
             # only an operator resolution waives it. A same-text blocker created

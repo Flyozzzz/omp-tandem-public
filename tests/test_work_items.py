@@ -1600,6 +1600,31 @@ class IndependentReviewTests(WorkItemsTests):
             review["shell_check_policy"], "blocked_no_stage_scoped_execution"
         )
 
+    def test_operator_can_retire_carried_policy_before_new_submission(self):
+        self.agreed()
+        self.authorize(allow_shell=True)
+        self.submit(self.reserve())
+        with self.assertRaises(ValueError):
+            self.reserve(actor="claude", kind="review")
+        blocker = self.view()["steps"][0]["blockers"][-1]
+        revised = plan()
+        revised["goal"] = "Revised requirements need a new implementation"
+        self.change("propose", plan=revised)
+        self.agreed()
+        self.change(
+            "unblock",
+            actor="operator",
+            step_id="backend",
+            blocker_id=blocker["blocker_id"],
+            resolution="not_applicable",
+            note="Retire the old submission's policy decision before new implementation",
+            evidence=["The new plan has no submission yet"],
+        )
+        historical = self.view()["steps"][0]["blockers"][-1]
+        self.authorize(allow_shell=True)
+        self.submit(self.reserve())
+        self._assert_applicability_required(historical)
+
     def _waived_shell_review(self):
         self.agreed()
         self.authorize(allow_shell=True)
