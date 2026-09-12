@@ -414,6 +414,124 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context["grant"]["reason"], "revoked")
         self.assertEqual(context["mode"], "managed")
 
+    async def manual_native_tools(self):
+        identifier = await self.create()
+        _, submission_id = await self._submitted_change(identifier)
+        task_id, conversation_id = str(uuid4()), str(uuid4())
+        lease = self.omp_bridge.tasks.lock(conversation_id)
+        self.addCleanup(lease.close)
+        now = time.time()
+        with closing(self.omp_bridge.tasks.connect()) as db, db:
+            db.execute(
+                "INSERT INTO tasks(task_id,conversation_id,created,updated,cwd,mode,model,prompt,status,deadline) "
+                "VALUES (?,?,?,?,?,'think','unused','Manual review','running',?)",
+                (task_id, conversation_id, now, now, str(self.root), now + 60),
+            )
+        tools = {
+            tool.name: tool
+            for tool in self.omp_bridge.runtime.worker.worker_tools(
+                self.omp_bridge.tasks.get(task_id)
+            )
+        }
+        context = HostToolContext("manual-review", threading.Event(), lambda _: None)
+
+        def work(action, **values):
+            revision = self.omp_bridge.work_items.progress(identifier)["revision"]
+            tool = tools["tandem_work"]
+            return json.loads(
+                tool.execute(
+                    tool.parse_params(
+                        {
+                            "request": {
+                                "action": action,
+                                "work_id": identifier,
+                                "step_id": "change",
+                                "expected_revision": revision,
+                                "operation_id": str(uuid4()),
+                                **values,
+                            },
+                            "view": "full",
+                        }
+                    ),
+                    context,
+                )
+            )
+
+        work("claim")
+        return task_id, submission_id, tools, context, work
+
+    async def test_native_manual_claim_clarification_closes_without_free_text_wait(
+        self,
+    ):
+        task_id, submission_id, tools, context, work = await self.manual_native_tools()
+        tool = tools["tandem_ask"]
+        with patch.object(
+            self.omp_bridge.tasks.channel,
+            "signal",
+            side_effect=AssertionError(
+                "Independent clarification entered ordinary wait"
+            ),
+        ):
+            response = json.loads(
+                tool.execute(
+                    tool.parse_params(
+                        {
+                            "question": "Need caller",
+                            "context": '{"requested_paths":["caller.py"]}',
+                        }
+                    ),
+                    context,
+                )
+            )
+        self.assertTrue(response["clarification_requires_new_snapshot"])
+        self.assertEqual(response["requested_paths"], ["caller.py"])
+        with self.assertRaises(ValueError):
+            self.omp_bridge.reply(task_id, response["question_id"], "AUTHOR-SENTINEL")
+        with self.assertRaises(ValueError):
+            work(
+                "report",
+                submission_id=submission_id,
+                resolution="success",
+                note="Cannot bypass new snapshot",
+                evidence=["x"],
+            )
+        with self.assertRaises(ValueError):
+            self.omp_bridge.interaction.submit_report(
+                task_id, {"outcome": "success", "answer": "x", "summary": "x"}
+            )
+        self.assertIsNone(self.omp_bridge.work_items.native_attempt(task_id))
+        self.assertEqual(
+            self.omp_bridge.work_items.stage_attempt(task_id)["review_stage"], "blocked"
+        )
+
+    async def test_native_manual_artifact_disclosure_follows_exact_comparison(self):
+        task_id, submission_id, tools, context, work = await self.manual_native_tools()
+        artifact = self.claude_bridge.artifacts.publish(
+            str(uuid4()), str(uuid4()), name="interpretation", content="AUTHOR-SENTINEL"
+        )
+        read = tools["tandem_read_artifact"]
+        request = read.parse_params({"artifact_id": artifact["artifact_id"]})
+        with self.assertRaisesRegex(ValueError, "withheld"):
+            read.execute(request, context)
+        self.assertFalse(self.omp_bridge.runtime.worker._comparison_open(task_id))
+        work(
+            "report",
+            submission_id=submission_id,
+            resolution="success",
+            note="Independent committed source assessment",
+            evidence=["Committed module"],
+        )
+        with self.assertRaisesRegex(ValueError, "withheld"):
+            read.execute(request, context)
+        work("compare", submission_id=submission_id)
+        self.assertIn("AUTHOR-SENTINEL", read.execute(request, context))
+        self.assertTrue(self.omp_bridge.runtime.worker._comparison_open(task_id))
+        # A disclosure binding must not inject an execution/managed capability.
+        self.assertIsNone(self.omp_bridge.work_items.native_attempt(task_id))
+        self.assertFalse(
+            self.omp_bridge.work_items.stage_attempt(task_id)["autonomous"]
+        )
+
     async def test_independent_registered_clarification_never_delivers_author_text(
         self,
     ):

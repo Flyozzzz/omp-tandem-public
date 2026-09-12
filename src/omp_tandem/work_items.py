@@ -3088,13 +3088,37 @@ class WorkStore:
             ).fetchone()
             return json.loads(row["attempt"]) if row else None
 
-    def block_review_context(self, db, task_id, request):
-        """Close clarification within the caller's task/question transaction."""
-        row = db.execute(
+    def _stage_attempts(self, db, task_id):
+        """Disclosure bindings only; never return these as execution capabilities."""
+        managed = db.execute(
             "SELECT attempt FROM work_attempts WHERE native_task_id=?", (task_id,)
         ).fetchone()
-        attempt = json.loads(row["attempt"]) if row else None
-        self._block_review_context(db, attempt, request)
+        if managed:
+            return [json.loads(managed["attempt"])]
+        return [
+            json.loads(row["attempt"])
+            for row in db.execute(
+                "SELECT attempt FROM work_attempts WHERE state IN ('reserved','running') "
+                "AND json_extract(attempt,'$.autonomous')=0 "
+                "AND json_extract(attempt,'$.kind')='review' "
+                "AND json_extract(attempt,'$.binding.task_id')=? ORDER BY attempt_id",
+                (task_id,),
+            )
+        ]
+
+    def stage_attempt(self, task_id) -> dict | None:
+        """Most restrictive active review binding, without changing tool policy."""
+        with self._read_connection() as db:
+            attempts = self._stage_attempts(db, task_id)
+            return next(
+                (attempt for attempt in attempts if independent_stage(attempt)),
+                attempts[0] if attempts else None,
+            )
+
+    def block_review_context(self, db, task_id, request):
+        """Close clarification within the caller's task/question transaction."""
+        for attempt in self._stage_attempts(db, task_id):
+            self._block_review_context(db, attempt, request)
 
     def block_review_capture(self, attempt_id, reason, paths):
         """Persist a pre-dispatch capture failure without inventing worker effects."""

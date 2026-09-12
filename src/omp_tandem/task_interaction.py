@@ -39,7 +39,7 @@ class TaskInteraction:
         self.work_items = work_items
 
     def _independent(self, task_id, task):
-        attempt = self.work_items.native_attempt(task_id)
+        attempt = self.work_items.stage_attempt(task_id)
         if attempt is not None:
             return independent_stage(attempt)
         # Low-level snapshot tasks and review runs have the same clarification

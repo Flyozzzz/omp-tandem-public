@@ -194,7 +194,7 @@ class NativeWorker:
     def _read_artifact(self, task_id, request):
         """Arbitrary artifact reads are author-material channels for a reviewer."""
         if self.work_items is not None:
-            attempt = self.work_items.native_attempt(task_id)
+            attempt = self.work_items.stage_attempt(task_id)
             if (
                 attempt
                 and attempt.get("kind") == "review"
@@ -218,10 +218,10 @@ class NativeWorker:
         self.tasks.update(task_id, execution_json=json.dumps(settings))
 
     def _comparison_open(self, task_id) -> bool:
-        """Author material for a managed reviewer follows the stored attempt state."""
+        """Author material follows the trusted managed or manual review binding."""
         if self.work_items is None:
             return False
-        attempt = self.work_items.native_attempt(task_id)
+        attempt = self.work_items.stage_attempt(task_id)
         return bool(attempt and attempt.get("comparison_opened_at"))
 
     def execute(self, task_id):
