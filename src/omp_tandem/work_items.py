@@ -490,6 +490,10 @@ class WorkCommand(_Model):
 class WorkConflict(ValueError):
     """The caller must read the current card before revising it."""
 
+    def __init__(self, message, *, current=None):
+        super().__init__(message)
+        self.current = current
+
 
 def _json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -558,6 +562,7 @@ def present_work(
                 "visibility",
                 "participant",
                 "bound_attempt",
+                "next_actions",
             )
             if key in payload
         }
@@ -630,9 +635,11 @@ def present_work(
                     if not attempt
                     else {
                         key: attempt.get(key)
-                        for key in ("attempt_id", "actor", "kind", "stage", "state")
+                        for key in ("attempt_id", "actor", "kind", "state")
                     }
                 )
+                if compact["attempt"] is not None:
+                    compact["attempt"]["stage"] = attempt.get("review_stage")
                 compact["unresolved_blocker_count"] = len(
                     WorkStore._unresolved(payload, step)
                 )
@@ -1418,7 +1425,8 @@ class WorkStore:
                 card = self._load(db, command.work_id)
                 if command.expected_revision != card["revision"]:
                     raise WorkConflict(
-                        f"Expected revision {command.expected_revision}; current revision is {card['revision']}"
+                        f"Expected revision {command.expected_revision}; current revision is {card['revision']}",
+                        current=redact_author(self._view(db, card), bound),
                     )
                 result = self._perform(db, card, command, actor, bound, source_commit)
             if command.action == "claim":
@@ -1723,8 +1731,8 @@ class WorkStore:
                     raise ValueError(
                         "Only the bound distinct reviewer may record an independent report with note and evidence"
                     )
-                if bound.get("protocol") != "independent_first":
-                    raise ValueError("Legacy review attempts have no independent stage")
+                if reason := self._review_phase_reason(bound, action):
+                    raise ValueError(reason)
                 if (
                     bound.get("clarification_request")
                     and command.resolution == "success"
@@ -1732,8 +1740,6 @@ class WorkStore:
                     raise ValueError(
                         "Clarification requires a new snapshot; this stage is blocked"
                     )
-                if bound.get("independent_report"):
-                    raise ValueError("Independent report is immutable")
                 if command.resolution not in {"success", "partial", "blocked"}:
                     raise ValueError(
                         "Report requires resolution success, partial or blocked"
@@ -1774,17 +1780,8 @@ class WorkStore:
                     raise ValueError(
                         "Only the bound distinct reviewer may open comparison"
                     )
-                if bound.get("clarification_request"):
-                    raise ValueError(
-                        "Clarification requires a new snapshot; comparison remains closed"
-                    )
-                report = bound.get("independent_report")
-                if not report or report["outcome"] != "success":
-                    raise ValueError(
-                        "Comparison opens only after a complete successful independent report"
-                    )
-                if bound.get("comparison_opened_at"):
-                    raise ValueError("Comparison is opened at most once")
+                if reason := self._review_phase_reason(bound, action):
+                    raise ValueError(reason)
                 bound["comparison_opened_at"] = time.time()
                 bound["review_stage"] = "comparison"
                 self._save_attempt(db, bound)
@@ -1815,18 +1812,8 @@ class WorkStore:
                     raise WorkConflict(
                         "Review must reference the exact current submission and plan"
                     )
-                if bound.get("verdict"):
-                    raise ValueError("Review verdict is immutable")
-                if bound.get("protocol") == "independent_first":
-                    report = bound.get("independent_report")
-                    if not report:
-                        raise ValueError(
-                            "Record the independent report before deciding"
-                        )
-                    if action == "accept" and report["outcome"] != "success":
-                        raise ValueError(
-                            "A partial or blocked independent report cannot accept; reject, block or reconcile"
-                        )
+                if reason := self._review_phase_reason(bound, action):
+                    raise ValueError(reason)
                 if any(
                     self._step(card, dependency)["state"] != "accepted"
                     for dependency in step["depends_on"]
@@ -2065,44 +2052,186 @@ class WorkStore:
             self._fence(db, card, "Operator revoked execution authorization")
             return self._record(db, card, "revoked", "operator")
 
-    def _ready(self, db, card):
-        if (
-            card["status"] != "active"
-            or not self._agreed(card)
-            or self._unresolved(card)
-        ):
-            return []
-        attempts = self._attempts(db, card["work_id"])
+    def _claim_reason(self, card, step, attempts):
+        """The reservation gate, shared by execution and participant hints."""
+        if card["status"] == "paused":
+            return "paused"
+        if not self._agreed(card):
+            return "plan_not_agreed"
+        if self._unresolved(card, step):
+            return "blocker_open"
         if any(
             item["state"] == "recovery_required"
             or (item["state"] in _ACTIVE and item["deadline"] <= time.time())
             for item in attempts
         ):
+            return "recovery_required"
+        if any(
+            item["step_id"] == step["id"] and item["state"] in _ACTIVE
+            for item in attempts
+        ):
+            return "another_claim_active"
+        if any(
+            self._step(card, dependency)["state"] != "accepted"
+            for dependency in step["depends_on"]
+        ):
+            return "dependency_not_accepted"
+        if card["status"] != "active" or step["state"] not in {
+            "ready",
+            "review",
+            "changes_requested",
+        }:
+            return "step_not_ready"
+        return None
+
+    def _ready(self, db, card):
+        attempts = self._attempts(db, card["work_id"])
+        return [
+            {
+                "work_id": card["work_id"],
+                "step_id": step["id"],
+                "actor": step["reviewer"] if step["submission"] else step["owner"],
+                "kind": "review" if step["submission"] else "implement",
+            }
+            for step in card["steps"]
+            if self._claim_reason(card, step, attempts) is None
+        ]
+
+    @staticmethod
+    def _review_phase_reason(bound, action):
+        report = bound.get("independent_report")
+        if action == "report":
+            if bound.get("protocol") != "independent_first":
+                return "legacy_disclosure"
+            if report:
+                return "report_already_recorded"
+        elif action == "compare":
+            if bound.get("clarification_request"):
+                return "clarification_requires_new_snapshot"
+            if not report or report["outcome"] != "success":
+                return "successful_report_required"
+            if bound.get("comparison_opened_at"):
+                return "comparison_already_opened"
+        elif action in {"accept", "reject"}:
+            if bound.get("verdict"):
+                return "verdict_already_recorded"
+            if bound.get("protocol") == "independent_first":
+                if not report:
+                    return "independent_report_required"
+                if action == "accept" and report["outcome"] != "success":
+                    return "successful_report_required"
+        return None
+
+    def next_actions(self, current, *, actor, attempt_token=None, claims=None):
+        """Hints share the reservation/stage gates; they confer no authority."""
+        if "plan" not in current or actor not in {"claude", "omp"}:
             return []
-        occupied = {item["step_id"] for item in attempts if item["state"] in _ACTIVE}
-        result = []
-        for step in card["steps"]:
+        with self._read_connection() as db:
+            card = self._load(db, current["work_id"])
+            attempts = self._attempts(db, card["work_id"])
+            bound = None
+            if attempt_token:
+                bound = self._credential(db, attempt_token, actor)
+            actions = []
+
+            def add(action, step, kind, credential=None, reason=None):
+                submission = step["submission"] if step else None
+                if card["revision"] != current["revision"]:
+                    reason = "receipt_revision_stale"
+                if card["status"] == "paused":
+                    reason = "paused"
+                required = ["operation_id"]
+                if action in {"submit", "report", "accept", "reject"}:
+                    required += ["note", "evidence"]
+                if action == "submit" and credential and not credential["autonomous"]:
+                    required += ["commit"]
+                if action == "report":
+                    required += ["resolution"]
+                actions.append(
+                    {
+                        "action": action,
+                        "step_id": step["id"] if step else None,
+                        "kind": kind,
+                        "stage": credential.get("review_stage") if credential else None,
+                        "submission_id": submission["submission_id"]
+                        if submission
+                        else None,
+                        "expected_revision": current["revision"],
+                        "required_fields": required,
+                        "allowed": reason is None,
+                        "blocked_reason": reason,
+                    }
+                )
+
             if (
-                step["id"] in occupied
-                or step["state"] not in {"ready", "review", "changes_requested"}
-                or any(item["resolved_at"] is None for item in step["blockers"])
+                bound is None
+                and card["agreements"].get(actor, {}).get("plan_revision")
+                != card["plan_revision"]
             ):
-                continue
-            if any(
-                self._step(card, dependency)["state"] != "accepted"
-                for dependency in step["depends_on"]
-            ):
-                continue
-            kind = "review" if step["submission"] else "implement"
-            result.append(
-                {
-                    "work_id": card["work_id"],
-                    "step_id": step["id"],
-                    "actor": step["reviewer"] if kind == "review" else step["owner"],
-                    "kind": kind,
-                }
-            )
-        return result
+                add("agree", None, None)
+            for step in card["steps"]:
+                if bound and bound["step_id"] != step["id"]:
+                    continue
+                if step["state"] == "accepted":
+                    continue
+                kind = "review" if actor == step["reviewer"] else "implement"
+                token = attempt_token or (claims or {}).get(
+                    (card["work_id"], step["id"])
+                )
+                credential = None
+                if token:
+                    try:
+                        credential = self._authenticate(db, token, actor)
+                    except ValueError:
+                        add("claim", step, kind, reason="capability_retired")
+                        continue
+                if not credential:
+                    reason = self._claim_reason(card, step, attempts)
+                    if reason is None and bool(step["submission"]) != (
+                        kind == "review"
+                    ):
+                        reason = (
+                            "awaiting_review"
+                            if step["submission"]
+                            else "submission_required"
+                        )
+                    add("claim", step, kind, reason=reason)
+                    continue
+                reason = None
+                if credential["step_id"] != step["id"] or credential["kind"] != kind:
+                    reason = "foreign_attempt"
+                elif self._unresolved(card, step):
+                    reason = "blocker_open"
+                if kind == "implement":
+                    if credential.get("submission_intent"):
+                        reason = "submission_already_recorded"
+                    add("submit", step, kind, credential, reason)
+                    continue
+                submission = step["submission"]
+                if (
+                    not submission
+                    or credential["submission"]["submission_id"]
+                    != submission["submission_id"]
+                    or submission["plan_revision"] != card["plan_revision"]
+                ):
+                    reason = "foreign_submission"
+                candidates = (
+                    ["report"]
+                    if credential.get("protocol") == "independent_first"
+                    and not credential.get("independent_report")
+                    else ["compare", "accept", "reject"]
+                )
+                for action in candidates:
+                    if action == "report" and reason == "blocker_open":
+                        reason = None
+                    phase_reason = self._review_phase_reason(credential, action)
+                    if action == "compare" and phase_reason in {
+                        "legacy_disclosure",
+                        "comparison_already_opened",
+                    }:
+                        continue
+                    add(action, step, kind, credential, reason or phase_reason)
+            return actions
 
     def ready(self, work_id: str | None = None) -> list[dict]:
         self._maintenance()

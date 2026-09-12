@@ -371,6 +371,92 @@ class WorkItemsTests(unittest.TestCase):
         self.assertEqual(stale["error"]["code"], "cursor_stale")
         self.assertEqual(stale["current"]["revision"], self.view()["revision"])
 
+    def test_next_actions_follow_owner_capability_and_dependencies(self):
+        from omp_tandem.work_access import perform_work
+
+        request = {"action": "get", "work_id": self.work_id}
+        draft = perform_work(self.store, request, actor="omp")
+        claim = next(
+            item for item in draft["next_actions"] if item["action"] == "claim"
+        )
+        self.assertEqual(claim["blocked_reason"], "plan_not_agreed")
+        self.agreed()
+        ready = perform_work(self.store, request, actor="omp")
+        claim = next(
+            item for item in ready["next_actions"] if item["step_id"] == "backend"
+        )
+        self.assertTrue(claim["allowed"])
+        dependent = perform_work(self.store, request, actor="claude")
+        self.assertEqual(
+            next(
+                item
+                for item in dependent["next_actions"]
+                if item["step_id"] == "integration"
+            )["blocked_reason"],
+            "dependency_not_accepted",
+        )
+        claims = {}
+        result = perform_work(
+            self.store,
+            {
+                "action": "claim",
+                "work_id": self.work_id,
+                "step_id": "backend",
+                "expected_revision": ready["revision"],
+                "operation_id": str(uuid4()),
+            },
+            actor="omp",
+            claims=claims,
+        )
+        action = result["next_actions"][0]
+        self.assertEqual(action["action"], "submit")
+        self.assertTrue(action["allowed"])
+        self.assertIn("commit", action["required_fields"])
+        self.assertNotIn(result["claim"]["token"], json.dumps(result["next_actions"]))
+        other = perform_work(self.store, request, actor="claude")
+        self.assertEqual(
+            other["next_actions"][0]["blocked_reason"], "another_claim_active"
+        )
+        self.assertEqual(
+            perform_work(self.store, request, actor="operator")["next_actions"], []
+        )
+        self.change("pause")
+        paused = perform_work(self.store, request, actor="omp")
+        self.assertTrue(
+            all(
+                not item["allowed"] and item["blocked_reason"] == "paused"
+                for item in paused["next_actions"]
+            )
+        )
+
+    def test_public_cas_conflict_and_exact_replay_have_no_effects(self):
+        from omp_tandem.work_access import perform_work
+
+        command = {
+            "action": "agree",
+            "work_id": self.work_id,
+            "expected_revision": self.view()["revision"],
+            "operation_id": str(uuid4()),
+        }
+        first = perform_work(self.store, command, actor="claude")
+        replay = perform_work(self.store, command, actor="claude")
+        self.assertEqual(replay, first)
+        before = self.store.perform(
+            {"action": "history", "work_id": self.work_id}, actor="claude"
+        )
+        conflict = perform_work(
+            self.store, {**command, "operation_id": str(uuid4())}, actor="omp"
+        )
+        self.assertEqual(conflict["error"]["code"], "revision_conflict")
+        self.assertEqual(conflict["current"]["revision"], first["revision"])
+        self.assertNotIn("plan", conflict["current"])
+        self.assertEqual(
+            self.store.perform(
+                {"action": "history", "work_id": self.work_id}, actor="claude"
+            ),
+            before,
+        )
+
     def test_authorized_models_survive_reopen_and_cannot_change_active_attempt(self):
         self.agreed()
         grant = self.authorize(
@@ -1941,6 +2027,63 @@ class IndependentReviewTests(WorkItemsTests):
         replay = self.store.perform(command, actor="claude")
         self.assertNotIn(self.SENTINEL, json.dumps(replay))
         self.assertEqual(replay["claim"]["token"], first["claim"]["token"])
+
+    def test_reviewer_actions_keep_report_comparison_and_verdict_separate(self):
+        from omp_tandem.work_access import perform_work
+
+        self.agreed()
+        self.submit(self.reserve(autonomous=False), cost=None)
+        review = self.reserve(actor="claude", kind="review", autonomous=False)
+        request = {"action": "get", "work_id": self.work_id}
+
+        def actions():
+            return perform_work(
+                self.store, request, actor="claude", attempt_token=review["token"]
+            )["next_actions"]
+
+        initial = actions()
+        self.assertEqual([item["action"] for item in initial], ["report"])
+        self.assertTrue(initial[0]["allowed"])
+        self.assertEqual(
+            initial[0]["submission_id"], review["submission"]["submission_id"]
+        )
+        self.assertNotIn(self.SENTINEL, json.dumps(initial))
+        conflict = perform_work(
+            self.store,
+            {
+                "action": "report",
+                "work_id": self.work_id,
+                "step_id": "backend",
+                "expected_revision": self.view()["revision"] - 1,
+                "operation_id": str(uuid4()),
+                "submission_id": review["submission"]["submission_id"],
+                "resolution": "success",
+                "note": "Independent review",
+                "evidence": ["Pinned bytes"],
+            },
+            actor="claude",
+            attempt_token=review["token"],
+        )
+        self.assertEqual(conflict["error"]["code"], "revision_conflict")
+        self.assertNotIn(self.SENTINEL, json.dumps(conflict))
+        self.report(review)
+        self.assertEqual(
+            {item["action"] for item in actions() if item["allowed"]},
+            {"compare", "accept", "reject"},
+        )
+        self.change("compare", actor="claude", token=review["token"], step_id="backend")
+        self.assertEqual(
+            {item["action"] for item in actions() if item["allowed"]},
+            {"accept", "reject"},
+        )
+        self.verdict(review, report=False)
+        unbound = perform_work(self.store, request, actor="claude")
+        self.assertFalse(
+            any(
+                item["step_id"] == "backend" and item["allowed"]
+                for item in unbound["next_actions"]
+            )
+        )
 
     def test_presentation_preserves_independent_disclosure(self):
         from omp_tandem.work_access import perform_work

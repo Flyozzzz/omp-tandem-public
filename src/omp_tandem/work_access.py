@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pydantic import ConfigDict, Field
 
-from .work_items import WorkCommand, WorkPresentation, present_work
+from .work_items import WorkCommand, WorkConflict, WorkPresentation, present_work
 from .work_workspace import WorkWorkspace
 
 
@@ -99,7 +99,22 @@ def perform_work(
         if command.action == "history"
         else command
     )
-    result = store.perform(domain_command, actor=actor, attempt_token=token)
+    try:
+        result = store.perform(domain_command, actor=actor, attempt_token=token)
+    except WorkConflict as error:
+        if error.current is None:
+            raise
+        current = error.current
+        current["next_actions"] = store.next_actions(
+            current, actor=actor, attempt_token=token, claims=claims
+        )
+        return {
+            "error": {
+                "code": "revision_conflict",
+                "expected_revision": command.expected_revision,
+            },
+            "current": present_work(current, actor=actor),
+        }
     if claims is not None and result.get("claim", {}).get("token"):
         claim = result["claim"]
         claims[(result["work_id"], claim["step_id"])] = claim["token"]
@@ -115,6 +130,11 @@ def perform_work(
         )
         result = store.perform(
             {"action": "get", "work_id": bound["work_id"]}, actor=actor
+        )
+    action_token = result.get("claim", {}).get("token") or token
+    for card in result.get("items", [result]):
+        card["next_actions"] = store.next_actions(
+            card, actor=actor, attempt_token=action_token, claims=claims
         )
     result["participant"] = actor
     if bound:
