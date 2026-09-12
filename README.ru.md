@@ -106,7 +106,41 @@ Python-зависимости готовятся автоматически в �
 - Дескриптор `recovery` описывает закрытие того же захвата только отчётом. Перед `recover` другого хоста оператор явно выполняет `successor`; модель, тесты и реализация не запускаются повторно. Уточнение независимого ревью требует нового снимка с точными `review_context_paths`; старое исключение не распространяется автоматически на новые входы.
 - `wake_acknowledgment` различает `acknowledged`, `acknowledged_zero`, `deferred`, `not_attempted`. Приёмка не означает применение: без свидетельств — `not_recorded`; `assess`, квитанции apply и публикация учитываются отдельно. Native-расходы — ограниченный подытог; стоимость Claude без отдельных измерений неизвестна.
 
-[Контракты, отчёты и восстановление](docs/guide.ru.md#compact-contracts). Версия пакета 3.6.0 выпущена 2026-09-12; см. [журнал изменений](CHANGELOG.md).
+[Контракты, отчёты и восстановление](docs/guide.ru.md#compact-contracts). **3.7.0 — локальное предложение от 2026-09-12, не опубликованный релиз**; см. [CHANGELOG](CHANGELOG.md). Сборка/проверка wheel или ZIP не создаёт тег, не публикует, не устанавливает пакет в пользовательскую сессию и не применяет принятый результат. Публикация и применение требуют отдельных решений оператора.
+
+## Изменение плана и переход в другой репозиторий
+
+- **Ожидающий план не действующий:** отличающийся MCP `propose` сохраняет `proposal{proposal_id, base_plan_revision, preview}`, не меняя активную `plan_revision`, согласования, попытки и grant. Preview охватывает **всю карточку**, включая неизменённые шаги: attempts, изменённые/удалённые/добавленные шаги. Новый отличающийся proposal заменяет ожидающий; предложение текущего плана снимает его до begin. При открытом переходе `propose` получает `transition_in_progress`.
+- **Оператор, не агент:** агенты предлагают, сообщают, сдают и проверяют. Только операторский CLI выполняет begin/resolve/activate/withdraw, cancel/link, аварийный reconcile и authorize. `operator_commands` даёт точные ID, экранированные root/state и наблюдаемую ревизию; transition-подсказка в `next_actions` имеет `allowed=false`, `operator_required`, а не право выполнения.
+- **Остановка не отсутствие эффектов:** begin замораживает план, инвентаризует и ограждает все активные и recovery-required попытки. Управляемая остановка требует supervisor teardown (`supervisor_confirmed`): это **остановка процесса, не отсутствие внешних эффектов**. Ручная требует `--confirm-stopped` (`operator_attested`). Оператор проверяет эффекты и записывает note/evidence. По умолчанию disposition — `superseded`; `--abandon` даёт `abandoned`, блокер и паузу карточки.
+- **Сохранённые результаты:** managed-правки сохраняются на составной базе либо остаётся `capture_failure`; ручной `--saved-commit` проверяется как submission. Активация требует разобранный инвентарь, устанавливает новую черновую ревизию, очищает согласования, переносит блокеры, отзывает grant и сохраняет имеющуюся паузу. Продолжение — `checkpoint` для байтов в новом владении, `blocked` при удалении шага/сужении владения, `not_available` без проверенных байтов. Это исходы продолжения, не автоматические блокеры или приёмка. Нужны новые согласования и выполненные условия pause/blocker/authorization, не повтор старых эффектов.
+- **Отзыв:** до begin `--proposal` только снимает предложение; после begin `--transition` сохраняет sticky quiescence: ограждённым попыткам нужен операторский `reconcile`, существующей паузе — явный resume.
+
+Синтаксис ниже использует подготовленный Python пакета (`uv run --frozen python` из этой рабочей копии). Глобальные root/state идут перед командой. Заглушки не являются доказательствами; скобки означают необязательные аргументы, `|` — альтернативы. Предпочитайте `--expected-revision N` (наблюдаемая ревизия **карточки**) и `--operation-id ID`, перечитывайте после мутации. Точный повтор возвращает исторический `replayed_operation.outcome`; любые иные аргументы под тем же ID отклоняются.
+
+```text
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK inspect
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK begin --proposal PROPOSAL [--expected-revision N] [--operation-id ID] --note NOTE
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK resolve --transition TRANSITION --attempt ATTEMPT --note NOTE --evidence EVIDENCE [--confirm-stopped] [--abandon] [--saved-commit SHA] [--expected-revision N] [--operation-id ID]
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK activate (--transition TRANSITION | --proposal PROPOSAL) [--expected-revision N] [--operation-id ID] --note NOTE
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK withdraw (--transition TRANSITION | --proposal PROPOSAL) [--expected-revision N] [--operation-id ID] --note NOTE
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] reconcile WORK STEP --resolution retry|abandon --confirm-stopped --note NOTE --evidence EVIDENCE
+```
+
+`activate --proposal` допустим только без исполняющихся/recovery-required попыток; после begin нужен ID замороженного перехода. [Полный процесс](docs/guide.ru.md#plan-transitions).
+
+Карточка хранит закреплённый root/scope/provenance и исходное наблюдение Git toplevel/HEAD; create/propose/claim записывают `repository_observation`. `owned_files` и `review_context_paths` проверяются на вложенные репозитории, `.git`-файлы/worktree, содержимое submodule и symlink, без открытия/поиска дочернего репозитория. Сама **gitlink-запись** родителя допустима проверкой путей, но не автоматически поддерживается managed snapshot. Диагностика называет путь, закреплённый root и границу: **“Launch Tandem at /outer/child and create a separate card in that scope”**. Для symlink указывается ссылка без разыменования. Планирование вне Git без путей — `unverified`; объявленные пути и все claim требуют корректного Git-root с HEAD.
+
+Неразрешимый коммит отклоняется **до submission intent**: `Submitted commit SHA could not be resolved in pinned repository ROOT: GIT_CAUSE`, затем инструкция создать карточку в правильной области и попросить оператора stop/dispose/cancel или supersede. Нельзя подставлять иной коммит или перепривязывать старую карточку через task `cwd`.
+
+После разбора всех старых попыток и инвентаря начатого перехода создайте отдельную дочернюю карточку; оператор записывает оба направления в их собственных областях:
+
+```text
+python -m omp_tandem.work_daemon --project-root OLD_ROOT [--state-dir STATE] cancel OLD_WORK --disposition cancelled|superseded --expected-revision N --operation-id ID --note NOTE --evidence EVIDENCE [--continuation-root ABSOLUTE_CHILD_ROOT --continuation-work-id CHILD_WORK]
+python -m omp_tandem.work_daemon --project-root CHILD_ROOT [--state-dir STATE] link CHILD_WORK --predecessor-root ABSOLUTE_OLD_ROOT --predecessor-work-id OLD_WORK --expected-revision N --operation-id ID --note NOTE --evidence EVIDENCE
+```
+
+Cancel не останавливает и не принимает результат: записывает `closure`, снимает proposal, архивирует разобранный открытый transition как cancelled, отзывает grant и даёт терминальный `cancelled` при обоих disposition. Мутации исполнения получают `work_terminal`, get/history доступны. Link — только provenance: `target_verification=not_performed`, `reciprocal_link=unverified` даже при записи обоих направлений. Права чтения, согласования, grant и приёмка не переносятся. Нужны новые согласования и **независимая приёмка только в дочерней области**. `show WORK --format markdown` показывает closure/continuation/predecessors; приёмка не означает применение. [Переход, точные ошибки и CLI/MCP-сценарии](docs/guide.ru.md#repository-handover); [дословные требования с provenance](docs/spec/plan-transition-and-git-root-2026-09-12.md).
 
 ## Как это устроено
 

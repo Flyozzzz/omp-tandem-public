@@ -1,5 +1,27 @@
 # Changelog
 
+## 3.7.0 — 2026-09-12 (local proposal; not published)
+
+### Changes
+
+- Differing `propose` now records one pending proposal instead of immediately activating a plan. Active execution, agreements and authorization remain unchanged during negotiation. Proposals carry IDs, base plan revision and card-wide attempt/step impact previews; replacement and proposing-current-plan withdrawal are allowed only before a transition begins.
+- Operator CLI `transition inspect/begin/resolve/activate/withdraw` exposes exact proposal/transition identities, optional revision CAS and whole-command operation fingerprints. Exact retries return their recorded outcome, not permission to repeat effects. Participant views surface exact operator commands and `operator_required` hints without granting operator authority.
+- Begin freezes the proposal and inventories all active/recovery-required attempts, including unchanged steps. Managed disposition requires supervisor stop confirmation; manual disposition requires `--confirm-stopped`. Operator note/evidence records inspected effects. `superseded` and `abandoned` remain distinct; abandonment creates a blocker and pauses the card. Supervisor teardown confirms process stop, not absence of external effects.
+- Managed interrupted work is preserved on its recorded composed base with submission-strength byte/ownership checks, or capture failure is retained. Manual saved commits are validated in the pinned repository. Activation resets the active plan to a new draft revision, clears agreements/current acceptance, carries blockers, revokes the grant and preserves existing pauses. Saved continuation is `checkpoint`, `blocked` or `not_available`, never automatic command replay or transferred acceptance. Withdrawal after begin leaves sticky quiescence; emergency operator reconcile remains available.
+- Cards record immutable launch-root/scope provenance and initial/latest Git observations at create/propose/claim. Declared ownership and review-context paths reject nested repository/worktree/submodule-content boundaries and symlinks early without opening/searching children. The parent gitlink entry itself is allowed by declared-path validation; pathless non-Git planning is explicitly unverified, while declared paths and claims require Git-root/HEAD.
+- Unresolvable submissions fail before intent with the exact commit, pinned repository, bounded Git cause and correct-scope recreation/closure guidance. Source and submitted commit diagnostics are distinct; ancestry, full-hash and ownership validation remain intact.
+- Operator `cancel` closes only disposed cards as cancelled/superseded without fake acceptance, records closure and optional continuation, clears pending negotiations, archives an open disposed transition as cancelled and revokes authorization. Terminal guards prevent reopening execution; history stays readable. Operator `link` records separately scoped predecessor provenance without transferring permissions, agreements, grants or acceptance. Markdown reports show closure and both link directions.
+- EN/RU/ZH README and guides plus both skills document the CLI/MCP workflows and operator boundaries. The two operator requests are preserved [verbatim with provenance](docs/spec/plan-transition-and-git-root-2026-09-12.md), separate from implementation decisions. Local package/plugin/marketplace/lock metadata is prepared as minor version 3.7.0 for new commands and changed `propose` semantics.
+
+### Remaining limits
+
+- This is a local release proposal, not an operator-approved publication. No tag, push, release, plugin installation or application to a user checkout is implied. Independent acceptance, explicit application and publication remain separate.
+- CLI/MCP transition evidence uses two manual attempts on disposable Git repositories. Managed confirmation/preservation have store/workspace regressions; the documented end-to-end commands do not run a live-provider replan or a counted external-effect process across managed replan. The pinned OMP verifier uses an isolated localhost model fixture, not user-provider credentials or an external-model evaluation.
+- Capture failure yields `continuation.status="not_available"`; ownership loss or a removed step yields `blocked`. These continuation outcomes do not automatically block card activation/execution. Operators must inspect preservation failures, remaining work and external effects; there is no generic cross-card importer or automatic rollback/replay.
+- Links remain `target_verification="not_performed"` and `reciprocal_link="unverified"` even when both sides were recorded. They are operator provenance assertions, not cross-scope read capabilities or proof of a matching target. Fresh agreements and independent acceptance occur only in the successor's scope.
+- Boundaries are declared-path and pinned-root checks, not an OS sandbox. Existing managed-snapshot symlink/submodule/filter refusals, unknown-cost stops, independent-review disclosure gates and manual-interaction limitations remain. Historical receipts do not revive fenced authority.
+- Compatibility remains version/platform/API-bound; the wire census covers exercised `openai-completions`, not all providers. Helpers remain disabled with the existing five unsatisfied gates. Prior unexplained cleanup/wake failures remain historical evidence, not explained by later passes.
+
 ## 3.6.0 — 2026-09-12
 
 ### Changes

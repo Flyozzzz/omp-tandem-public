@@ -8,7 +8,7 @@
 
 OMP Tandem предоставляет локальный MCP-мост в виде плагина Claude Code и переносимого пакета Agent Plugins для Codex и совместимых клиентов. Другие локальные MCP-клиенты могут использовать тот же сервер без поддержки плагинов.
 
-**Пакет 3.6.0 (выпущен 2026-09-12)** · [Лицензия MIT](../LICENSE) · [Релизы](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels и вебхуки (на английском)](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Пакет 3.7.0 (локальное предложение от 2026-09-12; не опубликован)** · [Лицензия MIT](../LICENSE) · [Релизы](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels и вебхуки (на английском)](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 Встроенных правил для конкретной компании, репозитория или продукта нет. При необходимости вы сами передаёте знания о продукте. Изоляция проектов — это универсальная граница данных, а не жёстко заданная привязка к определённому проекту.
 
@@ -578,7 +578,86 @@ tandem_work(
 
 Управляемые Claude/OMP-проверяющие используют серверный reader закреплённого коммита, без живого файлового доступа и произвольного shell. Требования и исходные метаданные снимка доступны. Ручные шлюзы публикации и фильтрация каналов не стирают прежнее раскрытие в интерактивном клиенте и не создают песочницу ОС. Разрешение shell вызывает операторский блокер **до запуска управляемого ревью**: подтверждённого stage-scoped shell пока нет. Участник не может снять этот блокер; оператор должен с доказательствами явно разрешить ревью без shell, честно указав непроведённые проверки, иначе работа остаётся заблокированной. Нельзя молча отменять обязательные проверки.
 
-`propose` передаёт **полный** новый `plan`, а не частичный патч. Изменение плана снимает прежние согласования и текущую приёмку, запрещает старым попыткам публиковать результат и отзывает автономное разрешение. Нужны новое согласование обоих участников, разбор незавершённых попыток и, при необходимости, новое разрешение оператора.
+`propose` передаёт **полный** новый `plan`, текущую `expected_revision`, новый `operation_id` и пояснение в `note`. Отличающийся план сохраняется как ожидающее предложение: он **не меняет** действующую `plan_revision`, согласования, попытки или разрешение. Только операторская активация устанавливает новую ревизию, снимает прежние согласования/текущую приёмку и отзывает разрешение. Исторические отчёты сохраняются.
+
+<a id="plan-transitions"></a>
+### Ожидающий план и операторский переход
+
+`card.plan` и `plan_revision` — действующий план. `card.proposal` содержит `proposal_id`, `base_plan_revision` и `preview`: `card_wide=true`, список `attempts`, `changed_steps`, `removed_steps`, `added_steps`. Предварительная оценка отражает момент предложения; begin заново собирает актуальные попытки. Переход затрагивает **всю карточку**, включая неизменённые шаги, но не другие карточки. До begin исполнение продолжается по старому плану; `agree` согласует именно действующую ревизию.
+
+Новое отличающееся предложение заменяет ожидающее. Предложение **текущего действующего плана** снимает ожидающее предложение до begin. При открытом переходе любой `propose` получает `transition_in_progress`: агент не может заменить или снять замороженный план.
+
+`transition begin/resolve/activate/withdraw`, `cancel`, `link`, `reconcile` и `authorize` — **операторские CLI-команды**, не полномочия агента. Агенты предлагают, сообщают, сдают результат и независимо проверяют; они могут показать команду, но не подтверждать собственную остановку от имени оператора. Используйте подготовленный Python пакета (`uv run --frozen python` из рабочей копии). Глобальные `--project-root` и необязательный `--state-dir` перед подкомандой должны указывать на то же хранилище, что MCP.
+
+Ниже синтаксис, не готовый сценарий с фиктивными доказательствами. Подставьте наблюдаемые ROOT/STATE/WORK/PROPOSAL/TRANSITION/ATTEMPT. `N` — **ревизия карточки**, не `plan_revision`; перечитывайте после каждой мутации. Квадратные скобки означают необязательные аргументы, `|` — выбор:
+
+```text
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK inspect
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK begin --proposal PROPOSAL [--expected-revision N] [--operation-id ID] --note NOTE
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK resolve --transition TRANSITION --attempt ATTEMPT --note NOTE --evidence EVIDENCE [--confirm-stopped] [--abandon] [--saved-commit SHA] [--expected-revision N] [--operation-id ID]
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK activate (--transition TRANSITION | --proposal PROPOSAL) [--expected-revision N] [--operation-id ID] --note NOTE
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK withdraw (--transition TRANSITION | --proposal PROPOSAL) [--expected-revision N] [--operation-id ID] --note NOTE
+```
+
+Предпочитайте оба защитных флага: `--expected-revision` отклоняет устаревшее наблюдение, а `--operation-id` связывает **всю команду**, включая ревизию, note/evidence и флаги. Точный повтор возвращает исторический `replayed_operation.outcome` рядом с текущим состоянием без повторения эффектов. Иные аргументы под тем же ID запрещены; после конфликта сначала осмотрите состояние и примите новое решение.
+
+`get.operator_commands` показывает подготовленный интерпретатор, экранированные root/state, точные ID и наблюдаемую ревизию; `transition inspect` возвращает их в `commands`, вместе с инвентарём и условиями остановки. Замените note/evidence реальными сведениями, при необходимости добавьте новый operation ID. Подсказка `next_actions` с `action="transition"`, `allowed=false`, `blocked_reason="operator_required"` **не даёт разрешения**.
+
+1. **Begin:** замораживает предложение, включает все активные и уже `recovery_required` попытки, переводит активные в `recovery_required` и запрещает новые claim до завершения перехода. Старые права не могут публиковать свежие результаты.
+2. **Остановка и проверка эффектов:** управляемой попытке нужна отметка supervisor `process_confirmed_gone`; в disposition это `stop.source="supervisor_confirmed"`. Тишина, heartbeat или слова модели не заменяют подтверждение. Завершение supervisor подтверждает **остановку процесса, но не отсутствие внешних эффектов**. Оператор отдельно проверяет результаты и возможные эффекты. Ручной попытке обязательно нужен `--confirm-stopped`, источник `operator_attested`; этот флаг не заменяет supervisor для управляемой попытки.
+3. **Resolve каждой попытки:** содержательные `--note` и один или несколько `--evidence`. По умолчанию disposition — `superseded`; `--abandon` записывает `abandoned`, добавляет операторский блокер и **ставит карточку на паузу**. Это не приёмка и не повтор выполнения. `WorkWorkspace.preserve` сохраняет управляемые правки на записанной составной базе с проверками сдачи; ошибка остаётся в `saved.capture_failure`. Ручная реализация может передать полный `--saved-commit`, проверяемый в закреплённом репозитории как submission. Сохранённые отчёты, вывод и intent — свидетельства, не автоматически принятый результат.
+4. **Activate:** `--transition` требует неизменного предложения, disposition всех записей и отсутствия активных/`recovery_required` попыток. Без begin допустим `--proposal`, только если нечего исполнять или восстанавливать. Устанавливается новая черновая ревизия, очищаются согласования/текущая приёмка, переносятся блокеры (у удалённых шагов — на карточку), отзывается grant и **сохраняется имеющаяся пауза**, в том числе после abandon/неизвестной стоимости. Нужны новые согласования обоих, снятие блокеров, явный `resume` при паузе и новая операторская авторизация перед управляемым запуском.
+5. **Продолжение сохранённых результатов, не команд:** история перехода для superseded-попыток содержит `checkpoint`, если проверенные правки входят в новое владение; `blocked`, если шаг удалён или владение исключает сохранённые файлы; `not_available`, если проверенных байтов нет, включая capture failure. Это исходы продолжения, **не автоматические блокеры карточки** и не доказательство отсутствия эффектов. Проверьте ошибки и оставшуюся работу до продолжения. Checkpoint хранит commit/base и операторские свидетельства, передаётся новому claim, но не является submission или перенесённой приёмкой. Старые команды автоматически не воспроизводятся.
+
+До begin `withdraw --proposal` только удаляет предложение. После begin `withdraw --transition` архивирует его как withdrawn, но сохраняет **sticky quiescence**: ограждённые попытки требуют операторского reconcile, существующая пауза — явного resume. Старые права не оживают, эффекты не откатываются. Аварийный путь — операторский `reconcile WORK STEP --resolution retry|abandon --confirm-stopped --note ... --evidence ...`: `retry` разрешает осознанную новую попытку при остальных выполненных условиях; `abandon` оставляет блокер и паузу.
+
+<a id="repository-handover"></a>
+### Закреплённый репозиторий, диагностика и честное закрытие
+
+При create записываются `repository{project_root, scope_id, provenance, initial_observation}`; наблюдение содержит `status="verified"|"unverified"`, `git_toplevel`, `head`, действие и время. `repository_observation` обновляется на create/propose/claim. Наблюдение **не перепривязывает** карточку или исходный коммит.
+
+`owned_files` и точные `review_context_paths` проверяются на create/propose и повторно на claim, включая существующих предков нового пути. Вложенный репозиторий, `.git`-файл/worktree и содержимое submodule — отдельные границы. Владеть самой **gitlink-записью** submodule в родителе разрешено этой проверкой; это не отменяет прежний отказ managed snapshot от submodule. Symlink отклоняется с указанием пути/root/ссылки без разыменования. Посторонние вложенные репозитории не сканируются.
+
+Пример фактического формата диагностики границы:
+
+```text
+Declared path 'child/new/file.py' belongs to detected repository boundary /outer/child, not pinned root /outer. Launch Tandem at /outer/child and create a separate card in that scope; do not repin this card. The child repository was not opened or searched.
+```
+
+Вне Git допустимо только планирование **без объявленных путей**, с `unverified`; планы с путями и любой claim требуют корректный Git-root с HEAD. `cwd` задачи не исправляет launch scope. Если пути не позволили выявить ошибку заранее, submission с неразрешимым коммитом отклоняется **до записи intent**:
+
+```text
+Submitted commit SHA could not be resolved in pinned repository /outer: GIT_CAUSE. Verify the exact hash in this repository. If work belongs to a nested or different repository, launch Tandem there, create a separate card, and ask the operator to stop/dispose and cancel or supersede this card with continuation provenance; never substitute an unrelated commit. No other repository was searched.
+```
+
+Ошибка исходного коммита помечается `Source`, а не `Submitted`; Git-причина ограничена по размеру. Проверки полного hash, ancestry и владения изменёнными файлами сохраняются. Не ищите по чужим репозиториям и не подставляйте другой коммит.
+
+Перенос в правильную область:
+
+1. Осмотрите закреплённый root и ошибку. Остановите и разберите попытки исходной карточки через открытый transition либо MCP `pause` и операторский emergency reconcile. **Cancel не останавливает процесс.**
+2. Запустите отдельный клиент Tandem в дочернем Git-root с HEAD, проверьте `tandem_scope` и создайте отдельную карточку через MCP `create`. Согласования пусты, grant не наследуется.
+3. Оператор закрывает исходную карточку в её области и отдельно записывает предшественника в области новой. Оба вызова требуют свежую ревизию карточки и operation ID. Root/ID — отдельные аргументы, двоеточие в пути не разделитель:
+
+```text
+python -m omp_tandem.work_daemon --project-root OLD_ROOT [--state-dir STATE] cancel OLD_WORK --disposition cancelled|superseded --expected-revision N --operation-id ID --note NOTE --evidence EVIDENCE [--continuation-root ABSOLUTE_CHILD_ROOT --continuation-work-id CHILD_WORK]
+python -m omp_tandem.work_daemon --project-root CHILD_ROOT [--state-dir STATE] link CHILD_WORK --predecessor-root ABSOLUTE_OLD_ROOT --predecessor-work-id OLD_WORK --expected-revision N --operation-id ID --note NOTE --evidence EVIDENCE
+```
+
+4. В дочерней области оба участника выполняют `agree`, автор — `claim` и `submit` точного дочернего коммита; другой проверяющий делает `claim`, читает результат, записывает независимый `report`, не более одного `compare`, затем `accept`/`reject` точного submission. Это описанные выше ручные MCP-операции, не перенос приёмки.
+
+`cancel` запрещён, пока есть активная/`recovery_required` попытка или неразобранный инвентарь начатого перехода. `closure` хранит disposition, note/evidence, actor/time, continuation, `revision`, `withdrawn_proposal_id`. Разобранный открытый переход архивируется с phase `cancelled`, proposal очищается, grant отзывается. Оба disposition дают терминальный `status="cancelled"`, не `completed`; `agree/propose/claim/resume/activate/authorize` получают `work_terminal`. Get/history остаются доступны. `link` разрешён как аннотация и после закрытия, но не возобновляет исполнение.
+
+Связи — утверждения оператора: `target_verification="not_performed"`, `reciprocal_link="unverified"` **даже после записи обоих направлений**. Нет открытия чужой области, передачи прав чтения, согласований, grant или приёмки. `show WORK --format markdown` показывает closure, continuation и predecessors. Независимая приёмка относится только к дочерней карточке; применение результата — отдельное явное действие оператора.
+
+#### Проверка и граница локальной упаковки
+
+```sh
+uv run --frozen pytest -q -s -p no:cacheprovider tests/test_work_integration.py -k 'test_plan_transition_end_to_end_through_mcp_and_operator_cli or test_outer_nested_repository_handover_cli_mcp'
+```
+
+Сценарии используют настоящий Git, FastMCP и CLI-подпроцессы во временных репозиториях. Переход проверяется на двух **ручных** попытках с сохранением байтов, ограждением и новыми claim; проверки managed stop-confirmation и preservation — отдельные store/workspace-регрессии. Эти команды не проверяют live-provider replan или процесс со счётным внешним эффектом через управляемую смену плана. [Проверка совместимости](compatibility.md) использует закреплённый OMP и изолированный localhost fixture.
+
+3.7.0 — **локальное предложение minor-версии** с новыми командами и иной семантикой `propose`. `uv build --wheel`, `uv run --frozen python scripts/package.py` и `package.py --check` готовят/проверяют локальные артефакты. Упаковка, тесты и независимая приёмка не создают тег, не публикуют релиз, не устанавливают пакет в пользовательскую сессию и не применяют результат. Решение о публикации принадлежит оператору. [Два исходных запроса](spec/plan-transition-and-git-root-2026-09-12.md) сохранены дословно с provenance; решения реализации описаны здесь и в CHANGELOG.
 
 ### Карточка, блокеры и приватные права попытки
 
@@ -586,7 +665,7 @@ tandem_work(
 
 Блокер создают через `block` с `step_id`, непустыми `note` и `condition` — что мешает и при каком условии можно продолжить. Его автор снимает блокер через `unblock` с `blocker_id`, `resolution` и непустым `evidence`; оба действия также требуют свежие `expected_revision` и `operation_id`. При обычном снятом блокере без неопределённого исполнения доступные шаги могут продолжаться в рамках оставшегося разрешения. Блокировка активной попытки, напротив, запрещает ей публиковать результат и может потребовать операторского восстановления.
 
-`propose` сохраняет ID, исходный план/шаг и историю нерешённых блокеров; при удалении шага блокер переходит на уровень карточки и запрещает исполнение и публикацию всех шагов. Согласовать корректирующий план можно и при блокере, но согласование, повторная попытка и смена стадии его не снимают. Только автор блокера или оператор может записать решение либо `resolution="not_applicable"` с причиной в `note` и доказательствами. Для блокера карточки в `unblock` не передавайте `step_id`. Заблокированный результат нельзя submit/accept.
+Предложение и активация сохраняют ID, исходный план/шаг и историю нерешённых блокеров. Только активация плана с удалённым шагом переносит его блокер на уровень карточки и запрещает исполнение/публикацию всех шагов. Согласовать действующий корректирующий план можно и при блокере, но согласование, повторная попытка и смена стадии его не снимают. Только автор блокера или оператор вправе решить его с доказательствами либо указать `resolution="not_applicable"` с причиной в `note`. Для блокера карточки не передавайте `step_id`; заблокированную работу нельзя сдать или принять.
 
 Если действующий исполнитель сам сообщает блокер и корректно завершает попытку с исходом `blocked`, контроллер сохраняет промежуточный коммит как `checkpoint`, подтверждает завершение процесса и освобождает слот. После снятия блокера новая попытка продолжает эти сохранённые правки, а не начинает модуль с нуля. Это не приёмка результата. Внешняя остановка, потерянное подтверждение, неизвестная стоимость или незавершённые эффекты по-прежнему требуют восстановления оператором.
 

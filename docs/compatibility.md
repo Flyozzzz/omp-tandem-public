@@ -2,15 +2,44 @@
 
 The pinned combination is **official OMP 18.1.13** with the Python RPC SDK
 at **`daf07999c2fee9b22edc7bf8fea1fb6272e0df5e`**. The checked-in
-[local verification report](compatibility-result.json) passed on Darwin arm64 /
-Python 3.13. Its `tandem`, `provenance` and installed-flow `runtime_identity`
-fields identify the exercised bytes and environments. This is evidence for that
-exact combination, not a supported-version range or proof of every provider. The report also contains the
+[local verification report](compatibility-result.json) passed for the **local 3.7.0 proposal**
+on **Darwin 25.5.0 arm64 / Python 3.13.5**, on 2026-09-12: 18 checks passed in
+29.436 seconds, `phase="complete"`, `probes="passed"`, `failure_class=null`.
+Its `tandem`, `provenance` and installed-flow `runtime_identity` fields identify
+the exercised bytes and environments. This is evidence for that exact combination,
+not a published release, a supported-version range or proof of every provider. The report also contains the
 stage-G0 helper (native `task` subagent) probes described in
 [helper-compatibility.md](helper-compatibility.md); their capability gates are
 recorded separately from check success and `delegation.available` is `false`.
 CI runs the same verifier on Linux and macOS; consult its actual run result
 rather than treating the presence of a workflow as a pass.
+
+The observed binary was `/opt/homebrew/Cellar/omp/18.1.13/bin/omp`, reporting
+`omp/18.1.13`; no download or global installation was needed.
+
+| Observation | Exact value |
+|---|---|
+| Official Darwin arm64 OMP SHA-256 | `a4c5c9cc5b8222184d0d7429b0bb6ac2a92bbe45dd11bf68e4b1360050791909` |
+| Tested wheel | `omp_tandem-3.7.0-py3-none-any.whl` |
+| Wheel SHA-256 | `614b236231862edc23463ebeccd137bef75bd832e426e45a4c0a2c2019c80861` |
+| Installed runtime | `package_version=3.7.0`, `distribution_origin=installed_wheel` |
+| Installed exact build | `sha256:9e922288627d5b428e8ec9df150646228118f12c1743c39a54f2cf5886444d31` |
+| Exact-build source | `verified_distribution_record` |
+| Runtime protocols | `work-v2-presentation`, `independent-first-v1` |
+| Verifier SHA-256 | `4fbc4737c54b3535e1c72dc3e22d1f5fd89c0d17d80fdeb6621940ac4d962d4b` |
+| Frozen lock SHA-256 | `89e4575609eec9fb66f59be5425252a9c314cafb65eff58df510572d6a52eb09` |
+
+The isolated installed-wheel shared-flow check passed in 9.768 seconds. Its
+recorded distribution path is a removed disposable environment, not the current
+client's runtime or a plugin installation. Both source and installed versions
+were 3.7.0. Registered schema identities and observed wire census remain separate
+evidence; `runtime_identity.schema_digests.compatibility="not_assessed"` is not
+rewritten to a universal compatibility claim.
+
+The console's “Missing structured outcome” failure is the deliberately exercised
+negative case, not a failed overall run. Expected refusal diagnostics and
+Authlib deprecation warnings are retained. Helper checks passing means the probes
+executed; the same five capability gates remain unsatisfied.
 
 ## Reproduce without provider credentials
 
@@ -167,10 +196,32 @@ For a release report refresh, use an actual completed passing run and preserve
 failed attempts separately. Keep versions, digests, observations and unsupported
 verdicts. `provenance` records the exact command and verifier/lock hashes; fixture
 paths and install/CLI output remain evidence, not portable installation paths.
-The proposed 3.6.0 refresh adds schema and installed-runtime evidence. Build the
-wheel/archive with `uv run --frozen python scripts/package.py --output /tmp/tandem-int-dist`,
-then pass the resulting wheel via `--installed-wheel` together with the pinned
-`--omp` path. Packaging and installation do not publish or apply a release.
+For the local 3.7.0 refresh, the actual command was run from the proposal worktree:
+
+```sh
+uv run --frozen python scripts/verify_omp.py \
+  --omp /opt/homebrew/Cellar/omp/18.1.13/bin/omp \
+  --cache-dir /Users/flyoz/itquick-aihub/omp-tandem-public/.worktrees/omp/.compat-370-final-9kdTNv \
+  --report docs/compatibility-result.json \
+  --installed-wheel dist/omp_tandem-3.7.0-py3-none-any.whl
+```
+
+The cache above was disposable and removed after the run; choose your own writable
+disposable directory when reproducing. First build with `uv build --wheel` or
+`uv run --frozen python scripts/package.py`. After updating the report and this
+page, regenerate the source manifest/archive with `package.py` and verify with
+`package.py --check`; the JSON's tested wheel digest identifies runtime evidence,
+while the final archive also includes the refreshed documentation. Packaging and
+the verifier's isolated installation do not publish a release, install a plugin
+into a user session or apply code to a user checkout.
+
+The separate [documented CLI/MCP end-to-end scenarios](guide.md#repository-handover)
+exercise manual plan transition and outer/nested repository handover. They are not
+part of this real-binary verifier's installed-flow coverage. No live-provider
+replan scenario or counted external-effect process across managed replan was run
+by these commands. Managed stop-confirmation gates and saved-byte preservation
+have separate store/workspace regression coverage; do not combine these boundaries
+into a claim of an external-provider end-to-end run.
 
 ## Pin sources
 

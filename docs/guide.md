@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Package 3.6.0 (released 2026-09-12)** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Package 3.7.0 (local proposal, 2026-09-12; not published)** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -488,7 +488,88 @@ Both participants read and agree to the exact plan revision:
 {"request": {"action": "agree", "work_id": "<work-id>", "expected_revision": 1, "operation_id": "claude-agrees-feature-42", "note": "The recorded scope and criteria match our chosen approach."}}
 ```
 
-The other participant uses **its own seat** and a freshly read `revision`; a caller cannot supply `actor` in tool arguments. Every mutation needs the current `expected_revision` and a stable `operation_id`. Repeating exactly the same operation recovers its receipt; reusing its ID with different content is a conflict. Progress changes `revision`; substantive `propose` changes `plan_revision`, invalidates agreements/current acceptance, revokes the old execution grant and fences old attempts. Historical reports remain available through `history`. No silent merging of conflicting plans or expansion of permissions.
+The other participant uses **its own seat** and a freshly read `revision`; a caller cannot supply `actor` in tool arguments. Every MCP mutation needs the current `expected_revision` and a stable `operation_id`. Repeating exactly the same operation recovers its receipt; reusing its ID with different content is a conflict. Progress changes `revision`; a differing `propose` records a pending proposal, **not** a new active `plan_revision`. Only operator activation changes the active plan, resets agreements/current acceptance and revokes the old grant. Historical reports remain available through `history`. No silent merging of conflicting plans or expansion of permissions.
+
+<a id="plan-transitions"></a>
+### Pending plans and operator transitions
+
+Send MCP `propose` with the complete new `plan`, current `expected_revision`, a new `operation_id` and a reason in `note`. Until operator activation, `card.plan` and `plan_revision` remain active: proposing alone does not interrupt attempts, invalidate agreements or revoke authorization. `card.proposal` records `proposal_id`, `base_plan_revision` and `preview` with `card_wide=true`, all affected `attempts`, and `changed_steps` / `removed_steps` / `added_steps`. The preview is an observation, not a permanent inventory: begin checks current execution again. Even unchanged steps are affected by the card-wide transition.
+
+A new differing proposal replaces the pending one. Proposing the **current active plan** withdraws a pending proposal before begin. During an open transition every `propose` fails with `transition_in_progress`; the frozen proposal cannot be replaced by an agent. `agree` still concerns the active revision, not the pending proposal.
+
+Only the **operator CLI** may begin, resolve, activate or withdraw a transition, cancel/link cards, reconcile execution or authorize autonomous work. Agents propose, report, submit and independently review; they may show commands, not attest their own stop or assume operator authority. Use the prepared package interpreter (`uv run --frozen python` in this checkout). Global `--project-root` and optional `--state-dir` go before the command and must identify the same store as MCP.
+
+The following is command syntax, not a script to run with placeholder evidence. Replace `ROOT`, `STATE`, `WORK`, `PROPOSAL`, `TRANSITION`, `ATTEMPT` and `N` with observed values; `N` is the **card revision**, not `plan_revision`. Re-read after every mutation. Square brackets indicate optional arguments; `|` separates alternatives:
+
+```text
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK inspect
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK begin --proposal PROPOSAL [--expected-revision N] [--operation-id ID] --note NOTE
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK resolve --transition TRANSITION --attempt ATTEMPT --note NOTE --evidence EVIDENCE [--confirm-stopped] [--abandon] [--saved-commit SHA] [--expected-revision N] [--operation-id ID]
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK activate (--transition TRANSITION | --proposal PROPOSAL) [--expected-revision N] [--operation-id ID] --note NOTE
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK withdraw (--transition TRANSITION | --proposal PROPOSAL) [--expected-revision N] [--operation-id ID] --note NOTE
+```
+
+Prefer both optional safety flags: `--expected-revision` refuses a moved card; `--operation-id` fingerprints the **whole command**, including revision, note/evidence and optional flags. An exact replay returns the historical `replayed_operation.outcome`, alongside current state, without repeating effects. A different command under that ID is refused. After a conflict, inspect and decide again; do not change arguments while retaining an old ID.
+
+`get` exposes `operator_commands` with the prepared interpreter, quoted root/state, exact IDs and observed revision; `transition inspect` exposes these as `commands`, plus inventory and stop requirements. Fill in real note/evidence and, if wanted, a fresh operation ID. `next_actions` carries a `transition` hint with `allowed=false`, `blocked_reason="operator_required"`: discoverability is not permission.
+
+1. **Begin:** freezes the proposal, inventories every active and already `recovery_required` attempt, and fences active credentials into `recovery_required`. No new claim may start during the open transition. Other cards are not quiesced by this command.
+2. **Stop and inspect effects:** managed attempts require the existing supervisor's `process_confirmed_gone` teardown evidence (`stop.source="supervisor_confirmed"`). A heartbeat, silence or model assertion is not stop evidence. Supervisor teardown confirms **process stop, not absence of external effects**. The operator must inspect outputs and possible external effects before recording a disposition. Manual attempts require `--confirm-stopped` and record `operator_attested`; that flag cannot replace managed supervisor confirmation.
+3. **Resolve every inventory entry:** supply meaningful `--note` and one or more `--evidence` flags. Default disposition is `superseded`; `--abandon` records `abandoned`, adds an operator blocker and **pauses the card**. This is not acceptance or replay. Managed implementation workspaces are preserved through `WorkWorkspace.preserve` on their recorded composed base, with the same ownership/byte checks as submission; failures remain in `saved.capture_failure`. Manual implementation can supply a full `--saved-commit`, validated in the pinned repository like a submission. Saved output, reports and intents are evidence, not automatically accepted results.
+4. **Activate:** use the frozen `--transition` only after every inventory entry has a disposition and no active/recovery-required attempts remain. Without a begun transition, `--proposal` is allowed only when nothing executes or requires recovery. Activation installs a new draft plan revision, clears agreements/current acceptance, carries unresolved blockers (removed-step blockers become card-wide), revokes authorization and **preserves any existing pause**, including abandonment/unknown-cost pauses. Both participants must agree again; resolve blockers, explicitly `resume` if paused, and obtain fresh operator authorization before managed execution.
+5. **Continue saved results, not commands:** transition history records each superseded attempt's continuation: `checkpoint` when validated saved changes fit the new step ownership; `blocked` if the step was removed or ownership excludes saved changes; `not_available` if there are no validated saved bytes, including capture failure. These are continuation outcomes, not automatic card blockers or proof that effects are resolved. Inspect failures and remaining work before proceeding. A checkpoint retains its commit/base and operator evidence and is returned to the new claim; it is not a submission or transferred acceptance. No old command is automatically replayed.
+
+Before begin, `withdraw --proposal` only drops the proposal. After begin, `withdraw --transition` archives it as withdrawn but leaves **sticky quiescence**: fenced attempts still need operator reconciliation, and an existing pause needs explicit resume. Withdrawal never revives old credentials or undoes external effects. `reconcile WORK STEP --resolution retry|abandon --confirm-stopped --note ... --evidence ...` remains the emergency **operator** fallback, not an agent escape hatch; `retry` permits a deliberate new attempt under the remaining gates, while `abandon` leaves a blocker and pause.
+
+<a id="repository-handover"></a>
+### Pinned repositories, diagnostics and truthful closure
+
+Creation records `repository{project_root, scope_id, provenance, initial_observation}`; the observation contains `status="verified"|"unverified"`, `git_toplevel`, `head` and action/time provenance. `repository_observation` is refreshed at create/propose/claim. These are observations of the **pinned launch root**, not permission to repin a card or source commit.
+
+Declared `owned_files` and exact `review_context_paths` are checked at create/propose and again at claim, including existing ancestors of new paths. Nested repositories, `.git` files/worktrees and submodule contents are separate boundaries. Owning the parent's submodule **gitlink entry itself** is allowed by this declared-path check; this does not remove the existing managed-snapshot submodule refusal. Symlinks are refused with the offending path/root/link, never dereferenced. Unrelated nested repositories are not scanned or rejected.
+
+For example, a child boundary produces:
+
+```text
+Declared path 'child/new/file.py' belongs to detected repository boundary /outer/child, not pinned root /outer. Launch Tandem at /outer/child and create a separate card in that scope; do not repin this card. The child repository was not opened or searched.
+```
+
+A non-Git root may retain a **pathless** planning card with an `unverified` observation; declared-path plans and all claims require a valid Git root with HEAD. A task `cwd` cannot repair the launch binding. If the mismatch was not knowable from declared paths, an unresolved submission fails **before submission intent**, with a bounded Git cause:
+
+```text
+Submitted commit SHA could not be resolved in pinned repository /outer: GIT_CAUSE. Verify the exact hash in this repository. If work belongs to a nested or different repository, launch Tandem there, create a separate card, and ask the operator to stop/dispose and cancel or supersede this card with continuation provenance; never substitute an unrelated commit. No other repository was searched.
+```
+
+Source-commit resolution errors are labelled `Source`, not `Submitted`. Full-hash, ancestry and changed-file ownership checks remain in force. Do not search foreign repositories, substitute a parent commit, transfer tokens or fake acceptance.
+
+Correct-scope handover:
+
+1. Inspect the pinned root/error. Stop and dispose the mistaken card's attempts (resolve an open transition, or pause via MCP then use operator emergency reconcile). **Cancel does not stop execution.**
+2. Launch a separate Tandem client at the actual child repository with HEAD; check `tandem_scope`, then MCP `create` a separately scoped card. It begins with fresh agreements and no inherited grant.
+3. The operator closes the old card in its own scope and records the predecessor in the successor's scope. Both commands require fresh card revision and operation ID; root/ID are separate options, so a colon in a path is not a separator:
+
+```text
+python -m omp_tandem.work_daemon --project-root OLD_ROOT [--state-dir STATE] cancel OLD_WORK --disposition cancelled|superseded --expected-revision N --operation-id ID --note NOTE --evidence EVIDENCE [--continuation-root ABSOLUTE_CHILD_ROOT --continuation-work-id CHILD_WORK]
+python -m omp_tandem.work_daemon --project-root CHILD_ROOT [--state-dir STATE] link CHILD_WORK --predecessor-root ABSOLUTE_OLD_ROOT --predecessor-work-id OLD_WORK --expected-revision N --operation-id ID --note NOTE --evidence EVIDENCE
+```
+
+4. Both child-scope participants `agree`; its owner `claim`s and `submit`s the actual full child commit; its distinct reviewer `claim`s, reads that exact result, records independent `report`, optionally `compare`s, then `accept`s or `reject`s the exact submission. These are the attached/manual MCP operations documented below, not an acceptance transfer.
+
+`cancel` refuses while any attempt is active/`recovery_required` or any begun-transition inventory remains undisposed. Closure records `disposition`, note/evidence, actor/time, optional continuation, `revision` and `withdrawn_proposal_id`; an open disposed transition is archived with phase `cancelled`, the proposal is cleared and the grant revoked. Both dispositions produce terminal `status="cancelled"`, not `completed`. `agree`, `propose`, `claim`, `resume`, activation and authorization fail with `work_terminal`; get/history remain readable. `link` may append provenance even after terminal closure but cannot reopen execution.
+
+Links are operator assertions: `target_verification="not_performed"`, `reciprocal_link="unverified"` **even after both directions are recorded**. Neither command opens the other scope or transfers read permission, agreements, grants or acceptance. `show WORK --format markdown` displays closure, continuation and predecessors. Independent acceptance belongs only to the child card; application remains a separate explicit operator action.
+
+#### Verification and local packaging boundary
+
+The reproducible CLI/MCP scenarios are:
+
+```sh
+uv run --frozen pytest -q -s -p no:cacheprovider tests/test_work_integration.py -k 'test_plan_transition_end_to_end_through_mcp_and_operator_cli or test_outer_nested_repository_handover_cli_mcp'
+```
+
+They use real Git, FastMCP clients and operator CLI subprocesses on disposable repositories. The transition scenario has two **manual** attempts, saved bytes, fencing and fresh claims; managed stop-confirmation gates and preservation are separate store/workspace regressions. These commands do not exercise a live-provider replan or a counted external-effect process across managed replan. Provider compatibility uses a pinned OMP binary and isolated localhost fixture; see [actual report and reproduction](compatibility.md).
+
+3.7.0 is a **local minor-version proposal** for new operator commands and changed `propose` semantics. `uv build --wheel` and `uv run --frozen python scripts/package.py` prepare local distributions; `package.py --check` checks source hashes. Neither packaging, tests nor independent acceptance tags, publishes, installs into a user session or applies the result. Only the operator decides publication. The two original requests are preserved separately, [verbatim with provenance](spec/plan-transition-and-git-root-2026-09-12.md); this guide and the changelog describe implementation decisions.
 
 ### Attached/manual work
 
@@ -552,7 +633,7 @@ Each worker must acknowledge its assignment through `heartbeat` before work. A l
 
 `block` records a note and a specific resolution condition; `unblock` requires the blocker ID, actual resolution and evidence. Dependencies open only after current prerequisite submissions are accepted—not merely when a native task exits. Cooperative blocked work can finish cleanly, retain its partial source checkpoint, release execution capacity and continue from that checkpoint after an evidenced unblock under the same still-valid grant. A checkpoint is not an accepted submission. Unknown termination, failed dispatch acknowledgement or possible unfinished external effects instead require reconciliation; they never become automatic retries.
 
-Unresolved blockers retain identity, original plan/step and resolution history across `propose`. Removing their step moves them to card scope, where they block all execution/publication. Both participants may agree to a corrective plan while blockers remain; agreement, retries and review-stage changes do not resolve them. Only the blocker author or operator may record evidence-backed resolution or `resolution="not_applicable"` with a reason in `note`. For a card-level blocker omit `step_id` when unblocking. Blocked work cannot be submitted or accepted.
+Unresolved blockers retain identity, original plan/step and resolution history through proposal and activation. Only activation of a plan that removes their step moves them to card scope, where they block all execution/publication. Both participants may agree to a corrective active plan while blockers remain; agreement, retries and review-stage changes do not resolve them. Only the blocker author or operator may record evidence-backed resolution or `resolution="not_applicable"` with a reason in `note`. For a card-level blocker omit `step_id` when unblocking. Blocked work cannot be submitted or accepted.
 
 #### Migration and rollback limits
 

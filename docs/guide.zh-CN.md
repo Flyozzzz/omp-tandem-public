@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**软件包 3.6.0（2026-09-12 发布）** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**软件包 3.7.0（2026-09-12 本地提案；尚未发布）** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -491,7 +491,86 @@ python -m omp_tandem.work_daemon --project-root /project --state-dir /state succ
 
 CAS 冲突表示卡片已变化：重新读取、理解变化，再用新 `operation_id` 提交有意的新操作。只有网络结果丢失、需要取回**相同请求回执**时才原样重发同一个操作 ID；不能修改负载后复用 ID，也不能因此重放编辑、shell 或模型启动。
 
-`propose` 同样携带完整 `plan`、当前 `expected_revision`、新 `operation_id`，可附 `note`。实质性改计划会推进 `plan_revision`，清除双方共识和当前验收状态，使旧尝试失效并撤销旧自主授权；必须重新确认，必要时先处理旧执行的不确定性，再重新授权。旧记录仍可从历史追溯。
+`propose` 携带完整 `plan`、当前 `expected_revision`、新的 `operation_id`，并以 `note` 说明理由。不同的计划保存为待定提案，**不会改变**当前 `plan_revision`、共识、尝试或授权。只有操作者激活后才安装新版本、清除当前共识／验收并撤销旧授权。历史报告保留。
+
+<a id="plan-transitions"></a>
+### 待定计划与操作者转换流程
+
+`card.plan` 和 `plan_revision` 是当前有效计划。`card.proposal` 保存 `proposal_id`、`base_plan_revision` 和 `preview`：`card_wide=true`、受影响的 `attempts`、`changed_steps` / `removed_steps` / `added_steps`。预览是提案时的观察；begin 会重新收集当前尝试。转换影响**整张卡片**，包括未修改步骤，不影响其他卡片。begin 之前旧计划继续执行；`agree` 确认的是当前有效版本，不是待定提案。
+
+新的不同提案会替换待定提案；提出**当前有效计划**会在 begin 前撤回待定提案。转换开启后，任何 `propose` 都以 `transition_in_progress` 拒绝，智能体不能替换或撤回已冻结计划。
+
+`transition begin/resolve/activate/withdraw`、`cancel`、`link`、`reconcile` 和 `authorize` 都是**操作者 CLI 命令**，不是智能体权限。智能体提出计划、报告、提交并独立审查；可以展示命令，但不能代表操作者确认自己已停止。使用软件包准备的 Python（本工作副本中用 `uv run --frozen python`）。全局 `--project-root` 和可选 `--state-dir` 放在子命令之前，必须指向 MCP 使用的同一存储。
+
+以下为命令语法，不是可用虚构证据直接执行的脚本。ROOT/STATE/WORK/PROPOSAL/TRANSITION/ATTEMPT 必须替换为观察到的值。`N` 是**卡片 revision**，不是 `plan_revision`；每次修改后重新读取。方括号表示可选参数，`|` 表示二选一：
+
+```text
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK inspect
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK begin --proposal PROPOSAL [--expected-revision N] [--operation-id ID] --note NOTE
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK resolve --transition TRANSITION --attempt ATTEMPT --note NOTE --evidence EVIDENCE [--confirm-stopped] [--abandon] [--saved-commit SHA] [--expected-revision N] [--operation-id ID]
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK activate (--transition TRANSITION | --proposal PROPOSAL) [--expected-revision N] [--operation-id ID] --note NOTE
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK withdraw (--transition TRANSITION | --proposal PROPOSAL) [--expected-revision N] [--operation-id ID] --note NOTE
+```
+
+建议同时使用两个保护参数：`--expected-revision` 拒绝已变化的卡片；`--operation-id` 对**完整命令**生成指纹，包括 revision、note/evidence 和可选参数。完全相同的重放返回历史 `replayed_operation.outcome` 及当前状态，不重复副作用；同一 ID 下不同命令会被拒绝。发生冲突后重新观察并决定，不要保留旧 ID 却改变参数。
+
+`get.operator_commands` 提供准备好的解释器、正确引用的 root/state、实际 ID 和观察到的 revision；`transition inspect` 将它们放在 `commands`，同时显示清单和停止要求。填入真实 note/evidence，需要时添加新 operation ID。`next_actions` 中 `action="transition"` 的提示带 `allowed=false`、`blocked_reason="operator_required"`：可发现不等于获准执行。
+
+1. **Begin：**冻结提案，清点所有活跃以及已有 `recovery_required` 的尝试，将活跃凭据隔离为 `recovery_required`。转换开启期间禁止新 claim；旧凭据不能发布新结果。
+2. **停止并检查副作用：**受管尝试需要 supervisor 的 `process_confirmed_gone` 证据，记录 `stop.source="supervisor_confirmed"`。静默、heartbeat 或模型陈述不能代替证明。Supervisor teardown 只确认**进程停止，不确认没有外部副作用**；操作者仍需检查输出和可能的效果。手动尝试必须传 `--confirm-stopped`，记录 `operator_attested`；此参数不能代替受管尝试的 supervisor 确认。
+3. **逐项 Resolve：**提供具体 `--note` 和一个或多个 `--evidence`。默认 disposition 为 `superseded`；`--abandon` 记录 `abandoned`、新增操作者阻塞并**暂停卡片**，不等于验收或重放。`WorkWorkspace.preserve` 在记录的组合基线上保存受管实现，使用提交的归属／字节验证；失败保留在 `saved.capture_failure`。手动实现可给出完整 `--saved-commit`，在固定仓库中按 submission 规则验证。保存的输出、报告和 intent 是证据，不自动成为已验收结果。
+4. **Activate：**`--transition` 要求冻结提案未变、清单全部处理且无活跃／`recovery_required` 尝试。没有 begin 时，只有不存在执行或待恢复尝试才允许 `--proposal`。激活安装新的草稿计划版本、清除共识／当前验收、保留阻塞（删除步骤的阻塞移至卡片级）、撤销 grant，并**保留已有暂停**，包括 abandon／未知费用引起的暂停。双方必须重新 agree；解除阻塞，暂停时显式 `resume`，受管执行还需新的操作者授权。
+5. **继续保存结果，而非重放命令：**历史为 superseded 尝试记录 `checkpoint`（已验证改动仍属于新步骤）、`blocked`（步骤删除或新归属不包含保存的文件）、`not_available`（没有已验证字节，包括 capture failure）。这些是继续使用结果的状态，**不会自动成为卡片阻塞**，也不证明副作用已经解决。继续前检查失败和剩余工作。Checkpoint 保留 commit/base 和操作者证据，交给新 claim；它不是 submission 或迁移的验收。不会自动重复旧命令。
+
+begin 前 `withdraw --proposal` 只移除提案。begin 后 `withdraw --transition` 将其归档为 withdrawn，但保留 **sticky quiescence**：被隔离尝试仍需操作者 reconcile，已有暂停需要显式 resume。不会恢复旧凭据或撤销外部副作用。应急后备仍是操作者 `reconcile WORK STEP --resolution retry|abandon --confirm-stopped --note ... --evidence ...`；`retry` 仅允许满足其余条件后的有意新尝试，`abandon` 留下阻塞和暂停。
+
+<a id="repository-handover"></a>
+### 固定仓库、诊断与如实关闭
+
+create 记录 `repository{project_root, scope_id, provenance, initial_observation}`；观察包含 `status="verified"|"unverified"`、`git_toplevel`、`head` 及动作／时间来源。`repository_observation` 在 create/propose/claim 刷新。这些观察**不会重新绑定**卡片或源提交。
+
+`owned_files` 和精确 `review_context_paths` 在 create/propose 及 claim 时验证，包括新文件路径已有的祖先目录。嵌套仓库、`.git` 文件/worktree、submodule 内容都是独立边界。此声明路径检查允许拥有父仓库的 submodule **gitlink 条目本身**，但不解除既有的受管快照 submodule 拒绝。Symlink 以路径/root/链接诊断拒绝，不解引用；无关嵌套仓库不会被扫描或拒绝。
+
+边界诊断格式示例：
+
+```text
+Declared path 'child/new/file.py' belongs to detected repository boundary /outer/child, not pinned root /outer. Launch Tandem at /outer/child and create a separate card in that scope; do not repin this card. The child repository was not opened or searched.
+```
+
+非 Git 根只允许**不声明路径**的规划，观察为 `unverified`；含路径计划和所有 claim 必须使用正确的、已有 HEAD 的 Git-root。任务 `cwd` 不能修复启动边界。若声明路径无法提前发现问题，不能解析的提交会在**记录 submission intent 之前**拒绝：
+
+```text
+Submitted commit SHA could not be resolved in pinned repository /outer: GIT_CAUSE. Verify the exact hash in this repository. If work belongs to a nested or different repository, launch Tandem there, create a separate card, and ask the operator to stop/dispose and cancel or supersede this card with continuation provenance; never substitute an unrelated commit. No other repository was searched.
+```
+
+源提交错误标为 `Source` 而非 `Submitted`，Git 原因限制长度。完整 hash、祖先关系和改动归属检查仍然有效；不要搜索其他仓库或替换成无关提交。
+
+正确作用域交接：
+
+1. 检查固定 root 和错误。通过已开启 transition 处理旧尝试，或 MCP `pause` 后由操作者 emergency reconcile，确认停止和副作用。**Cancel 本身不停止执行。**
+2. 在实际子 Git 仓库（已有 HEAD）启动独立 Tandem 客户端，检查 `tandem_scope`，通过 MCP `create` 建立独立卡片。共识为空，不继承 grant。
+3. 操作者在旧作用域关闭旧卡片，并在新作用域单独记录前任。两条命令都要求最新卡片 revision 和 operation ID；root/ID 分开传递，路径中的冒号不是分隔符：
+
+```text
+python -m omp_tandem.work_daemon --project-root OLD_ROOT [--state-dir STATE] cancel OLD_WORK --disposition cancelled|superseded --expected-revision N --operation-id ID --note NOTE --evidence EVIDENCE [--continuation-root ABSOLUTE_CHILD_ROOT --continuation-work-id CHILD_WORK]
+python -m omp_tandem.work_daemon --project-root CHILD_ROOT [--state-dir STATE] link CHILD_WORK --predecessor-root ABSOLUTE_OLD_ROOT --predecessor-work-id OLD_WORK --expected-revision N --operation-id ID --note NOTE --evidence EVIDENCE
+```
+
+4. 子作用域双方重新 `agree`；作者 `claim` 并 `submit` 实际完整子提交；不同审查者 `claim`、读取精确结果、写独立 `report`，至多一次可选 `compare`，再对精确 submission `accept`/`reject`。这些是下文的在线手动 MCP 操作，不是验收迁移。
+
+存在活跃／`recovery_required` 尝试或未处理的已开启转换清单时，`cancel` 被拒绝。`closure` 保存 disposition、note/evidence、actor/time、continuation、`revision` 和 `withdrawn_proposal_id`；已处理的开放转换以 phase `cancelled` 归档，清除 proposal 并撤销 grant。两种 disposition 均产生终态 `status="cancelled"`，不是 `completed`。`agree/propose/claim/resume/activate/authorize` 以 `work_terminal` 拒绝；get/history 仍可读。终态后允许 `link` 追加来源记录，但不能重新开启执行。
+
+链接是操作者陈述：`target_verification="not_performed"`、`reciprocal_link="unverified"`，**即使两个方向都已记录也不自动验证**。不打开其他作用域，不传递读取权限、共识、grant 或验收。`show WORK --format markdown` 显示 closure、continuation 和 predecessors。独立验收只属于子卡片；应用结果仍是单独显式的操作者动作。
+
+#### 验证与本地打包边界
+
+```sh
+uv run --frozen pytest -q -s -p no:cacheprovider tests/test_work_integration.py -k 'test_plan_transition_end_to_end_through_mcp_and_operator_cli or test_outer_nested_repository_handover_cli_mcp'
+```
+
+场景使用临时仓库中的真实 Git、FastMCP 客户端和 CLI 子进程。转换场景使用两个**手动**尝试，验证保存字节、隔离和新 claim；受管停止确认门槛和 preservation 由独立 store/workspace 回归覆盖。这些命令不验证 live-provider replan，也不验证跨受管计划转换的计数外部副作用进程。[兼容性验证](compatibility.md)使用固定 OMP 和隔离的 localhost fixture。
+
+3.7.0 是增加操作者命令并改变 `propose` 语义的**本地 minor 版本提案**。`uv build --wheel`、`uv run --frozen python scripts/package.py` 与 `package.py --check` 只准备／检查本地产物。打包、测试和独立验收不创建标签、不发布版本、不安装到用户会话，也不应用结果；只有操作者决定发布。[两份原始请求](spec/plan-transition-and-git-root-2026-09-12.md)按原文及来源保存；实现决策写在本指南和 CHANGELOG。
 
 ### 在线手动模式：领取、真实提交、独立审查
 
@@ -574,7 +653,7 @@ CAS 冲突表示卡片已变化：重新读取、理解变化，再用新 `opera
 
 普通阻塞被有证据地解除后，若没有不确定执行、任务未暂停且自主授权仍有效，控制器可继续选择就绪步骤；无需为了推进而重新发送通知。若 `block` 隔离了正在执行的尝试，则先走下文的操作者恢复流程。显式暂停具有粘性，计划确认、通知或重启控制器都不会自动撤销它。
 
-未解决阻塞的 ID、原始计划/步骤及历史跨 `propose` 保留；删除步骤后成为卡片级阻塞，阻止所有步骤执行或发布。双方可以确认纠正计划，但确认、重试、审查换阶段都不会解除阻塞。只有阻塞作者或操作者可凭证据解决，或用 `resolution="not_applicable"` 加 `note` 原因说明不再适用。解除卡片级阻塞时省略 `step_id`；被阻塞的工作不能 submit/accept。
+未解决阻塞的 ID、原始计划/步骤及历史在提案和激活过程中保留；只有激活删除了步骤的新计划时，阻塞才移至卡片级并阻止所有步骤执行／发布。双方可以确认当前纠正计划，但确认、重试、审查换阶段都不会解除阻塞。只有阻塞作者或操作者可凭证据解决，或用 `resolution="not_applicable"` 加 `note` 原因说明不再适用。解除卡片级阻塞时省略 `step_id`；被阻塞的工作不能 submit/accept。
 
 若当前执行者主动登记阻塞并以 `blocked` 正常结束，控制器会保留中间提交为 `checkpoint`、确认进程已退出并释放执行槽位。有证据地解除阻塞后，新尝试从该检查点继续已有改动，而非重新实现整个模块；检查点不等于验收。外部强制停止、丢失启动确认、未知费用或未确认的副作用仍需操作者恢复。
 
