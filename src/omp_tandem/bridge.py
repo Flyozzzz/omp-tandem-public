@@ -136,6 +136,7 @@ class Bridge:
             attempt_token=self.work_token,
             claims=self._work_claims,
             presentation=presentation,
+            origin={"host_owner": self.channel.owner},
         )
         if result.get("work_id") and result.get("revision") is not None:
             self.channel.store.acknowledge_work(

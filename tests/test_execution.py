@@ -6,6 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 from pydantic import ValidationError
 
@@ -263,3 +264,59 @@ class NativeExecutionTests(unittest.TestCase):
         self.assertEqual(usage["tokens"]["total"]["known_subtotal"], 40)
         self.assertIsNone(usage["tokens"]["total"]["value"])
         self.assertAlmostEqual(usage["cost"]["known_subtotal"], 0.4)
+
+
+class StopClassificationTests(unittest.TestCase):
+    ENVELOPE: ClassVar[dict] = {
+        "role": "assistant",
+        "content": [],
+        "stopReason": "error",
+        "errorId": 53248,
+        "errorMessage": (
+            "Codex error event: This content was flagged for possible cybersecurity "
+            "risk. If this seems wrong, try rephrasing your request. (code=cyber_policy)"
+        ),
+    }
+
+    def test_machine_coded_refusal_is_preserved_and_prose_is_not_classified(self):
+        from omp_tandem.execution import failure_fact, stop_record
+
+        record = stop_record(self.ENVELOPE, now=1.0)
+        self.assertEqual(record["classification"], "provider_policy_refusal")
+        self.assertEqual(
+            (record["error_code"], record["error_id"]), ("cyber_policy", 53248)
+        )
+        prose = stop_record(
+            {**self.ENVELOPE, "errorMessage": "Refused: cyber_policy applies here"},
+            now=1.0,
+        )
+        self.assertEqual(
+            (prose["classification"], prose["error_code"]), ("unclassified", None)
+        )
+        other = stop_record(
+            {**self.ENVELOPE, "errorMessage": "Rate limited (code=rate_limit)"}
+        )
+        self.assertEqual(
+            (other["classification"], other["error_code"]),
+            ("provider_error", "rate_limit"),
+        )
+        self.assertEqual(
+            stop_record({**self.ENVELOPE, "stopReason": "length"})["classification"],
+            "length",
+        )
+        self.assertIsNone(stop_record({"stopReason": "stop"}))
+        self.assertIsNone(stop_record(None))
+        settings = json.dumps({"requested": {}, "effective": {}, "stop": record})
+        self.assertEqual(
+            failure_fact(settings, "failed"),
+            {
+                "classification": "provider_policy_refusal",
+                "code": "cyber_policy",
+                "source": "assistant_message.errorMessage code suffix",
+            },
+        )
+        self.assertIsNone(failure_fact(settings, "completed"))
+        self.assertEqual(
+            failure_fact(None, "interrupted")["classification"], "unrecorded"
+        )
+        self.assertEqual(failure_fact(None, "cancelled")["classification"], "cancelled")

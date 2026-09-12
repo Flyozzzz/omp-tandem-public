@@ -8,6 +8,7 @@ import json
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -469,6 +470,365 @@ class WorkItemsTests(unittest.TestCase):
             ),
             before,
         )
+
+    def _recover(self, actor, origin, *, operation_id=None, step_id="backend"):
+        return self.store.perform(
+            {
+                "action": "recover",
+                "work_id": self.work_id,
+                "step_id": step_id,
+                "expected_revision": self.view()["revision"],
+                "operation_id": operation_id or str(uuid4()),
+            },
+            actor=actor,
+            origin=origin,
+        )
+
+    def _claim(self, actor, origin, *, step_id="backend"):
+        return self.store.perform(
+            {
+                "action": "claim",
+                "work_id": self.work_id,
+                "step_id": step_id,
+                "expected_revision": self.view()["revision"],
+                "operation_id": str(uuid4()),
+            },
+            actor=actor,
+            origin=origin,
+        )["claim"]
+
+    def _mutation(self, action, actor, origin, claims, **fields):
+        from omp_tandem.work_access import perform_work
+
+        return perform_work(
+            self.store,
+            {
+                "action": action,
+                "work_id": self.work_id,
+                "step_id": "backend",
+                "expected_revision": self.view()["revision"],
+                "operation_id": str(uuid4()),
+                **fields,
+            },
+            actor=actor,
+            claims=claims,
+            origin=origin,
+        )
+
+    def _stored_attempt(self, attempt_id):
+        with sqlite3.connect(self.store.database) as db:
+            return json.loads(
+                db.execute(
+                    "SELECT attempt FROM work_attempts WHERE attempt_id=?",
+                    (attempt_id,),
+                ).fetchone()[0]
+            )
+
+    def _store_attempt(self, attempt):
+        with sqlite3.connect(self.store.database) as db:
+            db.execute(
+                "UPDATE work_attempts SET attempt=? WHERE attempt_id=?",
+                (json.dumps(attempt), attempt["attempt_id"]),
+            )
+
+    def _attempt_rows(self):
+        with sqlite3.connect(self.store.database) as db:
+            return db.execute("SELECT count(*) FROM work_attempts").fetchone()[0]
+
+    def test_own_host_claim_recovers_and_foreign_hosts_are_refused(self):
+        self.agreed()
+        home = {"host_owner": "host-a"}
+        claim = self._claim("omp", home)
+        before = self.view()["revision"]
+        with self.assertRaisesRegex(ValueError, "recovery_not_authorized"):
+            self._recover("omp", {"host_owner": "host-b"})
+        with self.assertRaisesRegex(ValueError, "recovery_not_authorized"):
+            self._recover("claude", home)
+        with self.assertRaisesRegex(ValueError, "recovery_not_authorized"):
+            self._recover("omp", None)
+        self.assertEqual(self.view()["revision"], before)
+        command = {
+            "action": "recover",
+            "work_id": self.work_id,
+            "step_id": "backend",
+            "expected_revision": before,
+            "operation_id": str(uuid4()),
+        }
+        recovered = self.store.perform(command, actor="omp", origin=home)
+        self.assertEqual(recovered["claim"]["token"], claim["token"])
+        self.assertEqual(recovered["recovery"]["attempt_id"], claim["attempt_id"])
+        self.assertNotIn("token", json.dumps(recovered["recovery"]))
+        after = self.view()["revision"]
+        self.assertEqual(after, before + 1)
+        replay = self.store.perform(command, actor="omp", origin=home)
+        self.assertEqual(replay["claim"]["token"], claim["token"])
+        self.assertEqual(self.view()["revision"], after)
+        with self.assertRaises(WorkConflict):
+            self.store.perform(
+                {**command, "step_id": "frontend"}, actor="omp", origin=home
+            )
+        self.assertEqual(self._attempt_rows(), 1)
+        self.change("pause")
+        with self.assertRaisesRegex(ValueError, "recovery_claim_fenced"):
+            self._recover("omp", home)
+
+    def test_successor_closes_failed_native_review_without_execution(self):
+        self.agreed()
+        self.submit(self.reserve(autonomous=False), cost=None)
+        # The backend reviewer (claude) claimed through a native task's own tool.
+        origin = {
+            "host_owner": "claude-host",
+            "task_id": "task-1",
+            "conversation_id": "conv-1",
+        }
+        claim = self._claim("claude", origin)
+        submission_id = claim["submission"]["submission_id"]
+        author_text = self.store.perform(
+            {"action": "get", "work_id": self.work_id}, actor="operator"
+        )["steps"][0]["submission"]["answer"]
+        successor_host = {"host_owner": "omp-host"}
+        with self.assertRaisesRegex(ValueError, "recovery_not_authorized"):
+            self._recover("claude", origin)
+        with self.assertRaisesRegex(ValueError, "recovery_not_authorized"):
+            self._recover("omp", successor_host)
+        with self.assertRaises(ValueError):
+            self.store.authorize_successor(
+                claim["attempt_id"],
+                host_owner="omp-host",
+                principal="omp",
+                note="x",
+                actor="omp",
+            )
+        authorized = self.store.authorize_successor(
+            claim["attempt_id"],
+            host_owner="omp-host",
+            principal="omp",
+            note="Operator handoff",
+        )
+        successor_id = authorized["successor"]["successor_id"]
+        self.assertNotIn("omp-host", json.dumps(authorized["successor"]))
+        with self.assertRaisesRegex(ValueError, "recovery_stop_unconfirmed"):
+            self._recover("omp", successor_host)
+        self.assertEqual(
+            self.store.origin_settled(
+                "task-1", status="failed", teardown_confirmed=False
+            ),
+            [claim["attempt_id"]],
+        )
+        with self.assertRaisesRegex(ValueError, "recovery_stop_unconfirmed"):
+            self._recover("omp", successor_host)
+        stored = self._stored_attempt(claim["attempt_id"])
+        stored["binding"]["origin_settled"] = None
+        self._store_attempt(stored)
+        self.store.origin_settled("task-1", status="failed", teardown_confirmed=True)
+        from omp_tandem.work_access import perform_work
+        from omp_tandem.work_items import WorkPresentation
+
+        claims = {}
+        seen = perform_work(
+            self.store,
+            {"action": "get", "work_id": self.work_id, "step_id": "backend"},
+            actor="omp",
+            claims=claims,
+            presentation=WorkPresentation(view="step"),
+            origin=successor_host,
+        )
+        self.assertEqual(claims, {})
+        descriptor = seen["step"]["recovery"]
+        self.assertTrue(descriptor["origin"]["settled"]["teardown_confirmed"])
+        self.assertFalse(descriptor["successors"][0]["consumed"])
+        self.assertNotIn("token", json.dumps(descriptor))
+        hint = next(
+            item for item in seen["next_actions"] if item["action"] == "recover"
+        )
+        self.assertTrue(hint["allowed"])
+        with self.assertRaisesRegex(ValueError, "recovery_not_authorized"):
+            self._recover("claude", successor_host)
+        with self.assertRaisesRegex(ValueError, "recovery_not_authorized"):
+            self._recover("omp", {"host_owner": "another-host"})
+        recovered = self._mutation("recover", "omp", successor_host, claims)
+        self.assertEqual(claims[(self.work_id, "backend")], claim["token"])
+        self.assertTrue(recovered["recovery"]["successors"][0]["consumed"])
+        self.assertNotIn(author_text, json.dumps(recovered))
+        with self.assertRaisesRegex(ValueError, "recovery_not_authorized"):
+            self._recover("omp", successor_host)
+        with self.assertRaisesRegex(ValueError, "recovery_report_only"):
+            perform_work(
+                self.store,
+                {
+                    "action": "claim",
+                    "work_id": self.work_id,
+                    "step_id": "frontend",
+                    "expected_revision": self.view()["revision"],
+                    "operation_id": str(uuid4()),
+                },
+                actor="omp",
+                attempt_token=claim["token"],
+                origin=successor_host,
+            )
+        with self.assertRaisesRegex(ValueError, "recovery_report_only"):
+            self.store.perform(
+                {
+                    "action": "pause",
+                    "work_id": self.work_id,
+                    "expected_revision": self.view()["revision"],
+                    "operation_id": str(uuid4()),
+                },
+                actor="omp",
+                attempt_token=claim["token"],
+            )
+        reported = self._mutation(
+            "report",
+            "omp",
+            successor_host,
+            claims,
+            submission_id=submission_id,
+            resolution="success",
+            note="Closure on the preserved finding",
+            evidence=["artifact finding-1"],
+        )
+        self.assertNotIn(author_text, json.dumps(reported))
+        accepted = self._mutation(
+            "accept",
+            "omp",
+            successor_host,
+            claims,
+            submission_id=submission_id,
+            note="Accepted on preserved evidence",
+            evidence=["artifact finding-1"],
+        )
+        self.assertEqual(accepted["steps"][0]["state"], "accepted")
+        step = next(item for item in self.view()["steps"] if item["id"] == "backend")
+        self.assertEqual(step["acceptance"]["actor"], "claude")
+        self.assertEqual(
+            step["acceptance"]["recorded_by"],
+            {
+                "principal": "omp",
+                "successor_id": successor_id,
+                "scope": "report_only",
+                "on_behalf_of": "claude",
+            },
+        )
+        history = self.store.perform(
+            {"action": "history", "work_id": self.work_id}, actor="operator"
+        )["events"]
+        kinds = [event["kind"] for event in history]
+        self.assertIn("successor_authorized", kinds)
+        self.assertIn("claim_recovered", kinds)
+        accept_event = next(event for event in history if event["kind"] == "accept")
+        self.assertEqual(accept_event["actor"], "claude")
+        self.assertEqual(accept_event["details"]["recorded_by"]["principal"], "omp")
+        self.assertEqual(self._attempt_rows(), 2)
+        with self.assertRaisesRegex(ValueError, "recovery_claim_completed"):
+            self._recover("omp", successor_host)
+        usage = self.store.work_usage(self.work_id)
+        self.assertEqual(usage["linked_task_ids"], ["task-1"])
+        self.assertEqual(usage["coverage"], "unknown")
+        self.assertEqual(usage["unattributed"]["legacy_unlinked"], 1)
+
+    def test_recovery_refuses_changed_context_expired_and_legacy_claims(self):
+        self.agreed()
+        self.submit(self.reserve(autonomous=False), cost=None)
+        origin = {
+            "host_owner": "claude-host",
+            "task_id": "task-2",
+            "conversation_id": "conv-2",
+        }
+        claim = self._claim("claude", origin)
+        self.store.origin_settled("task-2", status="failed", teardown_confirmed=True)
+        self.store.authorize_successor(
+            claim["attempt_id"], host_owner="omp-host", principal="omp", note="handoff"
+        )
+        stored = self._stored_attempt(claim["attempt_id"])
+        stored["binding"]["successors"][0]["context"]["submission_id"] = "different"
+        self._store_attempt(stored)
+        with self.assertRaisesRegex(ValueError, "recovery_context_changed"):
+            self._recover("omp", {"host_owner": "omp-host"})
+        stored["binding"]["successors"][0]["context"]["submission_id"] = claim[
+            "submission"
+        ]["submission_id"]
+        stored["deadline"] = time.time() - 1
+        self._store_attempt(stored)
+        with self.assertRaisesRegex(ValueError, "recovery_claim_(expired|fenced)"):
+            self._recover("omp", {"host_owner": "omp-host"})
+        legacy = self._stored_attempt(claim["attempt_id"])
+        legacy.pop("binding")
+        legacy["deadline"] = time.time() + 3600
+        legacy["state"] = "reserved"
+        self._store_attempt(legacy)
+        with self.assertRaisesRegex(ValueError, "recovery_legacy_unbound"):
+            self._recover("claude", origin)
+        with self.assertRaisesRegex(ValueError, "recovery_legacy_unbound"):
+            self.store.authorize_successor(
+                claim["attempt_id"], host_owner="h", principal="omp", note="n"
+            )
+
+    def test_application_records_are_explicit_and_progress_never_runs_git(self):
+        self.agreed()
+        for spec in self.view()["plan"]["steps"]:
+            worker = self.reserve(spec["id"], actor=spec["owner"], autonomous=False)
+            self.submit(worker, cost=None)
+            self.verdict(
+                self.reserve(
+                    spec["id"], actor=spec["reviewer"], kind="review", autonomous=False
+                )
+            )
+        view = self.view()
+        self.assertEqual(view["status"], "completed")
+        self.assertEqual(view["application"]["status"], "not_recorded")
+        self.assertIn("not_recorded", view["next_action"])
+        self.assertNotIn("not merged", view["next_action"])
+        with self.assertRaises(ValueError):
+            self.store.record_application(self.work_id, {"kind": "guess"})
+        with self.assertRaises(ValueError):
+            self.store.record_application(
+                self.work_id, {"kind": "git_assessment"}, actor="claude"
+            )
+        recorded = self.store.record_application(
+            self.work_id,
+            {
+                "kind": "git_assessment",
+                "expected_head": "a" * 40,
+                "observed_head": "a" * 40,
+                "target_commit": view["result"]["commit"],
+                "relation": "descendant",
+                "observed_at": 1.0,
+            },
+        )
+        self.assertEqual(recorded["application"]["status"], "observed")
+        record = recorded["application"]["records"][0]
+        self.assertEqual(record["final_submission_id"], view["result"]["submission_id"])
+        self.assertIn("descendant", recorded["next_action"])
+        from omp_tandem.work_access import perform_work
+        from omp_tandem.work_items import WorkPresentation
+
+        with patch(
+            "omp_tandem.work_items.subprocess.run", side_effect=AssertionError("git")
+        ):
+            self.store.perform({"action": "get", "work_id": self.work_id}, actor="omp")
+            self.store.perform({"action": "list"}, actor="omp")
+            self.store.perform(
+                {"action": "history", "work_id": self.work_id}, actor="omp"
+            )
+            self.store.progress(self.work_id)
+            perform_work(
+                self.store,
+                {"action": "history", "work_id": self.work_id},
+                actor="omp",
+                presentation=WorkPresentation(limit=5),
+            )
+            rendered = perform_work(
+                self.store,
+                {"action": "get", "work_id": self.work_id},
+                actor="omp",
+                presentation=WorkPresentation(format="markdown"),
+            )["markdown"]
+        self.assertIn("## Application", rendered)
+        self.assertIn("git_assessment", rendered)
+        self.assertIn("## Agreements", rendered)
+        self.assertIn("Verdict: accepted", rendered)
+        self.assertIn("coverage: unknown", rendered)
+        self.assertNotIn("```json", rendered)
 
     def test_authorized_models_survive_reopen_and_cannot_change_active_attempt(self):
         self.agreed()
@@ -1132,8 +1492,10 @@ class WorkItemsTests(unittest.TestCase):
         proposed = self.change("propose", plan=replacement)
         self.assertEqual(proposed["blockers"][0]["blocker_id"], original["blocker_id"])
         self.assertEqual(proposed["blockers"][0]["origin"], original["origin"])
-        self.assertIn(original["blocker_id"], proposed["markdown"])
-        self.assertIn("omp or operator", proposed["markdown"])
+        rendered = self.store.report_markdown(proposed, actor="claude")
+        self.assertIn(original["blocker_id"], rendered)
+        self.assertIn("omp or operator", rendered)
+        self.assertNotIn("markdown", proposed)
         self.agreed()
         self.authorize()
         self.assertEqual(self.store.ready(self.work_id), [])

@@ -15,8 +15,9 @@ import re
 import secrets
 import sqlite3
 import subprocess
+import threading
 import time
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, suppress
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal, Self
 from uuid import uuid4
@@ -210,6 +211,10 @@ def redact_author(payload, bound: dict | None):
                 ]
         if view.get("result"):
             view["result"] = _withhold(view["result"])
+        if isinstance(view.get("recovery"), dict):
+            view["recovery"]["submission"] = _withhold(
+                view["recovery"].get("submission")
+            )
         view["visibility"] = "independent_stage"
         return view
     if (
@@ -429,6 +434,7 @@ class WorkCommand(_Model):
         "pause",
         "resume",
         "reconcile",
+        "recover",
     ]
     work_id: str | None = None
     step_id: str | None = None
@@ -521,6 +527,47 @@ def _public_attempt(attempt):
     }
 
 
+RECOVERY_ACTIONS = frozenset(
+    {"get", "history", "heartbeat", "block", "report", "compare", "accept", "reject"}
+)
+RECOVERY_CODES = (
+    "recovery_not_authorized",
+    "recovery_legacy_unbound",
+    "recovery_claim_completed",
+    "recovery_claim_fenced",
+    "recovery_claim_expired",
+    "recovery_context_changed",
+    "recovery_stop_unconfirmed",
+    "recovery_reconcile_required",
+)
+
+
+def _binding(command, origin):
+    """Durable manual-claim provenance; never dispatch authority."""
+    origin = origin or {}
+    return {
+        "version": 1,
+        "host_owner": origin.get("host_owner"),
+        "task_id": origin.get("task_id"),
+        "conversation_id": origin.get("conversation_id"),
+        "claim_operation_id": command.operation_id,
+        "bound_at": time.time(),
+        "origin_settled": None,
+        "successors": [],
+        "recoveries": [],
+    }
+
+
+def _recovery_context(attempt):
+    return {
+        "plan_revision": attempt["plan_revision"],
+        "source_commit": attempt.get("source_commit"),
+        "submission_id": (attempt.get("submission") or {}).get("submission_id"),
+        "review_stage": attempt.get("review_stage"),
+        "protocol": attempt.get("protocol"),
+    }
+
+
 class WorkPresentation(_Model):
     """Transport options, deliberately outside exact operation identity."""
 
@@ -563,6 +610,8 @@ def present_work(
                 "participant",
                 "bound_attempt",
                 "next_actions",
+                "recovery",
+                "application",
             )
             if key in payload
         }
@@ -736,6 +785,9 @@ class WorkStore:
     def __init__(self, database: Path, scope: ProjectScope):
         self.database = Path(database)
         self.scope = scope
+        # Per-thread delegation marker: set only while a successor host acts on a
+        # recovered claim, so recorded events name who actually recorded them.
+        self._local = threading.local()
         if (
             self.database != scope.directory / "tasks.sqlite3"
             or self.database.is_symlink()
@@ -1012,12 +1064,27 @@ class WorkStore:
                 step["state"] = "recovery_required"
                 step["attempt"]["state"] = "recovery_required"
         view["events"] = {"revision": card["revision"], "cursor": card["revision"]}
+        records = card.get("application") or []
+        view["application"] = {
+            # Acceptance never implies application; absence of a record is
+            # unknown/not_recorded, never a claim that nothing was applied.
+            "status": "observed" if records else "not_recorded",
+            "records": records,
+            "assessment": "explicit operator apply/assess CLI only; progress reads perform no Git assessment",
+        }
         view["next_action"] = (
             "Resume explicitly; fenced attempts require operator reconciliation."
             if card["status"] == "paused"
             else "Both principals must agree to this exact plan revision."
             if not self._agreed(card)
-            else "All steps independently accepted; output is not merged into the user's branch."
+            else (
+                "All steps independently accepted. Application to the user's checkout "
+                + (
+                    "is not_recorded; an explicit operator apply or assess records it."
+                    if not records
+                    else f"was last observed as {records[-1]['kind']} ({records[-1].get('relation') or 'applied'})."
+                )
+            )
             if card["status"] == "completed"
             else "Reconcile uncertain attempts; never replay possibly launched work."
             if any(step["state"] == "recovery_required" for step in view["steps"])
@@ -1034,36 +1101,98 @@ class WorkStore:
             if card["status"] == "completed"
             else None
         )
-        view = self._redact(db, view)
-        view["markdown"] = self._markdown(view)
-        return view
+        return self._redact(db, view)
 
     @staticmethod
-    def _markdown(view):
-        plan = view["plan"]
+    def _when(value):
+        if not isinstance(value, (int, float)):
+            return "unknown time"
+        return time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(value))
+
+    def report_markdown(
+        self, current, *, actor, attempt_token=None, usage=None, identity=None
+    ):
+        """Human report rendered from ALREADY projected material plus projected
+        history. Presentation happens after authorization and stage projection;
+        withheld author material stays withheld and nothing is narrated by a model.
+        """
+        with self._read_connection() as db:
+            bound = (
+                self._authenticate(db, attempt_token, actor) if attempt_token else None
+            )
+            rows = db.execute(
+                "SELECT event FROM work_events WHERE work_id=? ORDER BY revision",
+                (current["work_id"],),
+            ).fetchall()
+            attempt_steps = {
+                attempt["attempt_id"]: attempt["step_id"]
+                for attempt in self._attempts(db, current["work_id"])
+            }
+        events = redact_author(
+            {"events": [json.loads(row[0]) for row in rows]},
+            bound
+            if bound
+            else (
+                {"kind": "review", "protocol": "independent_first"}
+                if current.get("visibility") == "independent_stage"
+                else None
+            ),
+        )["events"]
+        previous = None
+        for event in events:
+            snapshot = event.pop("snapshot", None) or {}
+            details = event.get("details") or {}
+            step_id = details.get("step_id") or attempt_steps.get(
+                details.get("attempt_id")
+            )
+            if step_id is None and snapshot.get("steps"):
+                before = {
+                    step["id"]: step for step in (previous or {}).get("steps") or []
+                }
+                changed = [
+                    step["id"]
+                    for step in snapshot["steps"]
+                    if _json(step) != _json(before.get(step["id"]))
+                ]
+                step_id = changed[0] if len(changed) == 1 else None
+            event["step_id"] = step_id
+            previous = snapshot
+        plan = current["plan"]
         lines = [
             f"# {plan['title']}",
             "",
-            f"Work `{view['work_id']}` · revision {view['revision']} · plan {view['plan_revision']} · {view['status']}",
+            f"Work `{current['work_id']}` · revision {current['revision']} · plan {current['plan_revision']} · {current['status']}",
             "",
             plan["goal"],
         ]
-        if plan["context"]:
+        if plan.get("context"):
             lines.extend(["", "## Context", plan["context"]])
         for title, items in (
             ("Constraints", plan["constraints"]),
             ("Global acceptance", plan["acceptance"]),
         ):
             lines.extend(["", "## " + title, *("- " + item for item in items)])
-        if view["blockers"]:
+        lines.extend(["", "## Agreements"])
+        for principal in ("claude", "omp"):
+            record = current["agreements"].get(principal)
+            lines.append(
+                f"- {principal}: "
+                + (
+                    f"plan revision {record['plan_revision']} at {self._when(record['at'])}"
+                    if record
+                    else "not agreed"
+                )
+            )
+        unresolved = [
+            blocker for blocker in current["blockers"] if blocker["resolved_at"] is None
+        ]
+        if unresolved:
             lines.extend(["", "## Card blockers (apply to every step)"])
             lines.extend(
-                "- " + WorkStore._blocker_markdown(blocker)
-                for blocker in view["blockers"]
-                if blocker["resolved_at"] is None
+                "- " + WorkStore._blocker_markdown(item) for item in unresolved
             )
-        lines.extend(["", "## Checklist"])
-        for step in view["steps"]:
+        lines.extend(["", "## Steps"])
+        for step in current["steps"]:
             spec = next(item for item in plan["steps"] if item["id"] == step["id"])
             lines.extend(
                 [
@@ -1073,34 +1202,177 @@ class WorkStore:
                     "  Owned files: " + (", ".join(spec["owned_files"]) or "none"),
                 ]
             )
-            lines.extend(
-                "  - Acceptance: " + criterion for criterion in spec["acceptance"]
-            )
+            lines.extend("  - Acceptance: " + item for item in spec["acceptance"])
             lines.extend(
                 "  - " + WorkStore._blocker_markdown(blocker)
                 for blocker in step["blockers"]
                 if blocker["resolved_at"] is None
             )
-            if step["submission"]:
+            submission = step.get("submission")
+            if submission:
                 lines.append(
-                    "  Submission: "
-                    + step["submission"]["submission_id"]
-                    + " @ "
-                    + step["submission"]["commit"]
+                    f"  Submission: {submission['submission_id']} @ {submission['commit']}"
                 )
-            if step.get("acceptance"):
+            attempt = step.get("attempt")
+            if attempt:
+                lines.append(
+                    "  Attempt: "
+                    + f"{attempt['attempt_id']} {attempt['kind']} by {attempt['actor']} — {attempt['state']}; "
+                    + ("managed" if attempt.get("autonomous") else "manual")
+                    + (
+                        f"; protocol {attempt.get('protocol')} stage {attempt.get('review_stage')}"
+                        if attempt["kind"] == "review"
+                        else ""
+                    )
+                )
+            verdict = step.get("acceptance")
+            if verdict:
+                lines.append(
+                    f"  Verdict: accepted by {verdict.get('by', step['reviewer'])} at {self._when(verdict.get('at'))}"
+                )
                 lines.extend(
-                    "  - Evidence: " + item for item in step["acceptance"]["evidence"]
+                    "  - Evidence: " + str(item)
+                    for item in verdict.get("evidence") or []
                 )
+            history = [event for event in events if event["step_id"] == step["id"]]
+            if history:
+                lines.append("  History:")
+                for event in history:
+                    details = event.get("details") or {}
+                    extra = ", ".join(
+                        f"{key}={details[key]}"
+                        for key in (
+                            "resolution",
+                            "outcome",
+                            "submission_id",
+                            "reason",
+                            "code",
+                        )
+                        if details.get(key) is not None
+                    )
+                    note = details.get("note")
+                    lines.append(
+                        f"  - r{event['revision']} {self._when(event['created_at'])} {event['kind']} by {event['actor']}"
+                        + (f" ({extra})" if extra else "")
+                        + (
+                            f": {note}"
+                            if isinstance(note, str)
+                            else (" [note withheld]" if isinstance(note, dict) else "")
+                        )
+                    )
+        application = current.get("application") or {
+            "status": "not_recorded",
+            "records": [],
+        }
+        lines.extend(["", "## Application", f"Status: {application['status']}"])
+        for record in application["records"]:
+            lines.append(
+                f"- {record['kind']} at {self._when(record.get('recorded_at'))}: "
+                + ", ".join(
+                    f"{key}={record[key]}"
+                    for key in (
+                        "commit",
+                        "expected_head",
+                        "observed_head",
+                        "target_commit",
+                        "relation",
+                    )
+                    if record.get(key) is not None
+                )
+            )
+        if identity:
+            lines.extend(
+                [
+                    "",
+                    "## Runtime",
+                    f"- package {identity.get('package_version')} ({identity.get('distribution_origin')}, build {identity.get('exact_build')})",
+                    f"- protocols: work {identity.get('work_protocol')}, review {identity.get('review_protocol')}",
+                ]
+            )
+        if usage:
+            lines.extend(["", "## Usage (linked native turns only)"])
+            cost = usage["usage"]["cost"] if usage.get("usage") else None
+            lines.append(
+                f"- linked tasks: {usage['linked_task_count']}; coverage: {usage['coverage']}"
+            )
+            if cost:
+                lines.append(
+                    f"- native cost: value={cost['value']} known_subtotal={cost['known_subtotal']} ({cost['status']})"
+                )
+            for bucket, count in usage["unattributed"].items():
+                if count:
+                    lines.append(
+                        f"- {bucket}: {count} attempt(s) without linked turns (unknown cost)"
+                    )
         lines.extend(
             [
                 "",
                 "Acceptance records are attributed attestations; the store does not execute or certify checks.",
                 "",
-                view["next_action"],
+                current["next_action"],
             ]
         )
         return "\n".join(lines)
+
+    def work_usage(self, work_id):
+        """Distinct proven native turns of this work, each counted once.
+
+        Links come only from authenticated bindings (managed dispatch
+        native_task_id, native-tool claim origin task). Attempts without a
+        linked turn are reported as unattributed buckets; missing cost stays
+        unknown and makes coverage partial.
+        """
+        from .execution import conversation_usage
+
+        with self._read_connection() as db:
+            attempts = self._attempts(db, work_id)
+            task_ids, unattributed = (
+                [],
+                {"manual_claude": 0, "manual_omp": 0, "legacy_unlinked": 0},
+            )
+            for attempt in attempts:
+                linked = set()
+                if attempt.get("native_task_id"):
+                    linked.add(attempt["native_task_id"])
+                binding = attempt.get("binding") or {}
+                if binding.get("task_id"):
+                    linked.add(binding["task_id"])
+                for entry in binding.get("successors") or []:
+                    consumed = entry.get("consumed") or {}
+                    if consumed.get("task_id"):
+                        linked.add(consumed["task_id"])
+                if linked:
+                    task_ids.extend(linked)
+                elif not attempt.get("autonomous") and "binding" in attempt:
+                    unattributed[f"manual_{attempt['actor']}"] += 1
+                else:
+                    unattributed["legacy_unlinked"] += 1
+            task_ids = list(dict.fromkeys(task_ids))
+            rows = []
+            try:
+                for identifier in task_ids:
+                    row = db.execute(
+                        "SELECT * FROM tasks WHERE task_id=?", (identifier,)
+                    ).fetchone()
+                    if row is not None:
+                        rows.append(dict(row))
+            except sqlite3.OperationalError:
+                rows = []
+        usage = conversation_usage(rows) if rows else None
+        gaps = sum(unattributed.values()) + (len(task_ids) - len(rows))
+        return {
+            "work_id": work_id,
+            "linked_task_ids": task_ids,
+            "linked_task_count": len(rows),
+            "usage": usage,
+            "unattributed": unattributed,
+            "coverage": "unknown"
+            if usage is None
+            else "partial"
+            if gaps or usage["coverage"] != "complete"
+            else "complete",
+            "provenance": "distinct native turns proven by attempt bindings; no prompt parsing; Claude host turns are not metered here",
+        }
 
     def _record(self, db, card, kind, actor, details=None):
         self._refresh(card)
@@ -1124,7 +1396,17 @@ class WorkStore:
             "kind": kind,
             "actor": actor,
             "created_at": card["updated_at"],
-            "details": self._redact(db, details or {}),
+            "details": self._redact(
+                db,
+                {
+                    **(details or {}),
+                    **(
+                        {"recorded_by": delegation}
+                        if (delegation := getattr(self._local, "delegation", None))
+                        else {}
+                    ),
+                },
+            ),
             "snapshot": view,
         }
         db.execute(
@@ -1208,9 +1490,28 @@ class WorkStore:
         attempt = json.loads(row["attempt"])
         if not hmac.compare_digest(attempt["token_hash"], digest):
             raise ValueError("Invalid attempt credential")
-        if actor is not None and actor != attempt["actor"]:
+        if (
+            actor is not None
+            and actor != attempt["actor"]
+            and self._delegation(attempt, actor) is None
+        ):
             raise ValueError("Attempt belongs to a different principal")
         return attempt
+
+    @staticmethod
+    def _delegation(attempt, actor):
+        """The consumed successor authorization letting `actor` act on this claim."""
+        if attempt is None or actor == attempt["actor"]:
+            return None
+        for entry in (attempt.get("binding") or {}).get("successors") or []:
+            if entry.get("consumed") and entry["principal"] == actor:
+                return {
+                    "principal": actor,
+                    "successor_id": entry["successor_id"],
+                    "scope": entry["scope"],
+                    "on_behalf_of": attempt["actor"],
+                }
+        return None
 
     def _authenticate(self, db, token, actor=None):
         attempt = self._credential(db, token, actor)
@@ -1291,6 +1592,11 @@ class WorkStore:
                 submissions[snapshot["submission"]["submission_id"]] = snapshot[
                     "submission"
                 ]
+        with self._read_connection() as db:
+            card = self._load(db, current["work_id"])
+            step["recovery"] = self.recovery_descriptor(
+                db, card, self._step(card, step_id), bound=bound
+            )
         for name, records in (("attempts", attempts), ("submissions", submissions)):
             step[name] = list(records.values())[-limit:]
             if len(records) > limit:
@@ -1384,6 +1690,7 @@ class WorkStore:
         *,
         actor: str,
         attempt_token: str | None = None,
+        origin: dict | None = None,
     ) -> dict:
         command = WorkCommand.model_validate(command)
         if actor not in {"claude", "omp", "operator"}:
@@ -1396,130 +1703,158 @@ class WorkStore:
             if command.action in {"get", "list", "history"}
             else self._transaction
         )
-        with connection() as db:
-            bound = (
-                self._credential(db, attempt_token, actor) if attempt_token else None
-            )
-            if bound:
-                if command.work_id is None:
-                    command = command.model_copy(update={"work_id": bound["work_id"]})
-                if command.work_id != bound["work_id"] or command.action in {
-                    "create",
-                    "list",
-                    "claim",
-                    "agree",
-                    "resume",
-                    "reconcile",
-                }:
-                    raise ValueError(
-                        "Bound worker cannot mutate or enumerate unrelated work"
-                    )
-                if command.step_id is not None and command.step_id != bound["step_id"]:
-                    raise ValueError("Bound worker cannot act on another step")
-                if (
-                    command.action not in {"get", "history", "propose", "pause"}
-                    and command.step_id is None
-                ):
-                    command = command.model_copy(update={"step_id": bound["step_id"]})
-            if command.action == "list":
-                return {
-                    "items": [
-                        self._view(db, self._load(db, row["work_id"]))
-                        for row in db.execute(
-                            "SELECT work_id FROM work_cards ORDER BY work_id"
-                        )
-                    ]
-                }
-            if command.action in {"get", "history"}:
-                if bound:
-                    self._authenticate(db, attempt_token, actor)
-                card = self._load(db, command.work_id)
-                if command.action == "get":
-                    return redact_author(self._view(db, card), bound)
-                return redact_author(
-                    {
-                        "work_id": card["work_id"],
-                        "revision": card["revision"],
-                        "cursor": card["revision"],
-                        "events": [
-                            json.loads(row["event"])
-                            for row in db.execute(
-                                "SELECT event FROM work_events WHERE work_id=? AND revision>? ORDER BY revision",
-                                (card["work_id"], command.expected_revision or 0),
-                            )
-                        ],
-                    },
-                    bound,
+        self._local.delegation = None
+        try:
+            with connection() as db:
+                return self._perform_command(
+                    db, command, actor, attempt_token, origin, source_commit
                 )
-            fingerprint = _operation_fingerprint(command, bound)
-            receipt = db.execute(
-                "SELECT fingerprint,response FROM work_operations WHERE actor=? AND operation_id=?",
-                (actor, command.operation_id),
-            ).fetchone()
-            if receipt:
-                expected = (
-                    fingerprint
-                    if receipt["fingerprint"].startswith("v2:")
-                    else _operation_fingerprint(command, bound, version=1)
+        finally:
+            self._local.delegation = None
+
+    def _perform_command(
+        self, db, command, caller, attempt_token, origin, source_commit
+    ):
+        bound = self._credential(db, attempt_token, caller) if attempt_token else None
+        delegation = self._delegation(bound, caller)
+        # A successor host acts on behalf of the claim's principal, within its
+        # authorized reporting scope; receipts stay keyed by the real caller.
+        actor = bound["actor"] if delegation else caller
+        self._local.delegation = delegation
+        if delegation and command.action not in RECOVERY_ACTIONS:
+            raise ValueError("recovery_report_only")
+        if bound:
+            if command.work_id is None:
+                command = command.model_copy(update={"work_id": bound["work_id"]})
+            if command.work_id != bound["work_id"] or command.action in {
+                "create",
+                "list",
+                "claim",
+                "agree",
+                "resume",
+                "reconcile",
+            }:
+                raise ValueError(
+                    "Bound worker cannot mutate or enumerate unrelated work"
                 )
-                if receipt["fingerprint"] != expected:
-                    raise WorkConflict(
-                        "Operation ID was already used for a different command"
+            if command.step_id is not None and command.step_id != bound["step_id"]:
+                raise ValueError("Bound worker cannot act on another step")
+            if (
+                command.action not in {"get", "history", "propose", "pause"}
+                and command.step_id is None
+            ):
+                command = command.model_copy(update={"step_id": bound["step_id"]})
+        if command.action == "list":
+            return {
+                "items": [
+                    self._view(db, self._load(db, row["work_id"]))
+                    for row in db.execute(
+                        "SELECT work_id FROM work_cards ORDER BY work_id"
                     )
-                response = json.loads(receipt["response"])
-                # Credentials are never persisted in operation responses.
-                if command.action == "claim":
-                    attempt = self._attempt(db, response["claim"]["attempt_id"])
-                    if attempt["state"] in _ACTIVE:
-                        response["claim"]["token"] = attempt["token"]
-                    return _project_claim(response, attempt)
-                return redact_author(response, bound)
+                ]
+            }
+        if command.action in {"get", "history"}:
             if bound:
                 self._authenticate(db, attempt_token, actor)
-            if command.action == "create":
-                plan = command.plan.model_dump()
-                card = {
-                    "work_id": str(uuid4()),
-                    "revision": 0,
-                    "plan_revision": 1,
-                    "status": "draft",
-                    "plan": plan,
-                    "agreements": {},
-                    "steps": self._new_steps(plan),
-                    "blockers": [],
-                    "authorization": None,
-                    "created_at": time.time(),
-                    "updated_at": time.time(),
-                }
-                result = self._record(db, card, "created", actor)
-            else:
-                card = self._load(db, command.work_id)
-                if command.expected_revision != card["revision"]:
-                    raise WorkConflict(
-                        f"Expected revision {command.expected_revision}; current revision is {card['revision']}",
-                        current=redact_author(self._view(db, card), bound),
-                    )
-                result = self._perform(db, card, command, actor, bound, source_commit)
-            if command.action == "claim":
-                # The claimant becomes a bound reviewer at this moment: its own claim
-                # response (and any exact replay of it) must already be projected.
-                result = _project_claim(
-                    result, self._attempt(db, result["claim"]["attempt_id"])
-                )
-            saved = json.loads(_json(result))
-            if "claim" in saved:
-                saved["claim"].pop("token", None)
-            db.execute(
-                "INSERT INTO work_operations VALUES (?,?,?,?)",
-                (actor, command.operation_id, fingerprint, _json(saved)),
+            card = self._load(db, command.work_id)
+            if command.action == "get":
+                return redact_author(self._view(db, card), bound)
+            return redact_author(
+                {
+                    "work_id": card["work_id"],
+                    "revision": card["revision"],
+                    "cursor": card["revision"],
+                    "events": [
+                        json.loads(row["event"])
+                        for row in db.execute(
+                            "SELECT event FROM work_events WHERE work_id=? AND revision>? ORDER BY revision",
+                            (card["work_id"], command.expected_revision or 0),
+                        )
+                    ],
+                },
+                bound,
             )
-            if bound and command.action != "compare":
-                # Re-read the credential: report/compare change what may be shown.
-                bound = self._credential(db, attempt_token, actor)
-            return redact_author(result, bound)
+        fingerprint = _operation_fingerprint(command, bound)
+        receipt = db.execute(
+            "SELECT fingerprint,response FROM work_operations WHERE actor=? AND operation_id=?",
+            (caller, command.operation_id),
+        ).fetchone()
+        if receipt:
+            expected = (
+                fingerprint
+                if receipt["fingerprint"].startswith("v2:")
+                else _operation_fingerprint(command, bound, version=1)
+            )
+            if receipt["fingerprint"] != expected:
+                raise WorkConflict(
+                    "Operation ID was already used for a different command"
+                )
+            response = json.loads(receipt["response"])
+            # Credentials are never persisted in operation responses.
+            if command.action in {"claim", "recover"}:
+                attempt = self._attempt(db, response["claim"]["attempt_id"])
+                if command.action == "claim" and attempt["state"] in _ACTIVE:
+                    response["claim"]["token"] = attempt["token"]
+                elif command.action == "recover":
+                    # An exact recovery retry re-installs the credential only
+                    # while the same claim is still live and current.
+                    with suppress(ValueError):
+                        self._authenticate(db, attempt["token"])
+                        response["claim"]["token"] = attempt["token"]
+                return _project_claim(response, attempt)
+            return redact_author(response, bound)
+        if bound:
+            self._authenticate(db, attempt_token, actor)
+        if command.action == "create":
+            plan = command.plan.model_dump()
+            card = {
+                "work_id": str(uuid4()),
+                "revision": 0,
+                "plan_revision": 1,
+                "status": "draft",
+                "plan": plan,
+                "agreements": {},
+                "steps": self._new_steps(plan),
+                "blockers": [],
+                "authorization": None,
+                "created_at": time.time(),
+                "updated_at": time.time(),
+            }
+            result = self._record(db, card, "created", actor)
+        else:
+            card = self._load(db, command.work_id)
+            if command.expected_revision != card["revision"]:
+                raise WorkConflict(
+                    f"Expected revision {command.expected_revision}; current revision is {card['revision']}",
+                    current=redact_author(self._view(db, card), bound),
+                )
+            result = self._perform(
+                db, card, command, actor, bound, source_commit, origin=origin
+            )
+        if command.action in {"claim", "recover"}:
+            # The claimant becomes a bound reviewer at this moment: its own claim
+            # response (and any exact replay of it) must already be projected.
+            result = _project_claim(
+                result, self._attempt(db, result["claim"]["attempt_id"])
+            )
+        saved = json.loads(_json(result))
+        if "claim" in saved:
+            saved["claim"].pop("token", None)
+        db.execute(
+            "INSERT INTO work_operations VALUES (?,?,?,?)",
+            (caller, command.operation_id, fingerprint, _json(saved)),
+        )
+        if bound and command.action != "compare":
+            # Re-read the credential: report/compare change what may be shown.
+            bound = self._credential(db, attempt_token, actor)
+        return redact_author(result, bound)
 
-    def _perform(self, db, card, command, actor, bound, source_commit=None):
+    def _perform(
+        self, db, card, command, actor, bound, source_commit=None, origin=None
+    ):
         action = command.action
+        if action == "recover":
+            return self._recover(db, card, command, actor, origin)
         if action == "propose":
             if command.plan is None:
                 raise ValueError("Propose requires a complete plan")
@@ -1710,6 +2045,7 @@ class WorkStore:
                 owner_id="manual:" + actor,
                 autonomous=False,
                 source_commit=source_commit,
+                binding=_binding(command, origin),
             )
             result = self._record(
                 db, card, "claimed", actor, {"attempt_id": attempt["attempt_id"]}
@@ -1893,6 +2229,11 @@ class WorkStore:
                 verdict = {
                     "verdict": action,
                     "actor": actor,
+                    **(
+                        {"recorded_by": delegation}
+                        if (delegation := getattr(self._local, "delegation", None))
+                        else {}
+                    ),
                     "submission_id": command.submission_id,
                     "plan_revision": card["plan_revision"],
                     "note": command.note,
@@ -2193,7 +2534,9 @@ class WorkStore:
                     return "successful_report_required"
         return None
 
-    def next_actions(self, current, *, actor, attempt_token=None, claims=None):
+    def next_actions(
+        self, current, *, actor, attempt_token=None, claims=None, origin=None
+    ):
         """Hints share the reservation/stage gates; they confer no authority."""
         if "plan" not in current or actor not in {"claude", "omp"}:
             return []
@@ -2255,18 +2598,31 @@ class WorkStore:
                         credential = self._authenticate(db, token, actor)
                     except ValueError:
                         add("claim", step, kind, reason="capability_retired")
-                        continue
                 if not credential:
-                    reason = self._claim_reason(card, step, attempts)
-                    if reason is None and bool(step["submission"]) != (
-                        kind == "review"
-                    ):
-                        reason = (
-                            "awaiting_review"
-                            if step["submission"]
-                            else "submission_required"
-                        )
-                    add("claim", step, kind, reason=reason)
+                    if not token:
+                        reason = self._claim_reason(card, step, attempts)
+                        if reason is None and bool(step["submission"]) != (
+                            kind == "review"
+                        ):
+                            reason = (
+                                "awaiting_review"
+                                if step["submission"]
+                                else "submission_required"
+                            )
+                        add("claim", step, kind, reason=reason)
+                    if step.get("attempt"):
+                        # A live claim nobody here holds: show whether this caller
+                        # could recover it and why not; the hint grants nothing.
+                        code, live = self._recovery_target(db, card, step)
+                        if live is not None and code != "recovery_claim_completed":
+                            if code is None:
+                                try:
+                                    self._recovery_authorization(
+                                        live, actor, origin, None
+                                    )
+                                except ValueError as error:
+                                    code = str(error)
+                            add("recover", step, live["kind"], reason=code)
                     continue
                 reason = None
                 if credential["step_id"] != step["id"] or credential["kind"] != kind:
@@ -2348,6 +2704,7 @@ class WorkStore:
         owner_id,
         autonomous,
         source_commit=None,
+        binding=None,
     ):
         if (
             not owner_id
@@ -2476,6 +2833,7 @@ class WorkStore:
             "submission_intent": None,
             "block_intent": None,
             "cost_recorded": False,
+            **({"binding": binding} if binding is not None else {}),
         }
         self._save_attempt(db, attempt)
         step.update(state="running", attempt=attempt["attempt_id"])
@@ -2976,6 +3334,267 @@ class WorkStore:
                     "error": attempt["error"],
                 },
             )
+
+    def _recovery_target(self, db, card, step):
+        """Refusal code for recovering the step's claim, or (None, attempt)."""
+        attempt = self._attempt(db, step["attempt"]) if step.get("attempt") else None
+        if attempt is None or attempt["state"] in {
+            "succeeded",
+            "blocked",
+            "reconciled",
+        }:
+            return "recovery_claim_completed", attempt
+        if attempt["autonomous"]:
+            return "recovery_reconcile_required", attempt
+        if attempt["state"] == "recovery_required" or card["status"] == "paused":
+            return "recovery_claim_fenced", attempt
+        if attempt["deadline"] <= time.time():
+            return "recovery_claim_expired", attempt
+        if attempt["plan_revision"] != card["plan_revision"]:
+            return "recovery_context_changed", attempt
+        if not attempt.get("binding"):
+            return "recovery_legacy_unbound", attempt
+        return None, attempt
+
+    def _recovery_authorization(self, attempt, actor, origin, operation_id):
+        """Direct host-level recovery or one exact consumed/consumable successor."""
+        binding = attempt["binding"]
+        origin = origin or {}
+        host = origin.get("host_owner")
+        if (
+            host is not None
+            and host == binding.get("host_owner")
+            and actor == attempt["actor"]
+            and binding.get("task_id") is None
+        ):
+            return None
+        for entry in binding.get("successors") or []:
+            consumed = entry.get("consumed")
+            if entry["host_owner"] != host or entry["principal"] != actor:
+                continue
+            if consumed and consumed["operation_id"] != operation_id:
+                continue
+            return entry
+        raise ValueError("recovery_not_authorized")
+
+    def recovery_descriptor(self, db, card, step, *, bound=None):
+        """Token-free recovery state for a step; the same stage projection applies."""
+        code, attempt = self._recovery_target(db, card, step)
+        if attempt is None:
+            return None
+        binding = attempt.get("binding") or {}
+        public = _public_attempt(attempt)
+        if independent_stage(bound):
+            public = _withhold(public) if attempt["kind"] == "implement" else public
+            public["submission"] = _withhold(public.get("submission"))
+        return {
+            "attempt_id": attempt["attempt_id"],
+            "step_id": step["id"],
+            "kind": attempt["kind"],
+            "actor": attempt["actor"],
+            "state": attempt["state"],
+            "mode": "managed" if attempt["autonomous"] else "manual",
+            "stage": attempt.get("review_stage"),
+            "protocol": attempt.get("protocol"),
+            "submission": public.get("submission"),
+            "deadline": attempt["deadline"],
+            "origin": {
+                "host_owner_bound": binding.get("host_owner") is not None,
+                "task_id": binding.get("task_id"),
+                "conversation_id": binding.get("conversation_id"),
+                "settled": binding.get("origin_settled"),
+            }
+            if binding
+            else None,
+            "requires_stop_confirmation": bool(
+                binding.get("task_id") and not binding.get("origin_settled")
+            ),
+            "successors": [
+                {
+                    key: entry[key]
+                    for key in ("successor_id", "principal", "scope", "authorized_at")
+                }
+                | {"consumed": bool(entry.get("consumed"))}
+                for entry in binding.get("successors") or []
+            ],
+            "recoveries": binding.get("recoveries") or [],
+            "refusal": code,
+            "allowed_actions": sorted(RECOVERY_ACTIONS - {"get", "history"}),
+            "path": "administrative closure by an authorized successor host; ordinary continuation is a separate explicit claim",
+        }
+
+    def _recover(self, db, card, command, actor, origin):
+        if actor not in {"claude", "omp"}:
+            raise ValueError("recovery_not_authorized")
+        step = self._step(card, command.step_id)
+        code, attempt = self._recovery_target(db, card, step)
+        if code:
+            raise ValueError(code)
+        successor = self._recovery_authorization(
+            attempt, actor, origin, command.operation_id
+        )
+        binding = attempt["binding"]
+        if binding.get("task_id") and not (binding.get("origin_settled") or {}).get(
+            "teardown_confirmed"
+        ):
+            raise ValueError("recovery_stop_unconfirmed")
+        if successor is not None:
+            if successor["context"] != _recovery_context(attempt):
+                raise ValueError("recovery_context_changed")
+            successor["consumed"] = successor.get("consumed") or {
+                "operation_id": command.operation_id,
+                "at": time.time(),
+                "host_owner": (origin or {}).get("host_owner"),
+                "principal": actor,
+                "task_id": (origin or {}).get("task_id"),
+            }
+        binding.setdefault("recoveries", []).append(
+            {
+                "operation_id": command.operation_id,
+                "at": time.time(),
+                "principal": actor,
+                "successor_id": successor["successor_id"] if successor else None,
+            }
+        )
+        self._save_attempt(db, attempt)
+        result = self._record(
+            db,
+            card,
+            "claim_recovered",
+            attempt["actor"],
+            {
+                "attempt_id": attempt["attempt_id"],
+                "step_id": step["id"],
+                "principal": actor,
+                "successor_id": successor["successor_id"] if successor else None,
+                "scope": successor["scope"] if successor else "own_claim",
+            },
+        )
+        result["claim"] = {**_public_attempt(attempt), "token": attempt["token"]}
+        # The recovered credential's own stage projection applies to its descriptor.
+        result["recovery"] = self.recovery_descriptor(db, card, step, bound=attempt)
+        return result
+
+    def authorize_successor(
+        self, attempt_id, *, host_owner, principal, note, actor="operator"
+    ) -> dict:
+        """Operator-only handoff of reporting authority for one exact live claim."""
+        if actor != "operator":
+            raise ValueError("Only the operator authorizes a recovery successor")
+        if principal not in {"claude", "omp"} or not host_owner or not note:
+            raise ValueError("Successor requires host owner, principal and note")
+        with self._transaction() as db:
+            attempt = self._attempt(db, attempt_id)
+            card = self._load(db, attempt["work_id"])
+            step = self._step(card, attempt["step_id"])
+            code, _ = self._recovery_target(db, card, step)
+            if code and code != "recovery_not_authorized":
+                raise ValueError(code)
+            entry = {
+                "successor_id": str(uuid4()),
+                "host_owner": host_owner,
+                "principal": principal,
+                "scope": "report_only",
+                "context": _recovery_context(attempt),
+                "authorized_at": time.time(),
+                "authorized_by": actor,
+                "note": note,
+                "consumed": None,
+            }
+            attempt["binding"]["successors"].append(entry)
+            self._save_attempt(db, attempt)
+            view = self._record(
+                db,
+                card,
+                "successor_authorized",
+                actor,
+                {
+                    "attempt_id": attempt_id,
+                    "step_id": step["id"],
+                    "successor_id": entry["successor_id"],
+                    "principal": principal,
+                    "scope": entry["scope"],
+                    "note": note,
+                },
+            )
+            return {
+                **view,
+                "successor": {k: v for k, v in entry.items() if k != "host_owner"},
+            }
+
+    def origin_settled(self, task_id, *, status, teardown_confirmed) -> list[str]:
+        """Lifecycle evidence from the native boundary: the origin turn is over."""
+        with self._transaction() as db:
+            settled = []
+            cards = {}
+            for attempt in self._attempts(db):
+                binding = attempt.get("binding") or {}
+                if binding.get("task_id") != task_id or binding.get("origin_settled"):
+                    continue
+                binding["origin_settled"] = {
+                    "at": time.time(),
+                    "task_status": status,
+                    "teardown_confirmed": bool(teardown_confirmed),
+                    "source": "native_worker.lifecycle",
+                }
+                self._save_attempt(db, attempt)
+                settled.append(attempt["attempt_id"])
+                cards.setdefault(attempt["work_id"], []).append(attempt["attempt_id"])
+            for work_id, identifiers in cards.items():
+                self._record(
+                    db,
+                    self._load(db, work_id),
+                    "origin_settled",
+                    "supervisor",
+                    {
+                        "task_id": task_id,
+                        "attempt_ids": identifiers,
+                        "task_status": status,
+                    },
+                )
+            return settled
+
+    def recovery_scope(self, token, actor):
+        """report_only when `actor` wields this credential as a successor."""
+        with self._read_connection() as db:
+            attempt = self._credential(db, token)
+        delegation = self._delegation(attempt, actor)
+        return delegation["scope"] if delegation else None
+
+    def record_application(self, work_id, record: dict, *, actor="operator") -> dict:
+        """Append one explicit apply receipt or Git assessment; never inferred."""
+        if actor != "operator":
+            raise ValueError("Only the operator records application observations")
+        if not isinstance(record, dict) or record.get("kind") not in {
+            "apply_receipt",
+            "git_assessment",
+        }:
+            raise ValueError(
+                "Application record kind must be apply_receipt or git_assessment"
+            )
+        with self._transaction() as db:
+            card = self._load(db, work_id)
+            final = self._step(card, self._final_step_id(card))["submission"]
+            entry = {
+                **record,
+                "record_id": str(uuid4()),
+                "recorded_at": time.time(),
+                "recorded_by": actor,
+                "plan_revision": card["plan_revision"],
+                "card_status": card["status"],
+                "final_submission_id": final["submission_id"] if final else None,
+                "final_commit": final["commit"] if final else None,
+            }
+            card.setdefault("application", []).append(entry)
+            return self._record(db, card, "application_observed", actor, entry)
+
+    def _final_step_id(self, card):
+        referenced = {
+            dependency for step in card["steps"] for dependency in step["depends_on"]
+        }
+        return next(
+            step["id"] for step in card["steps"] if step["id"] not in referenced
+        )
 
     def recover_owner(self, owner_id) -> list[dict]:
         with self._transaction() as db:

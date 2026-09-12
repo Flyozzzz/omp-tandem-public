@@ -9,7 +9,12 @@ from pathlib import Path
 from omp_rpc import RpcClient, host_tool
 
 from .artifacts import ArtifactStore
-from .execution import TurnUsage, resolve_execution
+from .execution import (
+    TurnUsage,
+    missing_outcome_record,
+    resolve_execution,
+    stop_record,
+)
 from .models import decode_outcome, outcome_schema, parse_outcome
 from .prompts import WORKER_INSTRUCTIONS
 from .runtime_identity import register_schemas
@@ -100,6 +105,11 @@ class NativeWorker:
                     attempt_token=attempt["token"] if attempt else None,
                     claims=claims,
                     presentation=request,
+                    origin={
+                        "host_owner": self.tasks.channel.owner,
+                        "task_id": task_id,
+                        "conversation_id": task.get("conversation_id"),
+                    },
                 )
                 return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
@@ -197,6 +207,15 @@ class NativeWorker:
                     "then open comparison"
                 )
         return self.artifacts.read(**request.model_dump())
+
+    def _record_stop(self, task_id, record):
+        """Persist how the turn stopped before the failure is flattened to text."""
+        task = self.tasks.get(task_id)
+        settings = (
+            json.loads(task["execution_json"]) if task.get("execution_json") else {}
+        )
+        settings["stop"] = record
+        self.tasks.update(task_id, execution_json=json.dumps(settings))
 
     def _comparison_open(self, task_id) -> bool:
         """Author material for a managed reviewer follows the stored attempt state."""
@@ -379,12 +398,15 @@ class NativeWorker:
             )
             message = turn.assistant_message or {}
             answer = turn.assistant_text
-            if message.get("stopReason") in ("error", "aborted", "length"):
+            stop = stop_record(message)
+            if stop is not None:
+                self._record_stop(task_id, stop)
                 raise RuntimeError(
                     message.get("errorMessage")
                     or f"OMP stopped: {message.get('stopReason')}"
                 )
             if not self.tasks.get(task_id)["report_json"]:
+                self._record_stop(task_id, missing_outcome_record(message))
                 raise RuntimeError(
                     "Missing structured outcome: OMP ended without tandem_finish. Inspect preserved answer and provisional artifacts; no success inferred."
                 )
@@ -397,15 +419,42 @@ class NativeWorker:
         except Exception as exc:
             logger.exception("OMP task failed: %s", task_id)
             error = f"{type(exc).__name__}: {exc}"
+            if not (
+                json.loads(self.tasks.get(task_id).get("execution_json") or "{}")
+            ).get("stop"):
+                # Host-side failures keep their exception type as the only code;
+                # they are never presented as provider decisions.
+                self._record_stop(
+                    task_id,
+                    {
+                        "stop_reason": None,
+                        "error_id": None,
+                        "error_code": type(exc).__name__,
+                        "classification": "host_exception",
+                        "source": "native_worker.exception",
+                        "at": time.time(),
+                    },
+                )
         finally:
+            teardown_confirmed = True
             try:
                 if client is not None:
                     client.stop()
             except Exception as exc:
                 logger.exception("OMP teardown failed: %s", task_id)
                 status, error = "failed", f"Worker teardown failed: {exc}"
+                teardown_confirmed = False
             for remove in reversed(listeners):
                 remove()
+            if self.work_items is not None and status != "completed":
+                # Lifecycle evidence for claims this turn made through its own
+                # tandem_work tool; a confirmed stop is not a verdict or a retry.
+                try:
+                    self.work_items.origin_settled(
+                        task_id, status=status, teardown_confirmed=teardown_confirmed
+                    )
+                except (ValueError, sqlite3.Error) as exc:
+                    logger.exception("Could not record origin settlement: %s", exc)
             self.tasks.update(
                 task_id,
                 ended_at=time.time(),

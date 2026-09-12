@@ -6,7 +6,7 @@ import time
 from contextlib import closing
 
 from .artifacts import ArtifactStore
-from .execution import conversation_usage, task_usage
+from .execution import conversation_usage, failure_fact, task_usage
 from .models import CheckRun, assess_checks
 from .project_context import ProjectContextStore
 from .runtime_identity import runtime_identity
@@ -256,10 +256,33 @@ class TaskResults:
                     "SELECT a.attempt,c.card FROM work_attempts a JOIN work_cards c ON c.work_id=a.work_id WHERE a.native_task_id=?",
                     (task_id,),
                 ).fetchone()
+                origin_rows = db.execute(
+                    "SELECT a.attempt,c.card FROM work_attempts a JOIN work_cards c ON c.work_id=a.work_id WHERE json_extract(a.attempt,'$.binding.task_id')=?",
+                    (task_id,),
+                ).fetchall()
             except sqlite3.OperationalError:
-                row = None
+                row, origin_rows = None, []
         attempt = json.loads(row["attempt"]) if row else None
         card = json.loads(row["card"]) if row else None
+        # Claims this turn made through its own tandem_work tool: token-free
+        # recovery state only, never dispatch authority.
+        originated = []
+        for origin_row in origin_rows:
+            bound = json.loads(origin_row["attempt"])
+            binding = bound.get("binding") or {}
+            originated.append(
+                {
+                    "attempt_id": bound["attempt_id"],
+                    "work_id": bound["work_id"],
+                    "step_id": bound["step_id"],
+                    "kind": bound["kind"],
+                    "state": bound["state"],
+                    "stage": bound.get("review_stage"),
+                    "settled": binding.get("origin_settled"),
+                    "successors": len(binding.get("successors") or []),
+                    "recoveries": len(binding.get("recoveries") or []),
+                }
+            )
         grant = card["authorization"] if card else None
         managed = bool(attempt and attempt["autonomous"])
         reason = (
@@ -301,6 +324,7 @@ class TaskResults:
                 "reason": reason,
                 "source": "work_card.authorization" if card else "not_recorded",
             },
+            "originated_claims": originated,
             "declared_review_protocol": protocol,
             "review_stage": attempt.get("review_stage")
             if attempt
@@ -353,6 +377,7 @@ class TaskResults:
             }
         return {
             "execution": execution,
+            "failure": failure_fact(task.get("execution_json"), status),
             "delivery": delivery,
             "verdict": verdict,
             "checks": {

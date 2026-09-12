@@ -195,6 +195,41 @@ class CollaborationTests(RpcHarness):
         self.assertEqual(result["report"]["blockers"], ["Credentials are required"])
         self.assertNotIn("error", result)
 
+    async def test_provider_refusal_is_a_recorded_fact_and_material_survives(self):
+        job = await self.start("provider-refusal")
+        result = await self.result(job["task_id"], details=True)
+        self.assertEqual((result["status"], result["outcome"]), ("failed", None))
+        facts = result["facts"]
+        self.assertEqual((facts["execution"], facts["delivery"]), ("failed", "missing"))
+        self.assertEqual(
+            facts["failure"],
+            {
+                "classification": "provider_policy_refusal",
+                "code": "cyber_policy",
+                "source": "assistant_message.errorMessage code suffix",
+            },
+        )
+        finding = next(
+            item
+            for item in result["provisional_artifacts"]
+            if item["name"] == "finding"
+        )
+        stored = await self.call(
+            "tandem_read_artifact", artifact_id=finding["artifact_id"]
+        )
+        self.assertEqual(stored["content"], "Preliminary reviewer finding")
+        self.assertEqual(result["usage"]["task"]["coverage"], "partial")
+        prose = await self.start("prose-failure")
+        failed = await self.result(prose["task_id"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(
+            (
+                failed["facts"]["failure"]["classification"],
+                failed["facts"]["failure"]["code"],
+            ),
+            ("unclassified", None),
+        )
+
     async def test_refused_report_names_fields_and_partial_records_run_history(self):
         job = await self.start("contract-error-then-partial")
         result = await self.result(job["task_id"], details=True)

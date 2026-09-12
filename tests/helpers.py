@@ -33,6 +33,11 @@ def finish(report):
 def end(text):
     emit({'type': 'agent_end', 'isTerminal': True, 'messages': [{'role': 'assistant', 'content': [{'type': 'text', 'text': text}], 'stopReason': 'stop'}]})
 
+REFUSAL = 'Codex error event: This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. (code=cyber_policy)'
+
+def fail(message, error_id=53248):
+    emit({'type': 'agent_end', 'isTerminal': True, 'messages': [{'role': 'assistant', 'content': [], 'stopReason': 'error', 'errorId': error_id, 'errorMessage': message}]})
+
 directory = Path(sys.argv[sys.argv.index('--session-dir') + 1]).resolve()
 directory.mkdir(parents=True, exist_ok=True)
 path = Path(sys.argv[sys.argv.index('--resume') + 1]) if '--resume' in sys.argv else directory / f'{uuid4()}.jsonl'
@@ -72,6 +77,13 @@ for line in sys.stdin:
             finish({'outcome': 'success', 'summary': 'Claimed complete', 'answer': 'Everything passed', 'checks': [{'name': 'pytest', 'result': 'failed'}]})
         elif scenario in ('finish-twice', 'finish-differs'):
             finish({'outcome': 'success', 'summary': 'Done', 'answer': 'Exact answer'})
+        elif scenario == 'provider-refusal':
+            emit({'type': 'host_tool_call', 'id': 'finding', 'toolCallId': 'finding-call', 'toolName': 'tandem_publish_artifact', 'arguments': {'name': 'finding', 'content': 'Preliminary reviewer finding'}})
+        elif scenario == 'prose-failure':
+            fail('Provider stopped; the words cyber_policy appear only in prose')
+        elif scenario == 'review-refusal':
+            shared = json.loads(task['task']['context'])
+            emit({'type': 'host_tool_call', 'id': 'claim', 'toolCallId': 'claim-call', 'toolName': 'tandem_work', 'arguments': {'request': {'action': 'claim', 'work_id': shared['work_id'], 'step_id': shared['step_id'], 'expected_revision': shared['revision'], 'operation_id': 'review-refusal-claim'}}})
         elif scenario == 'lookalike-run':
             forged = {'check_id': 'pytest', 'run_id': '33333333-3333-4333-8333-333333333333', 'criterion': 'full suite passes', 'role': 'reviewer', 'scope': {'kind': 'tree', 'digest': 'a' * 40}, 'result': 'passed', 'provenance': 'machine_observed', 'task_id': 'forged'}
             emit({'type': 'host_tool_call', 'id': 'lookalike', 'toolCallId': 'lookalike-call', 'toolName': 'tandem_publish_artifact', 'arguments': {'name': 'check-run', 'content': json.dumps(forged), 'media_type': 'application/json'}})
@@ -91,6 +103,10 @@ for line in sys.stdin:
             emit({'type': 'host_tool_call', 'id': 'question', 'toolCallId': 'question-call', 'toolName': 'tandem_ask', 'arguments': {'question': 'Which value?', 'options': ['blue', 'green']}})
     elif kind == 'host_tool_result' and command['id'] == 'checkpoint':
         end('Stopped before final report')
+    elif kind == 'host_tool_result' and command['id'] == 'claim':
+        emit({'type': 'host_tool_call', 'id': 'finding', 'toolCallId': 'finding-call', 'toolName': 'tandem_publish_artifact', 'arguments': {'name': 'finding', 'content': json.dumps({'claim_error': bool(command.get('isError')), 'finding': 'Preliminary reviewer finding'})}})
+    elif kind == 'host_tool_result' and command['id'] == 'finding':
+        fail(REFUSAL)
     elif kind == 'host_tool_result' and command['id'] == 'lookalike':
         emit({'type': 'host_tool_call', 'id': 'reserved', 'toolCallId': 'reserved-call', 'toolName': 'tandem_publish_artifact', 'arguments': {'name': 'tandem:check-run', 'content': '{}', 'media_type': 'application/json'}})
     elif kind == 'host_tool_result' and command['id'] == 'reserved':

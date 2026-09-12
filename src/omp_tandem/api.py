@@ -189,6 +189,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 "migration": bridge.migration,
                 "execution_profiles": profile_catalog(),
                 "runtime_identity": runtime_identity(),
+                "host_owner": bridge.channel.owner,
             }
         )
 

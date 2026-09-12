@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -126,6 +127,24 @@ def parser():
     )
     apply.add_argument("work_id")
     apply.add_argument("--expected-head", required=True)
+    successor = commands.add_parser(
+        "successor",
+        help="Authorize one exact host and principal to recover a live manual claim for report-only closure",
+    )
+    successor.add_argument("attempt_id")
+    successor.add_argument(
+        "--host",
+        required=True,
+        help="host_owner shown by tandem_scope of the successor session",
+    )
+    successor.add_argument("--principal", choices=("claude", "omp"), required=True)
+    successor.add_argument("--note", required=True)
+    assess = commands.add_parser(
+        "assess",
+        help="Explicit isolated Git observation of the project HEAD against the final result; records it, changes nothing",
+    )
+    assess.add_argument("work_id")
+    assess.add_argument("--expected-head", required=True)
     show = commands.add_parser("show", help="Read a shared task or list project tasks")
     show.add_argument("work_id", nargs="?")
     show.add_argument(
@@ -338,6 +357,56 @@ def main(argv=None):
                     )
                 output = view["result"].get("output", view["result"])
                 result = WorkWorkspace(scope).apply(output, args.expected_head)
+                receipt = {
+                    "kind": "apply_receipt",
+                    "commit": result["commit"],
+                    "tree_hash": result["tree_hash"],
+                    "expected_head": args.expected_head,
+                    "project_root": result["project_root"],
+                    "applied_at": time.time(),
+                }
+                try:
+                    recorded = store.record_application(args.work_id, receipt)
+                    result["recording"] = {
+                        "status": "recorded",
+                        "revision": recorded["revision"],
+                    }
+                except (ValueError, OSError, sqlite3.Error) as error:
+                    # The fast-forward already happened; say so instead of hiding
+                    # it or replaying the merge. An explicit assess can observe it.
+                    result["recording"] = {
+                        "status": "failed",
+                        "error": str(error),
+                        "next_step": "run assess to record the observed HEAD",
+                    }
+            elif args.command == "successor":
+                result = store.authorize_successor(
+                    args.attempt_id,
+                    host_owner=args.host,
+                    principal=args.principal,
+                    note=args.note,
+                )
+                result = {
+                    "work_id": result["work_id"],
+                    "revision": result["revision"],
+                    "successor": result["successor"],
+                }
+            elif args.command == "assess":
+                view = store.perform(
+                    {"action": "get", "work_id": args.work_id}, actor="operator"
+                )
+                final = view.get("result") or {}
+                target = (final.get("output") or final).get("commit") if final else None
+                observation = WorkWorkspace(scope).assess(target, args.expected_head)
+                result = {
+                    **observation,
+                    "recording": {
+                        "status": "recorded",
+                        "revision": store.record_application(args.work_id, observation)[
+                            "revision"
+                        ],
+                    },
+                }
             else:
                 result = store.perform(
                     {"action": "get", "work_id": args.work_id}
@@ -353,13 +422,23 @@ def main(argv=None):
                         result, step_id=args.step_id, actor="operator"
                     )
                 result["runtime_identity"] = runtime_identity()
-                result = present_work(
-                    result,
-                    actor="operator",
-                    view=args.view,
-                    format=args.format,
-                    step_id=args.step_id,
-                )
+                if args.format == "markdown" and args.work_id:
+                    result = {
+                        "markdown": store.report_markdown(
+                            result,
+                            actor="operator",
+                            usage=store.work_usage(args.work_id),
+                            identity=result["runtime_identity"],
+                        )
+                    }
+                else:
+                    result = present_work(
+                        result,
+                        actor="operator",
+                        view=args.view,
+                        format=args.format,
+                        step_id=args.step_id,
+                    )
         finally:
             bridge.shutdown()
     print(

@@ -24,6 +24,7 @@ from omp_tandem.work_adapters import OmpWorkAdapter
 from omp_tandem.work_notifications import WorkNotifications
 from omp_tandem.work_supervisor import WorkSupervisor
 from omp_tandem.work_workspace import WorkWorkspace
+from tests.helpers import make_peer
 
 
 class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -824,6 +825,324 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(accepted["status"], "completed")
         self.assertEqual(accepted["result"]["commit"], commit)
         self.assertNotIn("token", json.dumps(accepted))
+
+    async def _submitted_change(
+        self, identifier, text="after\n", message="implementation"
+    ):
+        await self.mutate(self.claude, identifier, "claim", step_id="change")
+        (self.root / "module.txt").write_text(text)
+        self.git("add", "module.txt")
+        self.git("commit", "-qm", message)
+        commit = self.git("rev-parse", "HEAD")
+        submitted = await self.mutate(
+            self.claude,
+            identifier,
+            "submit",
+            step_id="change",
+            commit=commit,
+            note="Updated declared module",
+            evidence=[f"module.txt reads {text.strip()}"],
+        )
+        return commit, submitted["steps"][0]["submission"]["submission_id"]
+
+    async def _peer_task(self, bridge, contract):
+        async with Client(build_server(bridge)) as client:
+            started = to_jsonable_python(
+                (
+                    await client.call_tool(
+                        "tandem_start",
+                        {
+                            "cwd": str(self.root),
+                            "mode": "think",
+                            "timeout_seconds": 20,
+                            "contract": contract,
+                        },
+                    )
+                ).data
+            )
+            for _ in range(6):
+                result = to_jsonable_python(
+                    (
+                        await client.call_tool(
+                            "tandem_result",
+                            {
+                                "task_id": started["task_id"],
+                                "wait_seconds": 20,
+                                "details": True,
+                            },
+                        )
+                    ).data
+                )
+                if result["status"] not in ("starting", "running"):
+                    return result
+            raise AssertionError(f"peer task did not settle: {result['status']}")
+
+    def _counts(self):
+        with closing(self.claude_bridge.tasks.connect()) as db:
+            return (
+                db.execute("SELECT count(*) FROM tasks").fetchone()[0],
+                db.execute("SELECT count(*) FROM work_attempts").fetchone()[0],
+            )
+
+    async def test_failed_native_reviewer_is_closed_by_authorized_host_without_execution(
+        self,
+    ):
+        identifier = await self.create(owner="claude")
+        commit, submission_id = await self._submitted_change(identifier)
+        revision = (
+            await self.call(self.claude, {"action": "get", "work_id": identifier})
+        )["revision"]
+        peer = Bridge(
+            self.state,
+            str(make_peer(self.home)),
+            "unused",
+            project_root=self.root,
+            channel_enabled=False,
+            webhook_enabled=False,
+            migrate_legacy=False,
+            work_participant="omp",
+        )
+        self.addCleanup(peer.shutdown)
+        failed = await self._peer_task(
+            peer,
+            {
+                "goal": "review-refusal",
+                "context": json.dumps(
+                    {"work_id": identifier, "step_id": "change", "revision": revision}
+                ),
+            },
+        )
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(
+            failed["facts"]["failure"]["classification"], "provider_policy_refusal"
+        )
+        finding = next(
+            (
+                item
+                for item in failed.get("provisional_artifacts", [])
+                if item["name"] == "finding"
+            ),
+            None,
+        )
+        self.assertIsNotNone(finding, failed)
+        preserved = json.loads(
+            self.claude_bridge.artifacts.read(artifact_id=finding["artifact_id"])[
+                "content"
+            ]
+        )
+        self.assertFalse(preserved["claim_error"], preserved)
+        originated = failed["execution"]["attempt"]["originated_claims"]
+        self.assertEqual(len(originated), 1)
+        self.assertEqual(originated[0]["settled"]["teardown_confirmed"], True)
+        self.assertEqual(
+            (originated[0]["kind"], originated[0]["state"]), ("review", "reserved")
+        )
+        attempt_id = originated[0]["attempt_id"]
+        card = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        self.assertEqual(card["steps"][0]["attempt"]["attempt_id"], attempt_id)
+        hint = next(
+            item for item in card["next_actions"] if item["action"] == "recover"
+        )
+        self.assertEqual(
+            (hint["allowed"], hint["blocked_reason"]),
+            (False, "recovery_not_authorized"),
+        )
+        with self.assertRaises(ToolError):
+            await self.mutate(self.claude, identifier, "recover", step_id="change")
+        with self.assertRaises(ToolError):
+            await self.mutate(self.omp, identifier, "recover", step_id="change")
+        baseline = self._counts()
+        handoff = await self.daemon(
+            "successor",
+            attempt_id,
+            "--host",
+            self.claude_bridge.channel.owner,
+            "--principal",
+            "claude",
+            "--note",
+            "Operator handoff after the provider refusal; closure on preserved evidence only",
+        )
+        self.assertEqual(handoff.returncode, 0, handoff.stderr)
+        successor_id = json.loads(handoff.stdout)["successor"]["successor_id"]
+        with self.assertRaises(ToolError):
+            await self.mutate(self.omp, identifier, "recover", step_id="change")
+        view = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        command = {
+            "action": "recover",
+            "work_id": identifier,
+            "step_id": "change",
+            "expected_revision": view["revision"],
+            "operation_id": str(uuid4()),
+        }
+        recovered = await self.call(self.claude, command)
+        self.assertEqual(recovered["recovery"]["attempt_id"], attempt_id)
+        self.assertTrue(recovered["recovery"]["successors"][0]["consumed"])
+        self.assertIn("withheld", json.dumps(recovered["recovery"]["submission"]))
+        self.assertNotIn("Updated declared module", json.dumps(recovered))
+        replay = await self.call(self.claude, command)
+        self.assertEqual(replay["revision"], recovered["revision"])
+        with self.assertRaises(ToolError):
+            await self.mutate(self.claude, identifier, "recover", step_id="change")
+        stored = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        self.assertEqual(stored["revision"], recovered["revision"])
+        with self.assertRaises(ToolError):
+            await self.mutate(
+                self.claude,
+                identifier,
+                "submit",
+                step_id="change",
+                commit=commit,
+                note="Successor must not adopt output",
+                evidence=["x"],
+            )
+        await self.mutate(
+            self.claude,
+            identifier,
+            "report",
+            step_id="change",
+            submission_id=submission_id,
+            resolution="success",
+            note="Closure recorded from the preserved reviewer finding",
+            evidence=[finding["artifact_id"]],
+        )
+        accepted = await self.mutate(
+            self.claude,
+            identifier,
+            "accept",
+            step_id="change",
+            submission_id=submission_id,
+            note="Accepted on the preserved finding; no re-execution",
+            evidence=[finding["artifact_id"]],
+        )
+        self.assertEqual(accepted["status"], "completed")
+        verdict = accepted["steps"][0]["acceptance"]
+        self.assertEqual(verdict["actor"], "omp")
+        self.assertEqual(
+            (
+                verdict["recorded_by"]["principal"],
+                verdict["recorded_by"]["successor_id"],
+            ),
+            ("claude", successor_id),
+        )
+        self.assertEqual(self._counts(), baseline)
+        self.assertNotIn("token", json.dumps(accepted))
+        shown = await self.daemon("show", identifier, "--format", "markdown")
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("claim_recovered", shown.stdout)
+        self.assertIn("successor_authorized", shown.stdout)
+        self.assertIn("linked tasks: 1", shown.stdout)
+
+    async def test_apply_and_assess_record_observations_and_report_renders_history(
+        self,
+    ):
+        identifier = await self.create(owner="claude")
+        first_commit, first_submission = await self._submitted_change(identifier)
+        await self.mutate(self.omp, identifier, "claim", step_id="change")
+        await self.mutate(
+            self.omp,
+            identifier,
+            "report",
+            step_id="change",
+            submission_id=first_submission,
+            resolution="partial",
+            note="Module text does not match the agreed output",
+            evidence=[f"{first_commit}:module.txt"],
+        )
+        rejected = await self.mutate(
+            self.omp,
+            identifier,
+            "reject",
+            step_id="change",
+            submission_id=first_submission,
+            note="Change the text to the agreed value",
+            evidence=[f"{first_commit}:module.txt"],
+        )
+        self.assertEqual(rejected["steps"][0]["state"], "ready")
+        self.assertIsNotNone(rejected["steps"][0]["checkpoint"])
+        self.assertIsNone(rejected["steps"][0]["submission"])
+        commit, submission = await self._submitted_change(
+            identifier, text="agreed\n", message="fix"
+        )
+        await self.mutate(self.omp, identifier, "claim", step_id="change")
+        await self.mutate(
+            self.omp,
+            identifier,
+            "report",
+            step_id="change",
+            submission_id=submission,
+            resolution="success",
+            note="Exact committed module matches",
+            evidence=[f"{commit}:module.txt contains agreed"],
+        )
+        accepted = await self.mutate(
+            self.omp,
+            identifier,
+            "accept",
+            step_id="change",
+            submission_id=submission,
+            note="Accepted",
+            evidence=[f"{commit}:module.txt contains agreed"],
+        )
+        self.assertEqual(accepted["status"], "completed")
+        self.assertEqual(accepted["application"]["status"], "not_recorded")
+        self.assertIn("not_recorded", accepted["next_action"])
+        self.assertNotIn("not merged", accepted["next_action"])
+        with patch(
+            "omp_tandem.work_items.subprocess.run", side_effect=AssertionError("git")
+        ):
+            summary = await self.call(
+                self.claude, {"action": "get", "work_id": identifier}, view="summary"
+            )
+            await self.call(self.claude, {"action": "history", "work_id": identifier})
+            self.assertEqual(
+                self.claude_bridge.work_items.progress(identifier)["status"],
+                "completed",
+            )
+        self.assertEqual(summary["application"]["status"], "not_recorded")
+        head = self.git("rev-parse", "HEAD")
+        assessed = await self.daemon("assess", identifier, "--expected-head", head)
+        self.assertEqual(assessed.returncode, 0, assessed.stderr)
+        observation = json.loads(assessed.stdout)
+        self.assertEqual(
+            (observation["relation"], observation["target_commit"]), ("equal", commit)
+        )
+        self.assertEqual(observation["recording"]["status"], "recorded")
+        applied = await self.daemon("apply", identifier, "--expected-head", head)
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        receipt = json.loads(applied.stdout)
+        self.assertTrue(receipt["applied"])
+        self.assertEqual(receipt["recording"]["status"], "recorded")
+        card = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        self.assertEqual(
+            [record["kind"] for record in card["application"]["records"]],
+            ["git_assessment", "apply_receipt"],
+        )
+        for record in card["application"]["records"]:
+            self.assertEqual(record["final_commit"], commit)
+            for key in ("actor", "method", "published"):
+                self.assertNotIn(key, record)
+        self.assertIn("apply_receipt", card["next_action"])
+        shown = await self.daemon("show", identifier, "--format", "markdown")
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        report = shown.stdout
+        for expected in (
+            "## Agreements",
+            "- claude: plan revision 1",
+            "Verdict: accepted by omp",
+            "reject by omp",
+            "accept by omp",
+            "independent_report by omp",
+            "## Application",
+            "git_assessment",
+            "apply_receipt",
+            "## Runtime",
+            "## Usage",
+            "coverage: unknown",
+            "Change the text to the agreed value",
+        ):
+            self.assertIn(expected, report)
+        self.assertNotIn("```json", report)
+        self.assertNotIn("token", report)
 
     async def test_operator_reconcile_uses_revision_after_stop_attestation(self):
         identifier = await self.create()

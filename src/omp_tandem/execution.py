@@ -3,7 +3,9 @@
 import hashlib
 import json
 import math
+import re
 import threading
+import time
 from collections import Counter
 from typing import Literal
 
@@ -62,6 +64,75 @@ class ExecutionOptions(BaseModel):
     model: str | None = Field(default=None, min_length=1, pattern=r"\S")
     thinking: ThinkingLevel | None = None
     timeout_seconds: int | None = Field(default=None, ge=1, le=7200, strict=True)
+
+
+# OMP's provider layer terminates a native turn with an assistant message whose
+# stopReason is error/aborted/length and, for provider-coded failures, an
+# errorMessage ending in "(code=<code>)". Only that machine-formatted suffix is
+# read; prose never classifies a failure.
+_PROVIDER_CODE = re.compile(r"\(code=([A-Za-z0-9_.:-]+)\)\s*\Z")
+POLICY_REFUSAL_CODES = frozenset({"cyber_policy"})
+_STOP_REASONS = ("error", "aborted", "length")
+
+
+def stop_record(message: dict | None, *, now=None) -> dict | None:
+    """Structured facts about how a native turn stopped, captured at the boundary."""
+    message = message or {}
+    reason = message.get("stopReason")
+    if reason not in _STOP_REASONS:
+        return None
+    text = message.get("errorMessage")
+    match = _PROVIDER_CODE.search(text) if isinstance(text, str) else None
+    code = match.group(1) if match else None
+    if reason != "error":
+        classification = reason
+    elif code in POLICY_REFUSAL_CODES:
+        classification = "provider_policy_refusal"
+    elif code:
+        classification = "provider_error"
+    else:
+        classification = "unclassified"
+    return {
+        "stop_reason": reason,
+        "error_id": message.get("errorId"),
+        "error_code": code,
+        "classification": classification,
+        "source": "assistant_message.errorMessage code suffix"
+        if code
+        else "assistant_message.stopReason",
+        "at": time.time() if now is None else now,
+    }
+
+
+def missing_outcome_record(message: dict | None, *, now=None) -> dict:
+    """The turn ended normally but never delivered the structured outcome."""
+    return {
+        "stop_reason": (message or {}).get("stopReason"),
+        "error_id": None,
+        "error_code": None,
+        "classification": "missing_outcome",
+        "source": "assistant_message.stopReason",
+        "at": time.time() if now is None else now,
+    }
+
+
+def failure_fact(execution_json, status) -> dict | None:
+    """Failure classification for task facts; None while running or after success."""
+    if status in ("completed", "running", "starting", "waiting_input", "cancelling"):
+        return None
+    settings = json.loads(execution_json) if execution_json else {}
+    stop = settings.get("stop") if isinstance(settings, dict) else None
+    if not stop:
+        return {
+            "classification": "cancelled" if status == "cancelled" else "unrecorded",
+            "code": None,
+            "source": "task_status",
+        }
+    return {
+        "classification": stop["classification"],
+        "code": stop.get("error_code"),
+        "source": stop.get("source"),
+    }
 
 
 def resolve_execution(options=None, *, previous=None, model=None, timeout_seconds=None):

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from pydantic import ConfigDict, Field
 
+from .runtime_identity import runtime_identity
 from .work_items import WorkCommand, WorkConflict, WorkPresentation, present_work
 from .work_workspace import WorkWorkspace
 
@@ -54,13 +55,22 @@ def observation_token(store, command, *, actor, attempt_token=None, claims=None)
 
 
 def perform_work(
-    store, request, *, actor, attempt_token=None, claims=None, presentation=None
+    store,
+    request,
+    *,
+    actor,
+    attempt_token=None,
+    claims=None,
+    presentation=None,
+    origin=None,
 ):
     command = WorkCommand.model_validate(request)
     options = presentation or WorkPresentation()
     key = (command.work_id, command.step_id)
     token = attempt_token or (
-        claims.get(key) if claims is not None and command.action != "claim" else None
+        claims.get(key)
+        if claims is not None and command.action not in {"claim", "recover"}
+        else None
     )
     inferred = False
     if token is None and claims and command.action in {"get", "history"}:
@@ -79,6 +89,9 @@ def perform_work(
         # require an active one and are checked again by the domain transaction.
         with suppress(ValueError):
             bound = store.authenticate(token)
+    if command.action == "submit" and token and store.recovery_scope(token, actor):
+        # A successor host closes bookkeeping only; it never adopts Git output.
+        raise ValueError("recovery_report_only")
     if bound and not bound["autonomous"] and command.action == "submit":
         view = store.perform(
             {"action": "get", "work_id": bound["work_id"]}, actor=actor
@@ -100,13 +113,15 @@ def perform_work(
         else command
     )
     try:
-        result = store.perform(domain_command, actor=actor, attempt_token=token)
+        result = store.perform(
+            domain_command, actor=actor, attempt_token=token, origin=origin
+        )
     except WorkConflict as error:
         if error.current is None:
             raise
         current = error.current
         current["next_actions"] = store.next_actions(
-            current, actor=actor, attempt_token=token, claims=claims
+            current, actor=actor, attempt_token=token, claims=claims, origin=origin
         )
         return {
             "error": {
@@ -134,7 +149,7 @@ def perform_work(
     action_token = result.get("claim", {}).get("token") or token
     for card in result.get("items", [result]):
         card["next_actions"] = store.next_actions(
-            card, actor=actor, attempt_token=action_token, claims=claims
+            card, actor=actor, attempt_token=action_token, claims=claims, origin=origin
         )
     result["participant"] = actor
     if bound:
@@ -165,6 +180,16 @@ def perform_work(
             attempt_token=token,
             limit=options.limit,
         )
+    if options.format == "markdown" and command.action == "get" and "plan" in result:
+        return {
+            "markdown": store.report_markdown(
+                result,
+                actor=actor,
+                attempt_token=token,
+                usage=store.work_usage(result["work_id"]),
+                identity=result.get("runtime_identity") or runtime_identity(),
+            )
+        }
     return present_work(
         result,
         actor=actor,

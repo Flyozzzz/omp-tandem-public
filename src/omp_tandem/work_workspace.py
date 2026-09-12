@@ -10,6 +10,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
@@ -951,3 +952,52 @@ class WorkWorkspace:
                 "project_root": str(root),
                 "applied": True,
             }
+
+    def assess(self, target_commit: str | None, expected_head: str) -> dict:
+        """Explicit isolated Git observation; no checkout change, no inference."""
+        self._identity()
+        self._repository()
+        root = self.scope.root
+        expected = self._commit(expected_head)
+        observed = self._git(root, "rev-parse", "HEAD").decode().strip()
+        target = self._commit(target_commit) if target_commit else None
+        if target is None:
+            relation = "unknown"
+        elif observed == target:
+            relation = "equal"
+        elif (
+            self._git(
+                root,
+                "merge-base",
+                "--is-ancestor",
+                target,
+                observed,
+                allow_failure=True,
+            )
+            is not None
+        ):
+            relation = "ancestor"
+        elif (
+            self._git(
+                root,
+                "merge-base",
+                "--is-ancestor",
+                observed,
+                target,
+                allow_failure=True,
+            )
+            is not None
+        ):
+            relation = "descendant"
+        else:
+            relation = "diverged"
+        return {
+            "kind": "git_assessment",
+            "project_root": str(root),
+            "expected_head": expected,
+            "observed_head": observed,
+            "expected_matches_observed": observed == expected,
+            "target_commit": target,
+            "relation": relation,
+            "observed_at": time.time(),
+        }

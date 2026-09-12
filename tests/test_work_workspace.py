@@ -477,6 +477,43 @@ class WorkWorkspaceTests(unittest.TestCase):
             {"alpha.txt": b"accepted output\n", "beta.txt": b"new root commit\n"},
         )
 
+    def test_assess_reports_directional_relation_without_touching_checkout(self):
+        output = self.publish("edit", {"alpha.txt": "accepted output\n"})
+        target = output["commit"]
+        behind = self.workspaces.assess(target, self.source)
+        self.assertEqual(
+            (behind["relation"], behind["observed_head"], behind["target_commit"]),
+            ("descendant", self.source, target),
+        )
+        self.assertTrue(behind["expected_matches_observed"])
+        self.assertEqual(
+            self.git(self.root, "rev-parse", "HEAD").decode().strip(), self.source
+        )
+        self.workspaces.apply(output, self.source)
+        equal = self.workspaces.assess(target, target)
+        self.assertEqual(equal["relation"], "equal")
+        (self.root / "beta.txt").write_text("later root commit\n")
+        self.git(self.root, "add", "beta.txt")
+        self.git(self.root, "commit", "-qm", "later")
+        later = self.git(self.root, "rev-parse", "HEAD").decode().strip()
+        ahead = self.workspaces.assess(target, target)
+        self.assertEqual(
+            (ahead["relation"], ahead["observed_head"]), ("ancestor", later)
+        )
+        self.assertFalse(ahead["expected_matches_observed"])
+        self.git(self.root, "checkout", "-q", "-b", "side", self.source)
+        (self.root / "shared.txt").write_text("side change\n")
+        self.git(self.root, "add", "shared.txt")
+        self.git(self.root, "commit", "-qm", "side")
+        self.assertEqual(
+            self.workspaces.assess(target, self.source)["relation"], "diverged"
+        )
+        self.assertEqual(
+            self.workspaces.assess(None, self.source)["relation"], "unknown"
+        )
+        for key in ("actor", "method", "published", "applied"):
+            self.assertNotIn(key, ahead)
+
     def test_apply_preserves_ignored_file_that_incoming_commit_would_replace(self):
         output = self.publish("edit", {"ignored.txt": "new tracked source\n"})
         (self.root / "ignored.txt").write_text("user ignored original\n")
