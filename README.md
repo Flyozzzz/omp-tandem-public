@@ -102,7 +102,7 @@ For development, scale planning to uncertainty: a known local fix needs a brief 
 - `recovery` descriptors explain report-only closure of the same claim. An operator must authorize another host with `successor` before `recover`; this does not rerun a model, tests or implementation. Independent clarification requires a new snapshot, with exact `review_context_paths`; prior waivers do not automatically cover changed inputs.
 - `wake_acknowledgment` distinguishes `acknowledged`, `acknowledged_zero`, `deferred` and `not_attempted`. Acceptance is separate from application (`not_recorded` without evidence), `assess`, apply receipts and publication. Native usage is a scoped subtotal; Claude cost remains unknown unless separately measured.
 
-[Contract, reporting and recovery details](docs/guide.md#compact-contracts). The proposed 3.6.0 package is pending operator release confirmation; no tag or publication is implied.
+[Contract, reporting and recovery details](docs/guide.md#compact-contracts). Package 3.6.0 was released on 2026-09-12; see the [changelog](CHANGELOG.md).
 
 ## How it works
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.6.0 — proposed, pending operator confirmation
+## 3.6.0 — 2026-09-12
 
 ### Changes
 
@@ -14,7 +14,7 @@
 
 ### Remaining limits
 
-- Package version is a proposal, not a tag, published release or applied result. Existing tags and archives are unchanged.
+- Release preparation implies no automatic application of the accepted result to a user checkout. Existing tags and archives are unchanged.
 - Wire census covers exercised `openai-completions` only. Other APIs remain untested; provider transformations and validation diagnostics are recorded rather than declared universally equivalent. Missing structured finish remains a failure.
 - Every task result carries runtime identity; editable/unverifiable exact builds stay unknown. Review-phase refusals are reason codes; `(code=cyber_policy)` remains a provider-policy refusal, not an automatic retry.
 - Non-get tool actions with `format=markdown` render fenced JSON. Application is `not_recorded` without evidence; Claude/unattributed costs are unknown and native values may be subtotals.

@@ -104,7 +104,7 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 - `recovery` 描述如何仅凭报告关闭同一领取。其他宿主执行 `recover` 前，操作者必须显式授权 `successor`；这不会重跑模型、测试或实现。独立阶段的澄清要求新快照及明确的 `review_context_paths`，旧豁免不会自动适用于新输入。
 - `wake_acknowledgment` 区分 `acknowledged`、`acknowledged_zero`、`deferred`、`not_attempted`。验收与应用分离：无证据时为 `not_recorded`；`assess`、apply 回执和发布分别记录。原生用量只是限定范围的小计，未经另行测量的 Claude 费用仍未知。
 
-[契约、报告与恢复详情](docs/guide.zh-CN.md#compact-contracts)。软件包版本 3.6.0 为待操作者确认的提案，不表示已打标签或发布。
+[契约、报告与恢复详情](docs/guide.zh-CN.md#compact-contracts)。软件包 3.6.0 已于 2026-09-12 发布；详见[变更日志](CHANGELOG.md)。
 
 ## 工作原理
 
