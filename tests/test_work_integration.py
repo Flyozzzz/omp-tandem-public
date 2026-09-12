@@ -1228,6 +1228,45 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     {"action": "get", "work_id": identifier, "actor": "operator"},
                 )
 
+    async def test_wake_acknowledgment_status_tracks_observations(self):
+        async def status():
+            result = await self.claude.call_tool("tandem_channel", {"action": "status"})
+            return to_jsonable_python(result.data)["wake_acknowledgment"]
+
+        initial = await status()
+        self.assertEqual(initial["outcome"], "not_attempted")
+        self.assertIsNone(initial["work_id"])
+        identifier = await self.create()
+        observed = await self.call(
+            self.claude, {"action": "get", "work_id": identifier}
+        )
+        zero = await status()
+        self.assertEqual(zero["outcome"], "acknowledged_zero")
+        self.assertEqual(zero["acknowledged"], 0)
+        self.assertIsNone(zero["reason"])
+        channel = self.claude_bridge.channel
+        event = channel.emit(
+            "work_changed",
+            {"work_id": identifier, "revision": observed["revision"]},
+        )
+        await self.call(self.claude, {"action": "get", "work_id": identifier})
+        acknowledged = await status()
+        self.assertEqual(acknowledged["outcome"], "acknowledged")
+        self.assertEqual(acknowledged["acknowledged"], 1)
+        self.assertEqual(acknowledged["work_id"], identifier)
+        self.assertEqual(acknowledged["revision"], observed["revision"])
+        self.assertIsNotNone(channel.store.get(event["event_id"])["acknowledged_at"])
+        diagnostic = await self.claude.call_tool("tandem_diagnose", {})
+        self.assertEqual(
+            to_jsonable_python(diagnostic.data)["channel"]["wake_acknowledgment"],
+            acknowledged,
+        )
+        other = await self.create()
+        self.assertNotEqual(identifier, other)
+        self.assertEqual(
+            self.claude_bridge.wake_acknowledgments[identifier], acknowledged
+        )
+
     async def test_committed_peer_change_generates_wake_hint_without_dispatch(self):
         # No live-client wake guarantee is asserted; inspect actual persisted outbox.
         channel = self.claude_bridge.channel

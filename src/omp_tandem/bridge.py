@@ -1,5 +1,6 @@
 """Composition facade for the project-scoped tandem runtime."""
 
+import time
 from contextlib import closing
 from pathlib import Path
 from uuid import UUID
@@ -75,6 +76,15 @@ class Bridge:
                 "actor"
             ]
         self._work_claims = {}
+        self.wake_acknowledgments = {}
+        self._wake_acknowledgment = {
+            "work_id": None,
+            "revision": None,
+            "at": None,
+            "acknowledged": 0,
+            "outcome": "not_attempted",
+            "reason": None,
+        }
         messages = TaskMessages(self.scope, self.projects, self.reviews)
         self.interaction = TaskInteraction(
             self.tasks, self.artifacts, self.projects, self.findings, self.work_items
@@ -139,10 +149,24 @@ class Bridge:
             origin={"host_owner": self.channel.owner},
         )
         if result.get("work_id") and result.get("revision") is not None:
-            self.channel.store.acknowledge_work(
+            acknowledgment = self.channel.store.acknowledge_work(
                 self.channel.owner, result["work_id"], result["revision"]
             )
+            record = {
+                **acknowledgment,
+                "work_id": result["work_id"],
+                "revision": result["revision"],
+                "at": time.time(),
+            }
+            self.wake_acknowledgments[result["work_id"]] = record
+            self._wake_acknowledgment = record
         return result
+
+    def channel_status(self):
+        return {
+            **self.channel.status(),
+            "wake_acknowledgment": dict(self._wake_acknowledgment),
+        }
 
     def start(
         self,

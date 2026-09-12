@@ -32,7 +32,7 @@ class Diagnostics:
             expected = str(expected_path.resolve())
         scope = bridge.scope.info()
         matches = str(bridge.scope.root) == expected if expected is not None else None
-        channel = bridge.channel.status()
+        channel = bridge.channel_status()
         issues = []
         if matches is False:
             issues.append(
@@ -138,7 +138,7 @@ class Diagnostics:
         report["task_id"] = task_id
         report["conversation_id"] = result["conversation_id"]
         report["task_status"] = result["status"]
-        report["channel"] = self.bridge.channel.status()
+        report["channel"] = self.bridge.channel_status()
         report["runtime"]["short_task"] = result["status"]
         report["execution"] = result.get("execution")
         report["usage"] = result.get("usage")

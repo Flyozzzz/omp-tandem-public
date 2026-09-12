@@ -216,14 +216,14 @@ class EventStore:
                 (time.time(), owner, dedupe_key),
             ).rowcount
 
-    def acknowledge_work(self, owner: str, work_id: str, revision: int) -> int:
+    def acknowledge_work(self, owner: str, work_id: str, revision: int) -> dict:
         """Best-effort acknowledgement of the exact shared state already observed."""
         owner = _canonical_id(owner, "owner")
         work_id = _canonical_id(work_id, "work_id")
         with closing(self._connect()) as db:
             db.execute("PRAGMA busy_timeout=0")
             try:
-                return db.execute(
+                acknowledged = db.execute(
                     "UPDATE channel_events SET acknowledged_at=? WHERE owner=? "
                     "AND kind='work_changed' AND acknowledged_at IS NULL "
                     "AND json_extract(payload,'$.work_id')=? "
@@ -231,14 +231,24 @@ class EventStore:
                     (time.time(), owner, work_id, revision),
                 ).rowcount
             except sqlite3.OperationalError as exc:
-                if exc.sqlite_errorcode not in (
+                code = exc.sqlite_errorcode & 0xFF
+                if code not in (
                     sqlite3.SQLITE_BUSY,
                     sqlite3.SQLITE_LOCKED,
                 ):
                     raise
                 # Optional delivery bookkeeping cannot block authoritative reads.
                 # A later observation will acknowledge the retained event.
-                return 0
+                return {
+                    "acknowledged": 0,
+                    "outcome": "deferred",
+                    "reason": "busy" if code == sqlite3.SQLITE_BUSY else "locked",
+                }
+        return {
+            "acknowledged": acknowledged,
+            "outcome": "acknowledged" if acknowledged else "acknowledged_zero",
+            "reason": None,
+        }
 
     def mark_sent(self, owner: str, event_id: str) -> None:
         owner = _canonical_id(owner, "owner")

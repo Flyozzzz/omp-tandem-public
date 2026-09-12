@@ -497,7 +497,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
         bridge = await runtime.get(ctx)
         await bridge.channel.bind(ctx, auto_probe=False)
         if action == "status":
-            return bridge.channel.status()
+            return bridge.channel_status()
         if action == "probe":
             return await bridge.channel.probe(resend=True)
         if action == "ack":
