@@ -13,8 +13,10 @@ import json
 import math
 import re
 import secrets
+import shlex
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from contextlib import closing, contextmanager
@@ -586,6 +588,37 @@ RECOVERY_CODES = (
 )
 
 
+TRANSITION_OPEN = frozenset({"stopping", "ready"})
+TRANSITION_CODES = (
+    "transition_in_progress",
+    "no_pending_proposal",
+    "transition_not_begun",
+    "attempt_not_in_inventory",
+    "attempt_already_disposed",
+    "stop_unconfirmed",
+    "attestation_required",
+    "inventory_not_disposed",
+    "proposal_mismatch",
+)
+
+
+def _public_proposal(proposal):
+    if not proposal:
+        return None
+    return {
+        key: proposal.get(key)
+        for key in (
+            "proposal_id",
+            "base_plan_revision",
+            "proposed_by",
+            "note",
+            "at",
+            "preview",
+            "plan",
+        )
+    }
+
+
 def _binding(command, origin):
     """Durable manual-claim provenance; never dispatch authority."""
     origin = origin or {}
@@ -670,6 +703,7 @@ def present_work(
         if view == "plan":
             result["plan"] = payload["plan"]
             result["agreements"] = payload["agreements"]
+            result["proposal"] = payload.get("proposal")
         elif view == "step":
             if not step_id:
                 raise ValueError("view=step requires step_id")
@@ -699,6 +733,44 @@ def present_work(
             }
         else:
             result["paused"] = payload["status"] == "paused"
+            proposal = payload.get("proposal")
+            result["proposal"] = (
+                None
+                if not proposal
+                else {
+                    **{
+                        key: proposal.get(key)
+                        for key in (
+                            "proposal_id",
+                            "base_plan_revision",
+                            "proposed_by",
+                            "at",
+                        )
+                    },
+                    "affected_attempts": len(
+                        (proposal.get("preview") or {}).get("attempts") or []
+                    ),
+                    "card_wide": (proposal.get("preview") or {}).get("card_wide"),
+                    "plan": {"view": "plan"},
+                }
+            )
+            transition = payload.get("transition")
+            result["transition"] = (
+                None
+                if not transition
+                else {
+                    "transition_id": transition["transition_id"],
+                    "phase": transition["phase"],
+                    "attempts": len(transition["inventory"]),
+                    "disposed": sum(
+                        1
+                        for item in transition["inventory"].values()
+                        if item.get("disposition")
+                    ),
+                }
+            )
+            if payload.get("operator_commands"):
+                result["operator_commands"] = payload["operator_commands"]
             grant = payload["authorization"]
             result["authorization"] = (
                 None
@@ -1116,9 +1188,17 @@ class WorkStore:
             "records": records,
             "assessment": "explicit operator apply/assess CLI only; progress reads perform no Git assessment",
         }
+        view["proposal"] = _public_proposal(card.get("proposal"))
+        view["transition"] = card.get("transition")
+        view["transition_history"] = card.get("transition_history") or []
+        view["operator_commands"] = self._operator_commands(card)
         view["next_action"] = (
             "Resume explicitly; fenced attempts require operator reconciliation."
             if card["status"] == "paused"
+            else self._transition_next_action(card)
+            if (card.get("transition") or {}).get("phase") in TRANSITION_OPEN
+            else "A plan revision is pending negotiation; execution continues under the current plan until the operator begins the transition."
+            if card.get("proposal")
             else "Both principals must agree to this exact plan revision."
             if not self._agreed(card)
             else (
@@ -1304,6 +1384,62 @@ class WorkStore:
                             else (" [note withheld]" if isinstance(note, dict) else "")
                         )
                     )
+        proposal = current.get("proposal")
+        transition = current.get("transition")
+        history = current.get("transition_history") or []
+        if proposal or transition or history:
+            lines.extend(["", "## Plan transition"])
+            if proposal:
+                preview = proposal.get("preview") or {}
+                lines.append(
+                    f"- Pending proposal {proposal['proposal_id']} by {proposal['proposed_by']} "
+                    f"at {self._when(proposal['at'])} over plan {proposal['base_plan_revision']}: "
+                    f"{len(preview.get('attempts') or [])} attempt(s) affected; "
+                    f"changed {preview.get('changed_steps')}, removed {preview.get('removed_steps')}, "
+                    f"added {preview.get('added_steps')}"
+                )
+            if transition:
+                lines.append(
+                    f"- Transition {transition['transition_id']} phase {transition['phase']} "
+                    f"begun {self._when(transition.get('begun_at'))}"
+                )
+                for attempt_id, entry in transition["inventory"].items():
+                    disposition = entry.get("disposition")
+                    stop = entry.get("stop") or {}
+                    lines.append(
+                        f"  - {attempt_id} {entry['kind']} by {entry['actor']} "
+                        f"({'managed' if entry['autonomous'] else 'manual'}, was {entry['state_at_begin']}): "
+                        + (
+                            f"stop {stop.get('source')}, disposition {disposition['kind']}"
+                            if disposition
+                            else "awaiting stop evidence and operator disposition"
+                        )
+                    )
+            for past in history:
+                lines.append(
+                    f"- Transition {past['transition_id']} {past['phase']} "
+                    f"(proposal {past['proposal_id']}, {len(past['inventory'])} attempt(s))"
+                )
+                for attempt_id, entry in past["inventory"].items():
+                    disposition = entry.get("disposition") or {}
+                    stop = entry.get("stop") or {}
+                    lines.append(
+                        f"  - {attempt_id} {entry['kind']} by {entry['actor']} "
+                        f"({'managed' if entry['autonomous'] else 'manual'}): "
+                        f"stop {stop.get('source') or 'unconfirmed'}, "
+                        f"disposition {disposition.get('kind') or 'none'}"
+                    )
+                for attempt_id, outcome in (past.get("continuation") or {}).items():
+                    lines.append(
+                        f"  - continuation for {attempt_id}: {outcome.get('status')}"
+                        + (
+                            f" — {outcome.get('reason')}"
+                            if outcome.get("reason")
+                            else ""
+                        )
+                    )
+            for item in current.get("operator_commands") or []:
+                lines.append(f"- Operator: {item['purpose']}: `{item['command']}`")
         application = current.get("application") or {
             "status": "not_recorded",
             "records": [],
@@ -1921,47 +2057,60 @@ class WorkStore:
             if command.plan is None:
                 raise ValueError("Propose requires a complete plan")
             plan = command.plan.model_dump()
-            if plan != WorkPlan.model_validate(card["plan"]).model_dump():
-                identifiers = {step["id"] for step in plan["steps"]}
-                if any(
-                    attempt["step_id"] not in identifiers
-                    and attempt["state"] in _ACTIVE | {"recovery_required"}
-                    for attempt in self._attempts(db, card["work_id"])
-                ):
-                    raise WorkConflict(
-                        "Reconcile unresolved attempts before removing or renaming their steps"
-                    )
-                self._fence(db, card, "Plan changed; old attempt cannot publish")
-                previous = {step["id"]: step for step in card["steps"]}
-                old_revision = card["plan_revision"]
-                card.update(
-                    plan=plan,
-                    plan_revision=card["plan_revision"] + 1,
-                    agreements={},
-                    steps=self._new_steps(plan),
+            transition = card.get("transition")
+            if transition and transition["phase"] in TRANSITION_OPEN:
+                raise WorkConflict(
+                    "transition_in_progress: the begun proposal is frozen; only the "
+                    "operator may withdraw or activate it"
                 )
-                current = {step["id"]: step for step in card["steps"]}
-                for old in [None, *previous.values()]:
-                    blockers = old["blockers"] if old else list(card["blockers"])
-                    target = current.get(old["id"]) if old else None
-                    for blocker in blockers:
-                        blocker["carried_from"].append(
-                            {
-                                "plan_revision": old_revision,
-                                "step_id": old["id"] if old else None,
-                                "to_plan_revision": card["plan_revision"],
-                                "step_id_after": target["id"] if target else None,
-                            }
-                        )
-                    if old:
-                        (target["blockers"] if target else card["blockers"]).extend(
-                            blockers
-                        )
-                    if target and old["state"] == "recovery_required":
-                        target.update(state="recovery_required", attempt=old["attempt"])
-                if card["authorization"]:
-                    card["authorization"]["revoked_at"] = time.time()
-            return self._record(db, card, "proposed", actor, {"note": command.note})
+            if plan == WorkPlan.model_validate(card["plan"]).model_dump():
+                if card.get("proposal"):
+                    withdrawn = card["proposal"]
+                    card["proposal"] = None
+                    return self._record(
+                        db,
+                        card,
+                        "proposal_withdrawn",
+                        actor,
+                        {"note": command.note, "proposal_id": withdrawn["proposal_id"]},
+                    )
+                return self._record(db, card, "proposed", actor, {"note": command.note})
+            inventory = self._transition_inventory(db, card)
+            if not inventory:
+                # Nothing executes: the revision activates at once, recorded as a
+                # transition with an empty inventory so the history stays uniform.
+                self._activate_plan(db, card, plan)
+                return self._record(
+                    db,
+                    card,
+                    "proposed",
+                    actor,
+                    {"note": command.note, "activated": True, "inventory": []},
+                )
+            proposal = {
+                "proposal_id": str(uuid4()),
+                "base_plan_revision": card["plan_revision"],
+                "plan": plan,
+                "proposed_by": actor,
+                "note": command.note,
+                "at": time.time(),
+                "preview": self._proposal_preview(card, plan, inventory),
+            }
+            replaced = (card.get("proposal") or {}).get("proposal_id")
+            card["proposal"] = proposal
+            return self._record(
+                db,
+                card,
+                "proposed",
+                actor,
+                {
+                    "note": command.note,
+                    "proposal_id": proposal["proposal_id"],
+                    "pending": True,
+                    "replaced_proposal_id": replaced,
+                    "affected_attempts": [item["attempt_id"] for item in inventory],
+                },
+            )
         if action == "agree":
             if actor not in {"claude", "omp"}:
                 raise ValueError("Only the two work principals may agree")
@@ -2530,6 +2679,9 @@ class WorkStore:
         """The reservation gate, shared by execution and participant hints."""
         if card["status"] == "paused":
             return "paused"
+        transition = card.get("transition")
+        if transition and transition["phase"] in TRANSITION_OPEN:
+            return "transition_in_progress"
         if not self._agreed(card):
             return "plan_not_agreed"
         if self._unresolved(card, step):
@@ -2645,6 +2797,26 @@ class WorkStore:
                 != card["plan_revision"]
             ):
                 add("agree", None, None)
+            transition = card.get("transition")
+            if (transition and transition["phase"] in TRANSITION_OPEN) or card.get(
+                "proposal"
+            ):
+                for item in self._operator_commands(card):
+                    actions.append(
+                        {
+                            "action": "transition",
+                            "step_id": None,
+                            "kind": None,
+                            "stage": None,
+                            "submission_id": None,
+                            "expected_revision": current["revision"],
+                            "required_fields": [],
+                            "allowed": False,
+                            "blocked_reason": "operator_required",
+                            "purpose": item["purpose"],
+                            "command": item["command"],
+                        }
+                    )
             for step in card["steps"]:
                 if bound and bound["step_id"] != step["id"]:
                     continue
@@ -3420,6 +3592,580 @@ class WorkStore:
                     "error": attempt["error"],
                 },
             )
+
+    # ---- plan transitions -------------------------------------------------
+
+    def _transition_inventory(self, db, card):
+        """Every attempt whose execution or uncertainty an activation would retire."""
+        return [
+            {
+                "attempt_id": attempt["attempt_id"],
+                "step_id": attempt["step_id"],
+                "actor": attempt["actor"],
+                "kind": attempt["kind"],
+                "autonomous": attempt["autonomous"],
+                "state": attempt["state"],
+            }
+            for attempt in self._attempts(db, card["work_id"])
+            if attempt["state"] in _ACTIVE | {"recovery_required"}
+        ]
+
+    @staticmethod
+    def _proposal_preview(card, plan, inventory):
+        before = {step["id"]: step for step in card["plan"]["steps"]}
+        after = {step["id"]: step for step in plan["steps"]}
+        plan_level = any(
+            card["plan"].get(key) != plan.get(key)
+            for key in ("title", "goal", "constraints", "acceptance", "context")
+        )
+        return {
+            "card_wide": True,
+            "statement": (
+                "Activation retires every current attempt of this card, including "
+                "attempts on unchanged steps; stopped work is preserved, never replayed."
+            ),
+            "attempts": inventory,
+            "removed_steps": sorted(before.keys() - after.keys()),
+            "added_steps": sorted(after.keys() - before.keys()),
+            "changed_steps": sorted(
+                identifier
+                for identifier in before.keys() & after.keys()
+                if before[identifier] != after[identifier]
+            ),
+            "plan_level_changes": plan_level,
+        }
+
+    def _activate_plan(self, db, card, plan):
+        """Install a plan as the next draft revision; callers ensure quiescence."""
+        self._fence(db, card, "Plan changed; old attempt cannot publish")
+        previous = {step["id"]: step for step in card["steps"]}
+        old_revision = card["plan_revision"]
+        card.update(
+            plan=plan,
+            plan_revision=card["plan_revision"] + 1,
+            agreements={},
+            steps=self._new_steps(plan),
+        )
+        current = {step["id"]: step for step in card["steps"]}
+        for old in [None, *previous.values()]:
+            blockers = old["blockers"] if old else list(card["blockers"])
+            target = current.get(old["id"]) if old else None
+            for blocker in blockers:
+                blocker["carried_from"].append(
+                    {
+                        "plan_revision": old_revision,
+                        "step_id": old["id"] if old else None,
+                        "to_plan_revision": card["plan_revision"],
+                        "step_id_after": target["id"] if target else None,
+                    }
+                )
+            if old:
+                (target["blockers"] if target else card["blockers"]).extend(blockers)
+            if target and old["state"] == "recovery_required":
+                target.update(state="recovery_required", attempt=old["attempt"])
+        if card["authorization"]:
+            card["authorization"]["revoked_at"] = time.time()
+
+    def _operator_command(self, work_id, *arguments):
+        parts = [
+            shlex.quote(sys.executable),
+            "-m",
+            "omp_tandem.work_daemon",
+            "--project-root",
+            shlex.quote(str(self.scope.root)),
+            "--state-dir",
+            shlex.quote(str(self.scope.base)),
+            *arguments,
+        ]
+        return " ".join(parts)
+
+    def _operator_commands(self, card):
+        """Exact operator commands for the current negotiation state; hints only."""
+        work_id = card["work_id"]
+        transition = card.get("transition")
+        commands = []
+        if transition and transition["phase"] in TRANSITION_OPEN:
+            commands.append(
+                {
+                    "purpose": "inspect the begun transition",
+                    "command": self._operator_command(
+                        work_id, "transition", work_id, "inspect"
+                    ),
+                }
+            )
+            for attempt_id, entry in transition["inventory"].items():
+                if entry.get("disposition"):
+                    continue
+                flags = ["--attempt", attempt_id, "--note", "'…'", "--evidence", "'…'"]
+                if not entry["autonomous"]:
+                    flags.append("--confirm-stopped")
+                commands.append(
+                    {
+                        "purpose": (
+                            "attest the manual stop and dispose the attempt"
+                            if not entry["autonomous"]
+                            else "dispose the attempt after the supervisor confirmed its stop"
+                        ),
+                        "attempt_id": attempt_id,
+                        "command": self._operator_command(
+                            work_id, "transition", work_id, "resolve", *flags
+                        ),
+                    }
+                )
+            if all(
+                entry.get("disposition") for entry in transition["inventory"].values()
+            ):
+                commands.append(
+                    {
+                        "purpose": "activate the frozen proposal as the next draft revision",
+                        "command": self._operator_command(
+                            work_id, "transition", work_id, "activate", "--note", "'…'"
+                        ),
+                    }
+                )
+            commands.append(
+                {
+                    "purpose": "withdraw the proposal (fenced attempts still need reconciliation)",
+                    "command": self._operator_command(
+                        work_id, "transition", work_id, "withdraw", "--note", "'…'"
+                    ),
+                }
+            )
+        elif card.get("proposal"):
+            commands.append(
+                {
+                    "purpose": "begin the transition: freeze the proposal, fence and inventory every attempt",
+                    "command": self._operator_command(
+                        work_id, "transition", work_id, "begin", "--note", "'…'"
+                    ),
+                }
+            )
+            commands.append(
+                {
+                    "purpose": "inspect the pending proposal and its impact",
+                    "command": self._operator_command(
+                        work_id, "transition", work_id, "inspect"
+                    ),
+                }
+            )
+        return commands
+
+    def _transition_next_action(self, card):
+        transition = card["transition"]
+        pending = [
+            attempt_id
+            for attempt_id, entry in transition["inventory"].items()
+            if not entry.get("disposition")
+        ]
+        if pending:
+            return (
+                f"Plan transition in progress: {len(pending)} attempt(s) still need stop "
+                "evidence and an operator disposition; no claims until activation."
+            )
+        return "Plan transition ready: every attempt is disposed; the operator may activate the frozen proposal."
+
+    def _require_operator(self, actor):
+        if actor != "operator":
+            raise ValueError("Only the trusted operator drives plan transitions")
+
+    def transition_inspect(self, work_id) -> dict:
+        with self._read_connection() as db:
+            card = self._load(db, work_id)
+            attempts = {
+                attempt["attempt_id"]: attempt
+                for attempt in self._attempts(db, card["work_id"])
+            }
+        transition = card.get("transition")
+        inventory = []
+        for attempt_id, entry in (transition or {}).get("inventory", {}).items():
+            attempt = attempts.get(attempt_id) or {}
+            inventory.append(
+                {
+                    **entry,
+                    "attempt_id": attempt_id,
+                    "current_state": attempt.get("state"),
+                    "process_confirmed_gone": attempt.get("process_confirmed_gone"),
+                    "required": None
+                    if entry.get("disposition")
+                    else (
+                        "supervisor teardown confirmation, then operator disposition"
+                        if entry["autonomous"]
+                        and not attempt.get("process_confirmed_gone")
+                        else "operator disposition (--note/--evidence)"
+                        if entry["autonomous"]
+                        else "operator attestation of the manual stop (--confirm-stopped) and disposition"
+                    ),
+                    "inspect": [
+                        item
+                        for item in (
+                            attempt.get("workspace")
+                            and f"workspace {attempt['workspace']}",
+                            attempt.get("submission_intent")
+                            and "recorded submission intent",
+                            attempt.get("independent_report") and "independent report",
+                            attempt.get("verdict") and "recorded verdict",
+                        )
+                        if item
+                    ],
+                }
+            )
+        return {
+            "work_id": work_id,
+            "revision": card["revision"],
+            "plan_revision": card["plan_revision"],
+            "status": card["status"],
+            "proposal": _public_proposal(card.get("proposal")),
+            "transition": {**transition, "inventory": inventory}
+            if transition
+            else None,
+            "transition_history": card.get("transition_history") or [],
+            "commands": self._operator_commands(card),
+        }
+
+    def transition_begin(self, work_id, *, note, actor="operator") -> dict:
+        self._require_operator(actor)
+        if not note:
+            raise ValueError("Begin requires a note")
+        with self._transaction() as db:
+            card = self._load(db, work_id)
+            proposal = card.get("proposal")
+            if not proposal:
+                raise ValueError("no_pending_proposal")
+            transition = card.get("transition")
+            if transition and transition["phase"] in TRANSITION_OPEN:
+                raise ValueError("transition_in_progress")
+            inventory = self._transition_inventory(db, card)
+            card["transition"] = {
+                "transition_id": str(uuid4()),
+                "proposal_id": proposal["proposal_id"],
+                "base_plan_revision": proposal["base_plan_revision"],
+                "phase": "ready" if not inventory else "stopping",
+                "begun_at": time.time(),
+                "note": note,
+                "inventory": {
+                    item["attempt_id"]: {
+                        **{k: v for k, v in item.items() if k != "attempt_id"},
+                        "state_at_begin": item["state"],
+                        "stop": None,
+                        "saved": None,
+                        "disposition": None,
+                    }
+                    for item in inventory
+                },
+                "continuation": {},
+            }
+            self._fence(db, card, "Plan transition begun; old attempt cannot publish")
+            return self._record(
+                db,
+                card,
+                "transition_begun",
+                actor,
+                {
+                    "note": note,
+                    "transition_id": card["transition"]["transition_id"],
+                    "proposal_id": proposal["proposal_id"],
+                    "attempt_ids": [item["attempt_id"] for item in inventory],
+                },
+            )
+
+    def transition_resolve(
+        self,
+        work_id,
+        attempt_id,
+        *,
+        note,
+        evidence,
+        confirm_stopped=False,
+        abandon=False,
+        saved_commit=None,
+        actor="operator",
+        workspaces=None,
+    ) -> dict:
+        self._require_operator(actor)
+        if not note or not evidence:
+            raise ValueError("Resolve requires note and evidence")
+        with self._transaction() as db:
+            card = self._load(db, work_id)
+            transition = card.get("transition")
+            if not transition or transition["phase"] not in TRANSITION_OPEN:
+                raise ValueError("transition_not_begun")
+            entry = transition["inventory"].get(attempt_id)
+            if entry is None:
+                raise ValueError("attempt_not_in_inventory")
+            if entry.get("disposition"):
+                raise ValueError("attempt_already_disposed")
+            attempt = self._attempt(db, attempt_id)
+            if attempt["state"] in _ACTIVE:
+                # Fenced at begin; a still-active row means a concurrent revival,
+                # which this operator path never reconciles silently.
+                raise ValueError("stop_unconfirmed")
+            if attempt["autonomous"]:
+                if not attempt.get("process_confirmed_gone"):
+                    raise ValueError(
+                        "stop_unconfirmed: the supervisor has not confirmed teardown of "
+                        f"managed attempt {attempt_id}; wait for its evidence"
+                    )
+                stop = {"source": "supervisor_confirmed", "at": time.time()}
+            else:
+                if not confirm_stopped:
+                    raise ValueError(
+                        "attestation_required: manual attempts need --confirm-stopped as "
+                        "the operator's explicit statement that the execution stopped"
+                    )
+                attempt["process_confirmed_gone"] = True
+                stop = {"source": "operator_attested", "at": time.time()}
+            step = self._step(card, attempt["step_id"])
+            saved = {
+                "workspace": attempt.get("workspace"),
+                "output": attempt.get("output"),
+                "checkpoint": step.get("checkpoint")
+                if (step.get("checkpoint") or {}).get("attempt_id") == attempt_id
+                else None,
+                "submission_intent": attempt.get("submission_intent"),
+                "independent_report": attempt.get("independent_report"),
+                "verdict": attempt.get("verdict"),
+                "preserved": None,
+                "capture_failure": None,
+            }
+            owned_files = list(
+                next(
+                    item["owned_files"]
+                    for item in card["plan"]["steps"]
+                    if item["id"] == attempt["step_id"]
+                )
+            )
+            if saved_commit is not None:
+                # An operator-supplied commit is input, not observation: a wrong
+                # commit is refused loudly instead of being recorded as a failure.
+                if attempt["kind"] != "implement" or attempt["autonomous"]:
+                    raise ValueError(
+                        "A saved commit applies to manual implementation attempts only; "
+                        "managed attempts preserve their own workspace"
+                    )
+                if workspaces is None:
+                    raise ValueError(
+                        "Preserving a saved commit requires the workspace layer"
+                    )
+                preserved = workspaces.adopt_submission(
+                    attempt, card["plan"], saved_commit
+                )
+                saved["preserved"] = {
+                    **preserved,
+                    "validated_against_plan_revision": card["plan_revision"],
+                    "owned_files": owned_files,
+                }
+            elif (
+                attempt["kind"] == "implement"
+                and attempt["autonomous"]
+                and attempt.get("workspace")
+                and workspaces is not None
+            ):
+                try:
+                    preserved = workspaces.preserve(attempt, card["plan"])
+                    saved["preserved"] = {
+                        **preserved,
+                        "validated_against_plan_revision": card["plan_revision"],
+                        "owned_files": owned_files,
+                    }
+                except (ValueError, OSError) as error:
+                    saved["capture_failure"] = f"{type(error).__name__}: {error}"
+            if (
+                attempt["autonomous"]
+                and not attempt["cost_recorded"]
+                and card["authorization"]
+                and card["authorization"]["authorization_id"]
+                == attempt["authorization_id"]
+            ):
+                card["authorization"]["unknown_cost"] = True
+                card["status"] = "paused"
+            attempt.update(
+                state="reconciled",
+                reconciliation={
+                    "resolution": "abandon" if abandon else "retry",
+                    "note": note,
+                    "evidence": evidence,
+                    "at": time.time(),
+                    "transition_id": transition["transition_id"],
+                    "disposition": "superseded",
+                },
+            )
+            self._save_attempt(db, attempt)
+            if step["attempt"] == attempt_id:
+                step["attempt"] = None
+                step["state"] = "todo"
+            if abandon:
+                step["blockers"].append(
+                    self._blocker(
+                        actor,
+                        note,
+                        "Operator must explicitly resolve abandonment before continuing",
+                        card["plan_revision"],
+                        step["id"],
+                    )
+                )
+            entry.update(
+                stop=stop,
+                saved=saved,
+                disposition={
+                    "kind": "abandoned" if abandon else "superseded",
+                    "note": note,
+                    "evidence": evidence,
+                    "at": time.time(),
+                    "by": actor,
+                },
+            )
+            if all(
+                item.get("disposition") for item in transition["inventory"].values()
+            ):
+                transition["phase"] = "ready"
+            return self._record(
+                db,
+                card,
+                "transition_resolved",
+                actor,
+                {
+                    "note": note,
+                    "evidence": evidence,
+                    "transition_id": transition["transition_id"],
+                    "attempt_id": attempt_id,
+                    "step_id": step["id"],
+                    "stop": stop,
+                    "disposition": entry["disposition"]["kind"],
+                    "preserved": bool(saved["preserved"]),
+                    "capture_failure": saved["capture_failure"],
+                },
+            )
+
+    def transition_activate(self, work_id, *, note, actor="operator") -> dict:
+        self._require_operator(actor)
+        if not note:
+            raise ValueError("Activate requires a note")
+        with self._transaction() as db:
+            card = self._load(db, work_id)
+            transition = card.get("transition")
+            proposal = card.get("proposal")
+            if not transition or transition["phase"] not in TRANSITION_OPEN:
+                raise ValueError("transition_not_begun")
+            if not proposal or proposal["proposal_id"] != transition["proposal_id"]:
+                raise ValueError("proposal_mismatch")
+            undisposed = [
+                attempt_id
+                for attempt_id, entry in transition["inventory"].items()
+                if not entry.get("disposition")
+            ]
+            if undisposed:
+                raise ValueError(
+                    "inventory_not_disposed: " + ", ".join(sorted(undisposed))
+                )
+            if any(
+                attempt["state"] in _ACTIVE | {"recovery_required"}
+                for attempt in self._attempts(db, card["work_id"])
+            ):
+                raise ValueError(
+                    "inventory_not_disposed: a live attempt appeared after begin"
+                )
+            was_paused = card["status"] == "paused"
+            self._activate_plan(db, card, proposal["plan"])
+            if was_paused:
+                # Activation never clears an operator pause or unknown-cost fence.
+                card["status"] = "paused"
+            new_steps = {step["id"]: step for step in card["plan"]["steps"]}
+            for attempt_id, entry in transition["inventory"].items():
+                preserved = (entry.get("saved") or {}).get("preserved")
+                step_id = entry["step_id"]
+                if entry.get("disposition", {}).get("kind") != "superseded":
+                    continue
+                if not preserved:
+                    transition["continuation"][attempt_id] = {
+                        "status": "not_available",
+                        "reason": (entry.get("saved") or {}).get("capture_failure")
+                        or "no validated saved bytes",
+                    }
+                    continue
+                spec = new_steps.get(step_id)
+                if spec is None:
+                    transition["continuation"][attempt_id] = {
+                        "status": "blocked",
+                        "reason": f"step {step_id} is not part of the new plan",
+                    }
+                    continue
+                outside = sorted(
+                    set(preserved["changed_files"]) - set(spec["owned_files"])
+                )
+                if outside:
+                    transition["continuation"][attempt_id] = {
+                        "status": "blocked",
+                        "reason": f"preserved changes outside the new ownership: {outside}",
+                    }
+                    continue
+                self._step(card, step_id)["checkpoint"] = {
+                    **{
+                        key: preserved[key]
+                        for key in (
+                            "commit",
+                            "base_commit",
+                            "workspace",
+                            "tree_hash",
+                            "changed_files",
+                        )
+                    },
+                    "checkpoint_id": str(uuid4()),
+                    "attempt_id": attempt_id,
+                    "step_id": step_id,
+                    "plan_revision": card["plan_revision"],
+                    "created_at": time.time(),
+                    "evidence": list(entry["disposition"]["evidence"]),
+                    "answer": entry["disposition"]["note"],
+                    "continuation": "operator_approved",
+                    "transition_id": transition["transition_id"],
+                }
+                transition["continuation"][attempt_id] = {
+                    "status": "checkpoint",
+                    "step_id": step_id,
+                    "commit": preserved["commit"],
+                }
+            transition.update(
+                phase="activated", activated_at=time.time(), note_on_activate=note
+            )
+            card.setdefault("transition_history", []).append(transition)
+            card["transition"] = None
+            card["proposal"] = None
+            return self._record(
+                db,
+                card,
+                "transition_activated",
+                actor,
+                {
+                    "note": note,
+                    "transition_id": transition["transition_id"],
+                    "proposal_id": proposal["proposal_id"],
+                    "plan_revision": card["plan_revision"],
+                    "continuation": transition["continuation"],
+                },
+            )
+
+    def transition_withdraw(self, work_id, *, note, actor="operator") -> dict:
+        self._require_operator(actor)
+        if not note:
+            raise ValueError("Withdraw requires a note")
+        with self._transaction() as db:
+            card = self._load(db, work_id)
+            proposal = card.get("proposal")
+            transition = card.get("transition")
+            if not proposal and not (
+                transition and transition["phase"] in TRANSITION_OPEN
+            ):
+                raise ValueError("no_pending_proposal")
+            details = {"note": note, "proposal_id": (proposal or {}).get("proposal_id")}
+            if transition and transition["phase"] in TRANSITION_OPEN:
+                # Quiescence stays sticky: fenced attempts keep needing reconciliation.
+                transition.update(phase="withdrawn", withdrawn_at=time.time())
+                card.setdefault("transition_history", []).append(transition)
+                card["transition"] = None
+                details["transition_id"] = transition["transition_id"]
+                details["sticky_quiescence"] = True
+            card["proposal"] = None
+            return self._record(db, card, "proposal_withdrawn", actor, details)
 
     def _recovery_target(self, db, card, step):
         """Refusal code for recovering the step's claim, or (None, attempt)."""

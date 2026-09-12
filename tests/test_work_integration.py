@@ -1622,13 +1622,187 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         claimed = await self.mutate(self.claude, identifier, "claim", step_id="change")
         changed = claimed["plan"]
         changed["steps"][0]["id"] = "renamed"
-        with self.assertRaises(ToolError):
-            await self.mutate(self.claude, identifier, "propose", plan=changed)
+        # Renaming a live step is negotiable; it cannot strand the attempt because
+        # activation waits for every inventory attempt to be disposed.
+        pending = await self.mutate(self.claude, identifier, "propose", plan=changed)
+        self.assertIsNotNone(pending["proposal"])
         view = await self.call(self.claude, {"action": "get", "work_id": identifier})
         self.assertEqual(view["steps"][0]["id"], "change")
         self.assertEqual(
             view["steps"][0]["attempt"]["attempt_id"], claimed["claim"]["attempt_id"]
         )
+        begun = await self.daemon(
+            "transition", identifier, "begin", "--note", "renegotiate"
+        )
+        self.assertEqual(begun.returncode, 0, begun.stderr)
+        activate = await self.daemon(
+            "transition", identifier, "activate", "--note", "x"
+        )
+        self.assertNotEqual(activate.returncode, 0)
+        self.assertIn("inventory_not_disposed", activate.stderr)
+        view = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        self.assertEqual(view["steps"][0]["id"], "change")
+        self.assertEqual(view["steps"][0]["state"], "recovery_required")
+        with self.assertRaises(ToolError):
+            await self.mutate(self.claude, identifier, "heartbeat", step_id="change")
+        resolved = await self.daemon(
+            "transition",
+            identifier,
+            "resolve",
+            "--attempt",
+            claimed["claim"]["attempt_id"],
+            "--confirm-stopped",
+            "--note",
+            "Manual holder stopped; nothing committed",
+            "--evidence",
+            "operator inspected the checkout",
+        )
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        activated = await self.daemon(
+            "transition", identifier, "activate", "--note", "go"
+        )
+        self.assertEqual(activated.returncode, 0, activated.stderr)
+        view = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        self.assertEqual(view["steps"][0]["id"], "renamed")
+        self.assertEqual(view["plan_revision"], 2)
+        self.assertEqual(view["agreements"], {})
+        self.assertIsNone(view["proposal"])
+
+    async def test_plan_transition_end_to_end_through_mcp_and_operator_cli(self):
+        """Scenario 1: a plan change with live attempts, safe stop and continuation.
+
+        Two manual attempts run through the real MCP surface; the operator drives
+        the transition through the documented CLI. Managed executors are covered at
+        store level with the supervisor's own teardown primitives.
+        """
+        identifier = await self.create(owner="claude")
+        view = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        plan = view["plan"]
+        plan["steps"].append(
+            {
+                "id": "docs",
+                "title": "Document module",
+                "goal": "Explain module",
+                "owner": "omp",
+                "reviewer": "claude",
+                "owned_files": ["docs.txt"],
+                "depends_on": [],
+                "acceptance": ["Docs describe the module."],
+            }
+        )
+        plan["steps"].append(
+            {
+                "id": "integration",
+                "title": "Integrate",
+                "goal": "Combine",
+                "owner": "claude",
+                "reviewer": "omp",
+                "owned_files": [],
+                "depends_on": ["change", "docs"],
+                "acceptance": ["Both parts integrated."],
+            }
+        )
+        await self.mutate(self.claude, identifier, "propose", plan=plan)
+        await self.mutate(self.claude, identifier, "agree")
+        await self.mutate(self.omp, identifier, "agree")
+        view = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        first = await self.mutate(self.claude, identifier, "claim", step_id="change")
+        second = await self.mutate(self.omp, identifier, "claim", step_id="docs")
+        (self.root / "module.txt").write_text("half\n")
+        self.git("add", "module.txt")
+        self.git("commit", "-qm", "wip")
+        saved = self.git("rev-parse", "HEAD")
+        changed = json.loads(json.dumps(plan))
+        changed["steps"][0]["goal"] = "Update module and its schema"
+        pending = await self.mutate(self.omp, identifier, "propose", plan=changed)
+        self.assertEqual(pending["plan_revision"], view["plan_revision"])
+        self.assertEqual(
+            {item["attempt_id"] for item in pending["proposal"]["preview"]["attempts"]},
+            {first["claim"]["attempt_id"], second["claim"]["attempt_id"]},
+        )
+        # Execution continues under the current plan while the proposal is pending.
+        await self.mutate(self.claude, identifier, "heartbeat", step_id="change")
+        summary = to_jsonable_python(
+            (
+                await self.claude.call_tool(
+                    "tandem_work", {"request": {"action": "get", "work_id": identifier}}
+                )
+            ).data
+        )
+        command = next(
+            item["command"]
+            for item in summary["next_actions"]
+            if item["action"] == "transition" and "begin" in item["command"]
+        )
+        self.assertIn(identifier, command)
+        self.assertIn(str(self.root), command)
+        inspect = await self.daemon("transition", identifier, "inspect")
+        self.assertEqual(inspect.returncode, 0, inspect.stderr)
+        self.assertEqual(len(json.loads(inspect.stdout)["commands"]), 2)
+        begun = await self.daemon(
+            "transition", identifier, "begin", "--note", "renegotiate"
+        )
+        self.assertEqual(begun.returncode, 0, begun.stderr)
+        for client, step in ((self.claude, "change"), (self.omp, "docs")):
+            with self.assertRaises(ToolError):
+                await self.mutate(client, identifier, "heartbeat", step_id=step)
+        with self.assertRaises(ToolError):
+            await self.mutate(self.claude, identifier, "claim", step_id="change")
+        stalled = await self.daemon("transition", identifier, "activate", "--note", "x")
+        self.assertNotEqual(stalled.returncode, 0)
+        report = await self.daemon("show", identifier, "--format", "markdown")
+        self.assertIn("awaiting stop evidence and operator disposition", report.stdout)
+        resolved = await self.daemon(
+            "transition",
+            identifier,
+            "resolve",
+            "--attempt",
+            first["claim"]["attempt_id"],
+            "--confirm-stopped",
+            "--saved-commit",
+            saved,
+            "--note",
+            "Claude stopped editing; intermediate commit kept",
+            "--evidence",
+            "commit inspected",
+        )
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        resolved = await self.daemon(
+            "transition",
+            identifier,
+            "resolve",
+            "--attempt",
+            second["claim"]["attempt_id"],
+            "--confirm-stopped",
+            "--note",
+            "OMP had not started editing",
+            "--evidence",
+            "checkout clean for docs.txt",
+        )
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        activated = await self.daemon(
+            "transition", identifier, "activate", "--note", "go"
+        )
+        self.assertEqual(activated.returncode, 0, activated.stderr)
+        after = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        self.assertEqual(after["plan_revision"], view["plan_revision"] + 1)
+        self.assertEqual(
+            after["plan"]["steps"][0]["goal"], "Update module and its schema"
+        )
+        self.assertEqual(after["agreements"], {})
+        self.assertEqual(after["steps"][0]["checkpoint"]["commit"], saved)
+        self.assertEqual(
+            after["steps"][0]["checkpoint"]["continuation"], "operator_approved"
+        )
+        with self.assertRaises(ToolError):
+            await self.mutate(self.claude, identifier, "heartbeat", step_id="change")
+        await self.mutate(self.claude, identifier, "agree")
+        await self.mutate(self.omp, identifier, "agree")
+        renewed = await self.mutate(self.claude, identifier, "claim", step_id="change")
+        self.assertEqual(renewed["claim"]["checkpoint"]["commit"], saved)
+        report = await self.daemon("show", identifier, "--format", "markdown")
+        self.assertIn("operator_attested", report.stdout)
+        self.assertIn("continuation for", report.stdout)
 
     async def test_supervisor_stop_remains_sticky_after_concurrent_revision(self):
         identifiers = [await self.create(), await self.create()]

@@ -139,6 +139,31 @@ def parser():
     )
     successor.add_argument("--principal", choices=("claude", "omp"), required=True)
     successor.add_argument("--note", required=True)
+    transition = commands.add_parser(
+        "transition",
+        help="Operator workflow for a pending plan revision: inspect, begin, resolve, activate, withdraw",
+    )
+    transition.add_argument("work_id")
+    transition.add_argument(
+        "operation", choices=("inspect", "begin", "resolve", "activate", "withdraw")
+    )
+    transition.add_argument("--attempt", help="Attempt to dispose (resolve)")
+    transition.add_argument("--note")
+    transition.add_argument("--evidence", action="append")
+    transition.add_argument(
+        "--confirm-stopped",
+        action="store_true",
+        help="Operator attestation that a MANUAL attempt's execution has stopped and its effects were inspected; managed attempts need the supervisor's confirmation instead",
+    )
+    transition.add_argument(
+        "--abandon",
+        action="store_true",
+        help="Dispose the attempt as abandoned (adds a blocker on its step) instead of superseded",
+    )
+    transition.add_argument(
+        "--saved-commit",
+        help="Manual implementation attempt: exact commit in the pinned repository holding its preserved work",
+    )
     assess = commands.add_parser(
         "assess",
         help="Explicit isolated Git observation of the project HEAD against the final result; records it, changes nothing",
@@ -391,6 +416,39 @@ def main(argv=None):
                     "revision": result["revision"],
                     "successor": result["successor"],
                 }
+            elif args.command == "transition":
+                if args.operation == "inspect":
+                    result = store.transition_inspect(args.work_id)
+                elif args.operation == "begin":
+                    result = store.transition_begin(args.work_id, note=args.note)
+                elif args.operation == "resolve":
+                    if not args.attempt:
+                        raise ValueError("resolve requires --attempt")
+                    result = store.transition_resolve(
+                        args.work_id,
+                        args.attempt,
+                        note=args.note,
+                        evidence=args.evidence,
+                        confirm_stopped=args.confirm_stopped,
+                        abandon=args.abandon,
+                        saved_commit=args.saved_commit,
+                        workspaces=WorkWorkspace(scope),
+                    )
+                elif args.operation == "activate":
+                    result = store.transition_activate(args.work_id, note=args.note)
+                else:
+                    result = store.transition_withdraw(args.work_id, note=args.note)
+                if args.operation != "inspect":
+                    result = {
+                        "work_id": result["work_id"],
+                        "revision": result["revision"],
+                        "plan_revision": result["plan_revision"],
+                        "status": result["status"],
+                        "proposal": result.get("proposal"),
+                        "transition": result.get("transition"),
+                        "next_action": result.get("next_action"),
+                        "operator_commands": result.get("operator_commands"),
+                    }
             elif args.command == "assess":
                 view = store.perform(
                     {"action": "get", "work_id": args.work_id}, actor="operator"

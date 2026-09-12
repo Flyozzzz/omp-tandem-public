@@ -1424,11 +1424,33 @@ class WorkItemsTests(unittest.TestCase):
             )
         revised = self.view()["plan"]
         revised["steps"][0]["goal"] = "Revised backend"
-        self.change("propose", plan=revised)
+        before = self.view()
+        pending = self.change("propose", plan=revised)
+        # A proposal negotiates; it neither fences the reviewer nor changes the plan.
+        self.assertEqual(pending["plan_revision"], before["plan_revision"])
+        self.assertEqual(pending["plan"], before["plan"])
+        self.assertIsNotNone(pending["proposal"])
+        self.assertEqual(self.view()["steps"][0]["state"], "running")
+        self.store.authenticate(review["token"])
+        self.store.transition_begin(self.work_id, note="Operator begins the transition")
         with self.assertRaises(ValueError):
             self.verdict(review)
         self.assertEqual(self.view()["steps"][0]["state"], "recovery_required")
-        self.assertIsNotNone(self.view()["authorization"]["revoked_at"])
+        self.assertIsNone(self.view()["authorization"]["revoked_at"])
+        self.store.confirm_stopped(review["attempt_id"])
+        self.store.transition_resolve(
+            self.work_id,
+            review["attempt_id"],
+            note="Managed reviewer torn down by the supervisor",
+            evidence=["supervisor teardown confirmed"],
+        )
+        activated = self.store.transition_activate(
+            self.work_id, note="Activate revision"
+        )
+        self.assertEqual(activated["plan_revision"], before["plan_revision"] + 1)
+        self.assertIsNotNone(activated["authorization"]["revoked_at"])
+        with self.assertRaises(ValueError):
+            self.store.authenticate(review["token"])
         history = self.store.perform(
             {"action": "history", "work_id": self.work_id}, actor="omp"
         )
@@ -2175,6 +2197,363 @@ class WorkItemsTests(unittest.TestCase):
         )
         self.assertEqual(result["steps"][0]["state"], "recovery_required")
         self.assertIsNone(result["steps"][0]["checkpoint"])
+
+    def _git_commit(self, name, content, message):
+        (self.root / name).write_text(content)
+        subprocess.run(["git", "-C", str(self.root), "add", name], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.root),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-qm",
+                message,
+            ],
+            check=True,
+        )
+        return subprocess.run(
+            ["git", "-C", str(self.root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def test_pending_proposal_negotiates_and_operator_transition_activates(self):
+        from omp_tandem.work_access import perform_work
+
+        self.agreed(parallel=True)
+        self.authorize()
+        managed = self.reserve("backend")
+        self.store.started(
+            managed["attempt_id"],
+            workspace=str(self.scope.directory / "worktrees" / managed["attempt_id"]),
+        )
+        manual = self._claim(
+            "claude", {"host_owner": "claude-host"}, step_id="frontend"
+        )
+        before = self.view()
+        revised = json.loads(json.dumps(before["plan"]))
+        revised["steps"][1]["goal"] = "Widen the frontend boundary"
+        # A bound worker may negotiate: nothing is fenced and nothing changes.
+        pending = self.store.perform(
+            {
+                "action": "propose",
+                "work_id": self.work_id,
+                "expected_revision": before["revision"],
+                "operation_id": str(uuid4()),
+                "plan": revised,
+                "note": "boundary was wrong",
+            },
+            actor="omp",
+            attempt_token=managed["token"],
+        )
+        self.assertEqual(pending["plan"], before["plan"])
+        self.assertEqual(pending["plan_revision"], before["plan_revision"])
+        self.assertEqual(pending["agreements"], before["agreements"])
+        self.assertIsNone(pending["authorization"]["revoked_at"])
+        self.store.authenticate(managed["token"])
+        self.store.authenticate(manual["token"])
+        preview = pending["proposal"]["preview"]
+        self.assertTrue(preview["card_wide"])
+        self.assertEqual(
+            {item["attempt_id"] for item in preview["attempts"]},
+            {managed["attempt_id"], manual["attempt_id"]},
+        )
+        self.assertEqual(preview["changed_steps"], ["frontend"])
+        summary = perform_work(
+            self.store, {"action": "get", "work_id": self.work_id}, actor="claude"
+        )
+        self.assertEqual(summary["proposal"]["affected_attempts"], 2)
+        hints = [
+            item for item in summary["next_actions"] if item["action"] == "transition"
+        ]
+        self.assertTrue(hints)
+        self.assertTrue(all(not item["allowed"] for item in hints))
+        self.assertIn(f"transition {self.work_id} begin", hints[0]["command"])
+        self.assertIn("omp_tandem.work_daemon", hints[0]["command"])
+        first_id = pending["proposal"]["proposal_id"]
+        revised["steps"][1]["goal"] = "Widen it differently"
+        replaced = self.change("propose", plan=revised)
+        self.assertNotEqual(replaced["proposal"]["proposal_id"], first_id)
+        withdrawn = self.change("propose", plan=before["plan"])
+        self.assertIsNone(withdrawn["proposal"])
+        self.change("propose", plan=revised)
+        with self.assertRaisesRegex(ValueError, "transition_not_begun"):
+            self.store.transition_activate(self.work_id, note="too early")
+        with self.assertRaises(ValueError):
+            self.store.transition_begin(self.work_id, note="x", actor="claude")
+        begun = self.store.transition_begin(self.work_id, note="Begin renegotiation")
+        self.assertEqual(begun["transition"]["phase"], "stopping")
+        self.assertEqual(
+            {
+                step["state"]
+                for step in begun["steps"]
+                if step["id"] in ("backend", "frontend")
+            },
+            {"recovery_required"},
+        )
+        with self.assertRaises(ValueError):
+            self.store.authenticate(managed["token"])
+        with self.assertRaises(ValueError):
+            self.store.authenticate(manual["token"])
+        with self.assertRaisesRegex(WorkConflict, "transition_in_progress"):
+            self.change("propose", plan=before["plan"])
+        with self.assertRaises((WorkConflict, ValueError)):
+            self._claim("omp", {"host_owner": "h"}, step_id="frontend")
+        with self.assertRaisesRegex(ValueError, "stop_unconfirmed"):
+            self.store.transition_resolve(
+                self.work_id, managed["attempt_id"], note="n", evidence=["e"]
+            )
+        with self.assertRaisesRegex(ValueError, "attestation_required"):
+            self.store.transition_resolve(
+                self.work_id, manual["attempt_id"], note="n", evidence=["e"]
+            )
+        with self.assertRaisesRegex(ValueError, "inventory_not_disposed"):
+            self.store.transition_activate(self.work_id, note="not yet")
+        self.store.confirm_stopped(managed["attempt_id"])
+        resolved = self.store.transition_resolve(
+            self.work_id,
+            managed["attempt_id"],
+            note="Supervisor tore the worker down; workspace inspected",
+            evidence=["teardown log"],
+            workspaces=__import__(
+                "omp_tandem.work_workspace", fromlist=["WorkWorkspace"]
+            ).WorkWorkspace(self.scope),
+        )
+        entry = resolved["transition"]["inventory"][managed["attempt_id"]]
+        self.assertEqual(entry["stop"]["source"], "supervisor_confirmed")
+        self.assertIsNotNone(entry["saved"]["capture_failure"])
+        with self.assertRaisesRegex(ValueError, "attempt_already_disposed"):
+            self.store.transition_resolve(
+                self.work_id, managed["attempt_id"], note="n", evidence=["e"]
+            )
+        self.store.transition_resolve(
+            self.work_id,
+            manual["attempt_id"],
+            note="Manual holder stopped; no background processes",
+            evidence=["operator inspection"],
+            confirm_stopped=True,
+        )
+        ready = self.view()
+        self.assertEqual(ready["transition"]["phase"], "ready")
+        activated = self.store.transition_activate(self.work_id, note="Activate")
+        self.assertEqual(activated["plan_revision"], before["plan_revision"] + 1)
+        self.assertEqual(activated["plan"], revised)
+        self.assertEqual(activated["agreements"], {})
+        self.assertIsNotNone(activated["authorization"]["revoked_at"])
+        self.assertIsNone(activated["proposal"])
+        self.assertIsNone(activated["transition"])
+        # The managed attempt never recorded its usage: the unknown-cost pause set
+        # at disposal survives activation instead of being cleared to draft.
+        self.assertEqual(activated["status"], "paused")
+        self.assertTrue(activated["authorization"]["unknown_cost"])
+        past = activated["transition_history"][-1]
+        self.assertEqual(past["phase"], "activated")
+        self.assertEqual(
+            past["continuation"][managed["attempt_id"]]["status"], "not_available"
+        )
+        for attempt in (managed, manual):
+            self.assertEqual(
+                self.store.attempt(attempt["attempt_id"])["state"], "reconciled"
+            )
+            self.assertEqual(
+                self.store.attempt(attempt["attempt_id"])["reconciliation"][
+                    "disposition"
+                ],
+                "superseded",
+            )
+        self.assertEqual({step["state"] for step in activated["steps"]}, {"todo"})
+        rendered = self.store.report_markdown(activated, actor="claude")
+        self.assertIn("## Plan transition", rendered)
+        self.assertIn("supervisor_confirmed", rendered)
+
+    def test_withdrawal_after_begin_keeps_quiescence_and_abandon_adds_blocker(self):
+        self.agreed(parallel=True)
+        manual = self._claim(
+            "claude", {"host_owner": "claude-host"}, step_id="frontend"
+        )
+        before = self.view()
+        revised = json.loads(json.dumps(before["plan"]))
+        revised["steps"][1]["goal"] = "Changed"
+        self.change("propose", plan=revised)
+        self.store.transition_begin(self.work_id, note="begin")
+        withdrawn = self.store.transition_withdraw(
+            self.work_id, note="Keep the old plan"
+        )
+        self.assertIsNone(withdrawn["proposal"])
+        self.assertIsNone(withdrawn["transition"])
+        self.assertEqual(withdrawn["plan_revision"], before["plan_revision"])
+        self.assertEqual(withdrawn["plan"], before["plan"])
+        self.assertEqual(withdrawn["transition_history"][-1]["phase"], "withdrawn")
+        self.assertEqual(
+            self.store.attempt(manual["attempt_id"])["state"], "recovery_required"
+        )
+        step = next(item for item in withdrawn["steps"] if item["id"] == "frontend")
+        self.assertEqual(step["state"], "recovery_required")
+        with self.assertRaises((WorkConflict, ValueError)):
+            self._claim("claude", {"host_owner": "claude-host"}, step_id="frontend")
+        # A new proposal can still be negotiated; abandonment records a blocker.
+        self.change("propose", plan=revised)
+        self.store.transition_begin(self.work_id, note="again")
+        self.store.transition_resolve(
+            self.work_id,
+            manual["attempt_id"],
+            note="Work discarded",
+            evidence=["nothing to keep"],
+            confirm_stopped=True,
+            abandon=True,
+        )
+        activated = self.store.transition_activate(self.work_id, note="activate")
+        step = next(item for item in activated["steps"] if item["id"] == "frontend")
+        self.assertTrue(step["blockers"])
+        self.assertEqual(
+            self.store.attempt(manual["attempt_id"])["reconciliation"]["resolution"],
+            "abandon",
+        )
+
+    def test_transition_preserves_manual_commit_as_operator_approved_checkpoint(self):
+        from omp_tandem.work_workspace import WorkWorkspace
+
+        self.agreed()
+        claim = self._claim("omp", {"host_owner": "omp-host"}, step_id="backend")
+        saved = self._git_commit("backend.py", "half done\n", "wip backend")
+        revised = json.loads(json.dumps(self.view()["plan"]))
+        revised["steps"][0]["goal"] = "Backend with a wider contract"
+        self.change("propose", plan=revised)
+        self.store.transition_begin(self.work_id, note="begin")
+        with self.assertRaises(ValueError):
+            self.store.transition_resolve(
+                self.work_id,
+                claim["attempt_id"],
+                note="wrong commit",
+                evidence=["e"],
+                confirm_stopped=True,
+                saved_commit="f" * 40,
+                workspaces=WorkWorkspace(self.scope),
+            )
+        resolved = self.store.transition_resolve(
+            self.work_id,
+            claim["attempt_id"],
+            note="Stopped; intermediate work committed",
+            evidence=["commit inspected"],
+            confirm_stopped=True,
+            saved_commit=saved,
+            workspaces=WorkWorkspace(self.scope),
+        )
+        preserved = resolved["transition"]["inventory"][claim["attempt_id"]]["saved"][
+            "preserved"
+        ]
+        self.assertEqual(preserved["commit"], saved)
+        self.assertEqual(preserved["changed_files"], ["backend.py"])
+        activated = self.store.transition_activate(self.work_id, note="activate")
+        checkpoint = activated["steps"][0]["checkpoint"]
+        self.assertEqual(checkpoint["commit"], saved)
+        self.assertEqual(checkpoint["plan_revision"], activated["plan_revision"])
+        self.assertEqual(checkpoint["continuation"], "operator_approved")
+        self.assertEqual(
+            activated["transition_history"][-1]["continuation"][claim["attempt_id"]][
+                "status"
+            ],
+            "checkpoint",
+        )
+        # Ownership shrink under the new plan blocks continuation instead of relabeling.
+        self.change("agree", actor="claude")
+        self.change("agree", actor="omp")
+        second = self._claim("omp", {"host_owner": "omp-host"}, step_id="backend")
+        saved = self._git_commit("backend.py", "more work\n", "wip backend 2")
+        shrunk = json.loads(json.dumps(self.view()["plan"]))
+        shrunk["steps"][0]["owned_files"] = ["other.py"]
+        self.change("propose", plan=shrunk)
+        self.store.transition_begin(self.work_id, note="begin")
+        self.store.transition_resolve(
+            self.work_id,
+            second["attempt_id"],
+            note="stop",
+            evidence=["e"],
+            confirm_stopped=True,
+            saved_commit=saved,
+            workspaces=WorkWorkspace(self.scope),
+        )
+        blocked = self.store.transition_activate(self.work_id, note="activate")
+        self.assertIsNone(blocked["steps"][0]["checkpoint"])
+        self.assertEqual(
+            blocked["transition_history"][-1]["continuation"][second["attempt_id"]][
+                "status"
+            ],
+            "blocked",
+        )
+
+    def test_begun_transition_survives_reopen_and_removed_step_is_retired(self):
+        self.agreed(parallel=True)
+        manual = self._claim(
+            "claude", {"host_owner": "claude-host"}, step_id="frontend"
+        )
+        before = self.view()
+        removed = json.loads(json.dumps(before["plan"]))
+        removed["steps"] = [
+            step for step in removed["steps"] if step["id"] != "frontend"
+        ]
+        removed["steps"][-1]["depends_on"] = ["backend"]
+        self.change("propose", plan=removed)
+        self.store.transition_begin(self.work_id, note="begin")
+        # A crash or response loss after begin: a fresh store sees the same
+        # durable transition, refuses activation and grants nothing new.
+        reopened = WorkStore(self.store.database, self.scope)
+        inspected = reopened.transition_inspect(self.work_id)
+        self.assertEqual(inspected["transition"]["phase"], "stopping")
+        self.assertEqual(
+            inspected["transition"]["inventory"][0]["required"],
+            "operator attestation of the manual stop (--confirm-stopped) and disposition",
+        )
+        with self.assertRaisesRegex(ValueError, "inventory_not_disposed"):
+            reopened.transition_activate(self.work_id, note="x")
+        with self.assertRaises(ValueError):
+            reopened.authenticate(manual["token"])
+        reopened.transition_resolve(
+            self.work_id,
+            manual["attempt_id"],
+            note="stopped",
+            evidence=["inspected"],
+            confirm_stopped=True,
+        )
+        activated = reopened.transition_activate(self.work_id, note="activate")
+        self.assertEqual(
+            [step["id"] for step in activated["steps"]], ["backend", "integration"]
+        )
+        self.assertEqual(reopened.attempt(manual["attempt_id"])["state"], "reconciled")
+        self.assertEqual(
+            activated["transition_history"][-1]["continuation"][manual["attempt_id"]][
+                "status"
+            ],
+            "not_available",
+        )
+
+    def test_unknown_managed_cost_pauses_and_activation_keeps_the_pause(self):
+        self.agreed()
+        self.authorize()
+        managed = self.reserve("backend")
+        revised = json.loads(json.dumps(self.view()["plan"]))
+        revised["steps"][0]["goal"] = "Changed"
+        self.change("propose", plan=revised)
+        self.store.transition_begin(self.work_id, note="begin")
+        self.store.confirm_stopped(managed["attempt_id"])
+        resolved = self.store.transition_resolve(
+            self.work_id, managed["attempt_id"], note="stopped", evidence=["e"]
+        )
+        self.assertEqual(resolved["status"], "paused")
+        self.assertTrue(resolved["authorization"]["unknown_cost"])
+        activated = self.store.transition_activate(self.work_id, note="activate")
+        self.assertEqual(activated["status"], "paused")
+        self.assertEqual(activated["plan_revision"], 2)
 
 
 class AttemptBudgetAndShellTests(WorkItemsTests):

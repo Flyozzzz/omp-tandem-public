@@ -774,7 +774,25 @@ class WorkWorkspace:
                 allow_ignored=shell_permission(attempt),
             )
 
-    def finish(self, attempt: dict, plan: dict, workspace: dict) -> dict:
+    def preserve(self, attempt: dict, plan: dict) -> dict:
+        """Capture an interrupted managed workspace as a validated immutable commit.
+
+        The same ownership, base and byte checks as a submission apply; the
+        result is preservation evidence for an operator-approved continuation,
+        never a submission and never a replay of the interrupted commands.
+        """
+        if not attempt.get("workspace"):
+            raise ValueError("Attempt has no retained workspace to preserve")
+        return self.finish(
+            attempt,
+            plan,
+            {"path": attempt["workspace"], "base_commit": attempt.get("source_commit")},
+            message=f"Preserve interrupted shared-work step {attempt['step_id']}",
+        )
+
+    def finish(
+        self, attempt: dict, plan: dict, workspace: dict, *, message: str | None = None
+    ) -> dict:
         """Commit a verified raw-byte snapshot, including owned additions/deletions."""
         with self._lock():
             self._repository()
@@ -870,7 +888,10 @@ class WorkWorkspace:
                 )
             self._metadata(attempt, plan, workspace)
             commit = self._new_commit(
-                path, tree, base, f"Submit shared-work step {attempt['step_id']}"
+                path,
+                tree,
+                base,
+                message or f"Submit shared-work step {attempt['step_id']}",
             )
             if self._tree(commit) != snapshot:
                 raise ValueError(
