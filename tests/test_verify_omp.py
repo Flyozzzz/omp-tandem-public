@@ -7,10 +7,14 @@ acquisition preflight, evidence placement) without downloading or running OMP.
 from __future__ import annotations
 
 import argparse
+import io
 import json
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import verify_omp
 
@@ -85,7 +89,7 @@ class AcquisitionPreflightTests(unittest.TestCase):
             self.assertEqual(plan["source"], "official_release_cache")
             self.assertTrue(plan["acquisition_required"])
             cached = root / "cache" / "18.1.13" / "omp-test"
-            cached.parent.mkdir(parents=True)
+            cached.parent.mkdir(parents=True, exist_ok=True)
             cached.write_bytes(b"cached")
             plan = verify_omp.preflight(
                 self._args(root), MANIFEST, {"checks": []}, key="test-arch"
@@ -138,6 +142,105 @@ class AcquisitionPreflightTests(unittest.TestCase):
             self.assertEqual(verify_omp.failure_class(report), "acquisition")
             self.assertEqual(verify_omp.probe_status(report), "not_run")
             self.assertFalse(plan["target"].exists())
+
+
+class EnvironmentClassificationTests(unittest.TestCase):
+    """Reviewer counterexamples: setup failures must never read as probe results."""
+
+    def _args(self, root, omp=None):
+        return argparse.Namespace(
+            cache_dir=root / "cache", report=root / "report.json", omp=omp
+        )
+
+    def test_cache_path_that_is_a_file_is_an_environment_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "cache").write_text("not a directory")
+            report = {"checks": []}
+            with self.assertRaises(RuntimeError) as failure:
+                verify_omp.preflight(
+                    self._args(root), MANIFEST, report, key="test-arch"
+                )
+            self.assertIn("not a directory", str(failure.exception))
+            self.assertEqual(
+                [c["name"] for c in report["checks"]], ["binary_preflight"]
+            )
+            self.assertEqual(report["checks"][0]["status"], "failed")
+            self.assertEqual(verify_omp.failure_class(report), "environment")
+            self.assertEqual(verify_omp.probe_status(report), "not_run")
+
+    def test_failure_outside_any_check_is_classified_by_phase(self):
+        passed_setup = [
+            {"name": "binary_preflight", "status": "passed"},
+            {"name": "official_binary_sha256", "status": "passed"},
+            {"name": "sdk_pin", "status": "passed"},
+        ]
+        setup_failure = {"status": "failed", "phase": "setup", "checks": passed_setup}
+        self.assertEqual(verify_omp.failure_class(setup_failure), "environment")
+        self.assertEqual(verify_omp.probe_status(setup_failure), "not_run")
+        acquisition_failure = {
+            "status": "failed",
+            "phase": "acquisition",
+            "checks": passed_setup[:1],
+        }
+        self.assertEqual(verify_omp.failure_class(acquisition_failure), "acquisition")
+        self.assertEqual(verify_omp.probe_status(acquisition_failure), "not_run")
+        probe_failure = {"status": "failed", "phase": "probes", "checks": passed_setup}
+        self.assertEqual(verify_omp.failure_class(probe_failure), "probe")
+        self.assertEqual(verify_omp.probe_status(probe_failure), "not_run")
+        version_failure = {
+            "status": "failed",
+            "phase": "setup",
+            "checks": [
+                *passed_setup,
+                {"name": "actual_omp_version", "status": "failed"},
+            ],
+        }
+        self.assertEqual(verify_omp.failure_class(version_failure), "environment")
+        passed = {"status": "passed", "phase": "complete", "checks": passed_setup}
+        self.assertIsNone(verify_omp.failure_class(passed))
+
+    def test_main_reports_environment_failure_before_probes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            supplied = root / "omp"
+            supplied.write_bytes(b"pinned stand-in")
+            report_path = root / "compat.json"
+            argv = [
+                "verify_omp.py",
+                "--cache-dir",
+                str(root / "cache"),
+                "--omp",
+                str(supplied),
+                "--report",
+                str(report_path),
+            ]
+            manifest = json.loads(
+                (verify_omp.ROOT / "config" / "omp-compatibility.json").read_text()
+            )
+            pinned = manifest["assets"][verify_omp.platform_key()]["sha256"]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(verify_omp, "digest", return_value=pinned),
+                patch.object(
+                    verify_omp.tempfile,
+                    "TemporaryDirectory",
+                    side_effect=OSError("isolated environment unavailable"),
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                exit_code = verify_omp.main()
+            report = json.loads(report_path.read_text())
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(report["status"], "failed")
+            self.assertEqual(report["phase"], "setup")
+            self.assertEqual(report["failure_class"], "environment")
+            self.assertEqual(report["probes"], "not_run")
+            self.assertFalse(
+                any(c["name"] not in verify_omp.SETUP_CHECKS for c in report["checks"]),
+                "no probe check may be recorded when OMP never ran",
+            )
 
 
 class ProbeStatusTests(unittest.TestCase):

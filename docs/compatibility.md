@@ -38,14 +38,20 @@ The command runs in three phases, and the report says which one failed:
    found no binary. A timeout or a digest mismatch here is an **acquisition**
    failure. `official_binary_sha256` then compares the binary on disk with the
    pin, whatever its source.
-3. Every later check is a probe of the running OMP. Only a failure there is a
+3. `sdk_pin`, the isolated environment and `actual_omp_version` prepare the
+   run; a failure there is still an **environment** failure and no probe has
+   executed yet.
+4. Every later check is a probe of the running OMP. Only a failure there is a
    **probe** failure. An unsupported helper capability is a measured gate in
    `delegation.unsatisfied_gates`, not a failure of any class.
 
-The report records `failure_class` (`environment`, `acquisition`, `probe`, or
-`null`) and `probes` (`not_run`, `failed`, `passed`). A run that failed before
-the probes therefore says `probes: "not_run"` and never counts as compatibility
-evidence. A failed rerun does not overwrite a passing report at the same
+The report records `phase` (`preflight`, `acquisition`, `setup`, `probes`,
+`complete`), `failure_class` (`environment`, `acquisition`, `probe`, or `null`)
+and `probes` (`not_run`, `failed`, `passed`). A failure raised outside any
+check, such as the isolated environment not being creatable, is classified by
+the phase that was running. A run that failed before the probe phase therefore
+says `probes: "not_run"` even when preflight, the digest and the SDK pin
+passed, and never counts as compatibility evidence. A failed rerun does not overwrite a passing report at the same
 `--report` path: it is written next to it as `<name>.failed-<timestamp>.json`
 and the passing file is kept. Cached binaries are reused across runs, so a
 compatibility-only rerun with the same `--cache-dir` (or `--omp`) repeats the

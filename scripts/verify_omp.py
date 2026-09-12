@@ -65,11 +65,22 @@ def digest(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-# Checks that establish the binary before any probe runs. Everything else in the
-# report is a probe of the running OMP, so a failure there is a different class.
+# Checks that establish the binary and the environment before any probe runs.
+# Everything else in the report is a probe of the running OMP, so a failure there
+# is a different class. The run also records its phase so a failure raised outside
+# any check (for example while creating the isolated environment) is classified by
+# where it happened rather than defaulting to "no failed check".
 PREFLIGHT_CHECK = "binary_preflight"
 ACQUISITION_CHECKS = ("official_binary_acquisition", "official_binary_sha256")
-SETUP_CHECKS = (PREFLIGHT_CHECK, *ACQUISITION_CHECKS)
+ENVIRONMENT_CHECKS = ("sdk_pin", "actual_omp_version")
+SETUP_CHECKS = (PREFLIGHT_CHECK, *ACQUISITION_CHECKS, *ENVIRONMENT_CHECKS)
+PHASES = ("preflight", "acquisition", "setup", "probes", "complete")
+PHASE_FAILURE = {
+    "preflight": "environment",
+    "acquisition": "acquisition",
+    "setup": "environment",
+    "probes": "probe",
+}
 
 
 def platform_key():
@@ -95,7 +106,23 @@ def preflight(args, manifest, report, *, key=None):
             require(target.is_file(), f"Supplied binary is not a file: {target}")
             source = "provided"
         else:
-            target = args.cache_dir.resolve() / manifest["omp_version"] / asset["name"]
+            cache = args.cache_dir.resolve()
+            require(
+                not cache.exists() or cache.is_dir(),
+                f"Cache path is not a directory: {cache}",
+            )
+            target = cache / manifest["omp_version"] / asset["name"]
+            try:
+                # Cache readiness is an environment question; settle it here so a
+                # later download cannot fail for a reason that has nothing to do
+                # with the network or the asset.
+                target.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise RuntimeError(f"Cache directory is not usable: {exc}") from exc
+            require(
+                os.access(target.parent, os.W_OK),
+                f"Cache directory is not writable: {target.parent}",
+            )
             source = "official_release_cache"
         plan = {
             "key": key,
@@ -172,30 +199,57 @@ def verify_binary(plan, report):
 
 
 def binary(args, manifest, report):
+    report["phase"] = "preflight"
     plan = preflight(args, manifest, report)
     if plan["acquisition_required"]:
+        report["phase"] = "acquisition"
         acquire(plan, report)
+    report["phase"] = "acquisition"
     return verify_binary(plan, report)
 
 
+def _probe_checks(report):
+    return [
+        item for item in report.get("checks", []) if item["name"] not in SETUP_CHECKS
+    ]
+
+
+def _phase(report):
+    phase = report.get("phase")
+    if phase in PHASES:
+        return phase
+    # Reports written before phases were recorded: infer from what ran.
+    return "probes" if _probe_checks(report) else "preflight"
+
+
 def failure_class(report):
-    """environment | acquisition | probe | None, from the recorded checks."""
+    """environment | acquisition | probe | None.
+
+    A failed check decides by its name; a failure raised outside any check (the
+    report says failed but no check does) decides by the phase that was running.
+    """
     for item in report.get("checks", []):
         if item.get("status") != "failed":
             continue
-        if item["name"] == PREFLIGHT_CHECK:
+        if item["name"] == PREFLIGHT_CHECK or item["name"] in ENVIRONMENT_CHECKS:
             return "environment"
         if item["name"] in ACQUISITION_CHECKS:
             return "acquisition"
         return "probe"
+    if report.get("status") == "failed":
+        return PHASE_FAILURE.get(_phase(report))
     return None
 
 
 def probe_status(report):
-    """not_run | failed | passed for the checks that exercise the binary."""
-    probes = [
-        item for item in report.get("checks", []) if item["name"] not in SETUP_CHECKS
-    ]
+    """not_run | failed | passed for the checks that exercise the binary.
+
+    Setup checks (pin, SDK, version) never count as probes: a run that failed
+    before the probe phase started reports not_run even when setup passed.
+    """
+    if _phase(report) not in ("probes", "complete"):
+        return "not_run"
+    probes = _probe_checks(report)
     if not probes:
         return "not_run"
     if any(item.get("status") == "failed" for item in probes):
@@ -1425,6 +1479,7 @@ def main():
     signal.alarm(600)
     try:
         executable = binary(args, manifest, report)
+        report["phase"] = "setup"
         with check(report, "sdk_pin") as evidence:
             distribution = importlib.metadata.distribution("omp-rpc")
             direct = json.loads(distribution.read_text("direct_url.json") or "{}")
@@ -1468,8 +1523,10 @@ def main():
                     evidence["version"] = version
                 with Provider() as provider:
                     provider.configure(agent)
+                    report["phase"] = "probes"
                     exercise(executable, root, provider, report)
                     helper_probe(executable, root, agent, provider, report)
+        report["phase"] = "complete"
         report["status"] = "passed"
     except Exception as exc:
         logger.exception("Real OMP compatibility verification failed")
