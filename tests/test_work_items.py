@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -346,6 +347,151 @@ class WorkItemsTests(unittest.TestCase):
         self.change("propose", plan=modified)
         self.assertEqual(self.view()["agreements"], {})
         self.assertEqual(self.view()["status"], "draft")
+
+    def test_legacy_receipts_replay_original_meaning_with_empty_review_context(self):
+        # Persist the old unversioned model-dump hash and original response bytes.
+        commands = [
+            {
+                "action": "create",
+                "expected_revision": 0,
+                "operation_id": "legacy-create",
+                "plan": plan(),
+            }
+        ]
+        created = self.store.perform(commands[0], actor="claude")
+        work_id = created["work_id"]
+        commands.append(
+            {
+                "action": "propose",
+                "work_id": work_id,
+                "expected_revision": created["revision"],
+                "operation_id": "legacy-propose",
+                "plan": plan(),
+            }
+        )
+        self.store.perform(commands[1], actor="claude")
+        for actor in ("claude", "omp"):
+            view = self.store.perform(
+                {"action": "get", "work_id": work_id}, actor=actor
+            )
+            self.store.perform(
+                {
+                    "action": "agree",
+                    "work_id": work_id,
+                    "expected_revision": view["revision"],
+                    "operation_id": "legacy-agree-" + actor,
+                },
+                actor=actor,
+            )
+        view = self.store.perform({"action": "get", "work_id": work_id}, actor="omp")
+        commands.append(
+            {
+                "action": "claim",
+                "work_id": work_id,
+                "step_id": "backend",
+                "expected_revision": view["revision"],
+                "operation_id": "legacy-claim",
+            }
+        )
+        self.store.perform(commands[-1], actor="omp")
+        for command in commands:
+            actor = "omp" if command["action"] == "claim" else "claude"
+            legacy = WorkCommand.model_validate(command).model_dump()
+            for step in (legacy.get("plan") or {}).get("steps", []):
+                step.pop("review_context_paths", None)
+            digest = hashlib.sha256(
+                json.dumps(
+                    {"command": legacy, "attempt_id": None},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode()
+            ).hexdigest()
+            with self.store._transaction() as db:
+                saved = db.execute(
+                    "SELECT response FROM work_operations WHERE actor=? AND operation_id=?",
+                    (actor, command["operation_id"]),
+                ).fetchone()["response"]
+                response = json.loads(saved)
+                for step in response["plan"]["steps"]:
+                    step.pop("review_context_paths", None)
+                saved = json.dumps(response)
+                db.execute(
+                    "UPDATE work_operations SET fingerprint=?,response=? WHERE actor=? AND operation_id=?",
+                    (digest, saved, actor, command["operation_id"]),
+                )
+            repeated = copy.deepcopy(command)
+            for step in (repeated.get("plan") or {}).get("steps", []):
+                step["review_context_paths"] = []
+            result = self.store.perform(repeated, actor=actor)
+            if "claim" in result:
+                result["claim"].pop("token", None)
+            self.assertEqual(result, json.loads(saved))
+            with self.assertRaises(WorkConflict):
+                self.store.perform(
+                    {**repeated, "note": "Different command"}, actor=actor
+                )
+            if repeated.get("plan"):
+                repeated["plan"]["steps"][0]["review_context_paths"] = ["caller.py"]
+                with self.assertRaises(WorkConflict):
+                    self.store.perform(repeated, actor=actor)
+
+    def test_review_context_is_read_only_deduplicated_and_versioned(self):
+        self.agreed()
+        self.authorize()
+        self.submit(self.reserve())
+        review = self.reserve(actor="claude", kind="review")
+        self.verdict(review)
+        self.finish_review(review)
+        previous = self.view()
+        self.assertIsNotNone(previous["steps"][0]["acceptance"])
+        declaration = plan()
+        declaration["steps"][0]["review_context_paths"] = ["caller.py", "caller.py"]
+        revised = self.change("propose", plan=declaration)
+        self.assertEqual(revised["plan_revision"], previous["plan_revision"] + 1)
+        self.assertEqual(revised["agreements"], {})
+        self.assertEqual(
+            revised["plan"]["steps"][0]["review_context_paths"], ["caller.py"]
+        )
+        self.assertEqual(revised["plan"]["steps"][0]["owned_files"], ["backend.py"])
+        self.assertIsNone(revised["steps"][0]["acceptance"])
+        self.agreed()
+        self.authorize()
+        self.submit(self.reserve())
+        expanded = self.reserve(actor="claude", kind="review")
+        self.assertNotEqual(
+            expanded["review_scope"]["snapshot_input_fingerprint"],
+            review["review_scope"]["snapshot_input_fingerprint"],
+        )
+        declaration["steps"][0]["review_context_paths"] = [
+            f"caller{i}.py" for i in range(257)
+        ]
+        with self.assertRaises(ValidationError):
+            WorkPlan.model_validate(declaration)
+
+    def test_review_context_rejects_noncanonical_paths(self):
+        for path in (
+            "../secret",
+            "/absolute",
+            "dir/../file",
+            "./file",
+            "dir//file",
+            "dir/",
+            ".git/config",
+            ".GIT/config",
+            "state://file",
+            "local:config",
+            "C:/file",
+            "dir\\file",
+            "file*.py",
+            "file?.py",
+            "[ab].py",
+            "file\x00",
+        ):
+            declaration = plan()
+            declaration["steps"][0]["review_context_paths"] = [path]
+            with self.subTest(path=path), self.assertRaises(ValidationError):
+                WorkPlan.model_validate(declaration)
 
     def test_pending_review_never_wakes_dependency_before_success(self):
         self.agreed()

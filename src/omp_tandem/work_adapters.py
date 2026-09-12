@@ -160,6 +160,10 @@ def _prompt(attempt, plan, workspace):
     )
 
 
+class _CaptureBlocked(ValueError):
+    """The immutable capture could not satisfy its declared review inputs."""
+
+
 class _Adapter:
     def __init__(self, bridge):
         self.bridge = bridge
@@ -171,7 +175,11 @@ class _Adapter:
 
     def _pin_snapshot(self, attempt, plan):
         """Capture the exact submitted commit as an immutable review bundle."""
-        summary = self.bridge.reviews.create(_pin_snapshot_request(attempt, plan))
+        request = _pin_snapshot_request(attempt, plan)
+        try:
+            summary = self.bridge.reviews.create(request)
+        except ValueError as exc:
+            raise _CaptureBlocked(str(exc)) from exc
         _verify_snapshot(self.bridge.reviews, summary["review_id"], attempt, plan)
         self.bridge.work_items.bind_review(attempt["attempt_id"], summary["review_id"])
         return self.bridge.work_items.attempt(attempt["attempt_id"])
@@ -225,13 +233,17 @@ class _Adapter:
             raise ValueError("Attempt budget is exhausted or unknown")
         if attempt["kind"] == "implement" and attempt.get("allow_work") is not True:
             raise ValueError("Implementation needs an explicit work grant")
+        capture_error = None
         if (
             attempt["kind"] == "review"
             and attempt.get("protocol") == "independent_first"
         ):
             _pin_snapshot_request(attempt, plan)
             if not attempt.get("review_id"):
-                attempt = self._pin_snapshot(attempt, plan)
+                try:
+                    attempt = self._pin_snapshot(attempt, plan)
+                except _CaptureBlocked as exc:
+                    capture_error = str(exc)
             else:
                 _verify_snapshot(
                     self.bridge.reviews, attempt["review_id"], attempt, plan
@@ -255,6 +267,18 @@ class _Adapter:
         _private_file(directory / "context.txt", prompt)
         handle = WorkHandle(identifier, directory, deadline, float(budget), secret)
         self.handles.add(handle)
+        if capture_error is not None:
+            self.bridge.work_items.block_review_capture(
+                identifier, capture_error, review_inputs(attempt, plan)["context_paths"]
+            )
+            handle.reaped = True  # No process or native task was dispatched.
+            self._result(
+                handle,
+                "blocked",
+                capture_error,
+                evidence=[capture_error],
+                cost=0,
+            )
         return handle, attempt, prompt
 
     def _observe(self, handle):
@@ -346,6 +370,8 @@ class OmpWorkAdapter(_Adapter):
 
     def start(self, attempt, plan, workspace, *, token_file: Path):
         handle, attempt, prompt = self._prepare(attempt, plan, workspace, token_file)
+        if handle.result is not None:
+            return handle
         step = next(step for step in plan["steps"] if step["id"] == attempt["step_id"])
         try:
             independent = (
@@ -523,6 +549,8 @@ class ClaudeWorkAdapter(_Adapter):
         handle, attempt, _prompt_text = self._prepare(
             attempt, plan, workspace, token_file
         )
+        if handle.result is not None:
+            return handle
         handle.session_id = str(uuid4())
         independent = (
             attempt["kind"] == "review"

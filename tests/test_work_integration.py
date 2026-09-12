@@ -100,7 +100,7 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def create(self, owner="claude"):
+    async def create(self, owner="claude", *, review_context_paths=None):
         view = await self.call(
             self.claude,
             {
@@ -121,6 +121,7 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
                             "owner": owner,
                             "reviewer": "omp" if owner == "claude" else "claude",
                             "owned_files": ["module.txt"],
+                            "review_context_paths": review_context_paths or [],
                             "depends_on": [],
                             "acceptance": ["Module contains the agreed output."],
                         }
@@ -132,6 +133,105 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.mutate(self.claude, identifier, "agree")
         await self.mutate(self.omp, identifier, "agree")
         return identifier
+
+    async def context_attempt(self, paths):
+        (self.root / "caller.py").write_text("pinned caller\n")
+        self.git("add", "caller.py")
+        self.git("commit", "-qm", "context base")
+        identifier = await self.create(review_context_paths=paths)
+        await self.mutate(self.claude, identifier, "claim", step_id="change")
+        (self.root / "module.txt").write_text("submitted module\n")
+        self.git("add", "module.txt")
+        self.git("commit", "-qm", "module change")
+        await self.mutate(
+            self.claude,
+            identifier,
+            "submit",
+            step_id="change",
+            commit=self.git("rev-parse", "HEAD"),
+            note="Changed module",
+            evidence=["Saved committed module"],
+        )
+        store = self.omp_bridge.work_items
+        view = store.authorize(
+            identifier,
+            budget_seconds=60,
+            max_launches=2,
+            max_cost_usd=1,
+            allow_work=False,
+            allow_shell=False,
+            omp_model="provider/fixture",
+        )
+        attempt = store.reserve(
+            identifier,
+            "change",
+            actor="omp",
+            kind="review",
+            owner_id="fixture",
+        )
+        workspace = WorkWorkspace(self.omp_bridge.scope).prepare(
+            attempt, view["plan"], []
+        )
+        token = self.omp_bridge.scope.directory / ("token-" + attempt["attempt_id"])
+        token.write_text(attempt["token"])
+        token.chmod(0o600)
+        return attempt, view["plan"], workspace, token
+
+    async def test_declared_review_context_is_pinned_and_changed_paths_remain_source(
+        self,
+    ):
+        attempt, plan, _, _ = await self.context_attempt(["caller.py", "module.txt"])
+        (self.root / "caller.py").write_text("live caller changed\n")
+        adapter = OmpWorkAdapter(self.omp_bridge)
+        captured = adapter._pin_snapshot(attempt, plan)
+        reviews = self.omp_bridge.reviews
+        self.assertEqual(
+            reviews.read(captured["review_id"], "selected", "caller.py")["content"],
+            "pinned caller\n",
+        )
+        manifest = json.loads(
+            reviews.read(captured["review_id"], limit=50000)["content"]
+        )
+        self.assertEqual(
+            {item["path"]: item["role"] for item in manifest["files"]},
+            {"caller.py": "context", "module.txt": "change"},
+        )
+        self.assertEqual(manifest["git"]["commit"], attempt["submission"]["commit"])
+        for path in ("undeclared.py", "../caller.py", ".git/config"):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                reviews.read(captured["review_id"], "selected", path)
+        (self.root / "caller.py").unlink()
+        (self.root / "caller.py").symlink_to(self.home / "outside")
+        self.assertEqual(
+            reviews.read(captured["review_id"], "selected", "caller.py")["content"],
+            "pinned caller\n",
+        )
+
+    async def test_missing_declared_context_blocks_before_model_launch(self):
+        attempt, plan, workspace, token = await self.context_attempt(["missing.py"])
+        (self.root / "missing.py").write_text("live fallback must not be read")
+        adapter = OmpWorkAdapter(self.omp_bridge)
+        self.addCleanup(adapter.close)
+        handle = adapter.start(attempt, plan, workspace, token_file=token)
+        result = adapter.poll(handle)
+        self.assertEqual(result["outcome"], "blocked")
+        self.assertEqual(result["cost_usd"], 0)
+        self.assertIsNone(handle.native_task_id)
+        self.assertIsNone(handle.process)
+        store = self.omp_bridge.work_items
+        current = store.attempt(attempt["attempt_id"])
+        self.assertIsNone(current.get("review_id"))
+        self.assertEqual(current["review_stage"], "blocked")
+        supervisor = WorkSupervisor(self.omp_bridge)
+        supervisor._finish(attempt, plan, workspace, result)
+        self.assertEqual(store.attempt(attempt["attempt_id"])["state"], "blocked")
+        card = store.perform(
+            {"action": "get", "work_id": attempt["work_id"]}, actor="operator"
+        )
+        self.assertEqual(
+            card["steps"][0]["blockers"][-1]["reason"], "review_capture_failed"
+        )
+        self.assertFalse((handle.directory / "launch.json").exists())
 
     async def daemon(self, *args):
         return await asyncio.to_thread(

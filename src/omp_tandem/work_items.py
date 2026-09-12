@@ -278,6 +278,28 @@ class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid", revalidate_instances="always")
 
 
+def _validate_work_path(path, *, context=False):
+    parts = PurePosixPath(path).parts
+    if (
+        not parts
+        or path != str(PurePosixPath(path))
+        or path.startswith("/")
+        or any(part in {".", "..", ".git"} for part in parts)
+        or any(char in path for char in "\\\x00\n\r*?[]")
+        or (
+            context
+            and (
+                ":" in path
+                or any(part.casefold() == ".git" for part in parts)
+                or any(ord(char) < 32 for char in path)
+            )
+        )
+    ):
+        raise ValueError(
+            "Work paths must be relative exact paths without escapes or globs"
+        )
+
+
 class WorkStep(_Model):
     id: _Identifier
     title: _NonBlank
@@ -285,6 +307,11 @@ class WorkStep(_Model):
     owner: _Actor
     reviewer: _Actor
     owned_files: list[_NonBlank] = Field(default_factory=list, max_length=500)
+    review_context_paths: list[_NonBlank] = Field(
+        default_factory=list,
+        max_length=256,
+        description="Exact additional read-only review paths from the submitted commit. Does not expand owned_files; new context requires a new agreed snapshot.",
+    )
     depends_on: list[_Identifier] = Field(
         default_factory=list,
         max_length=200,
@@ -300,18 +327,13 @@ class WorkStep(_Model):
             raise ValueError("Duplicate dependency")
         if len(set(self.owned_files)) != len(self.owned_files):
             raise ValueError("Duplicate owned file")
+        # Preserve legacy ownership validation and operation identity; the new
+        # read-context declaration also excludes URI and case-folded Git paths.
         for path in self.owned_files:
-            parts = PurePosixPath(path).parts
-            if (
-                not parts
-                or path != str(PurePosixPath(path))
-                or path.startswith("/")
-                or any(part in {".", "..", ".git"} for part in parts)
-                or any(char in path for char in "\\\x00\n\r*?[]")
-            ):
-                raise ValueError(
-                    "Owned files must be relative exact paths without escapes or globs"
-                )
+            _validate_work_path(path)
+        for path in self.review_context_paths:
+            _validate_work_path(path, context=True)
+        self.review_context_paths = list(dict.fromkeys(self.review_context_paths))
         return self
 
 
@@ -471,6 +493,20 @@ class WorkConflict(ValueError):
 
 def _json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _operation_fingerprint(command, bound, *, version=2):
+    """V2 omits only the new empty read-context default; V1 receipts keep their hash."""
+    payload = command.model_dump()
+    for step in (payload.get("plan") or {}).get("steps", []):
+        if step.get("review_context_paths") == []:
+            step.pop("review_context_paths")
+    digest = hashlib.sha256(
+        _json(
+            {"command": payload, "attempt_id": bound["attempt_id"] if bound else None}
+        ).encode()
+    ).hexdigest()
+    return digest if version == 1 else f"v2:{digest}"
 
 
 def _public_attempt(attempt):
@@ -1037,20 +1073,18 @@ class WorkStore:
                     },
                     bound,
                 )
-            fingerprint = hashlib.sha256(
-                _json(
-                    {
-                        "command": command.model_dump(),
-                        "attempt_id": bound["attempt_id"] if bound else None,
-                    }
-                ).encode()
-            ).hexdigest()
+            fingerprint = _operation_fingerprint(command, bound)
             receipt = db.execute(
                 "SELECT fingerprint,response FROM work_operations WHERE actor=? AND operation_id=?",
                 (actor, command.operation_id),
             ).fetchone()
             if receipt:
-                if receipt["fingerprint"] != fingerprint:
+                expected = (
+                    fingerprint
+                    if receipt["fingerprint"].startswith("v2:")
+                    else _operation_fingerprint(command, bound, version=1)
+                )
+                if receipt["fingerprint"] != expected:
                     raise WorkConflict(
                         "Operation ID was already used for a different command"
                     )
@@ -1111,7 +1145,7 @@ class WorkStore:
             if command.plan is None:
                 raise ValueError("Propose requires a complete plan")
             plan = command.plan.model_dump()
-            if plan != card["plan"]:
+            if plan != WorkPlan.model_validate(card["plan"]).model_dump():
                 identifiers = {step["id"] for step in plan["steps"]}
                 if any(
                     attempt["step_id"] not in identifiers
@@ -2135,6 +2169,25 @@ class WorkStore:
             "SELECT attempt FROM work_attempts WHERE native_task_id=?", (task_id,)
         ).fetchone()
         attempt = json.loads(row["attempt"]) if row else None
+        self._block_review_context(db, attempt, request)
+
+    def block_review_capture(self, attempt_id, reason, paths):
+        """Persist a pre-dispatch capture failure without inventing worker effects."""
+        with self._transaction() as db:
+            attempt = self._attempt(db, attempt_id)
+            self._block_review_context(
+                db,
+                attempt,
+                {
+                    "clarification_requires_new_snapshot": True,
+                    "reason_code": "review_capture_failed",
+                    "reason": reason,
+                    "requested_paths": paths,
+                    "next_step": "Correct the declared context and create a new immutable snapshot/attempt.",
+                },
+            )
+
+    def _block_review_context(self, db, attempt, request):
         if not independent_stage(attempt) or attempt.get("clarification_request"):
             return
         self._authenticate(db, attempt["token"])
@@ -2147,7 +2200,9 @@ class WorkStore:
             attempt["plan_revision"],
             attempt["step_id"],
         )
-        blocker["reason"] = "clarification_requires_new_snapshot"
+        blocker["reason"] = request.get(
+            "reason_code", "clarification_requires_new_snapshot"
+        )
         step["blockers"].append(blocker)
         intent = attempt.get("block_intent") or {"blocker_ids": [], "at": time.time()}
         intent["blocker_ids"].append(blocker["blocker_id"])
@@ -2160,7 +2215,7 @@ class WorkStore:
         self._record(
             db,
             card,
-            "clarification_requires_new_snapshot",
+            blocker["reason"],
             attempt["actor"],
             {"attempt_id": attempt["attempt_id"], "request": request},
         )
