@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.7.1 — 2026-09-13 (local proposal; not published)
+
+### Changes
+
+- Operator CLI `unblock` resolves a recorded blocker with current revision, exact operation ID, resolution, note and evidence. JSON hints and Markdown `## Operator commands` identify its current card/step location, including migrated blockers. Unblock never resumes or authorizes work.
+- Saved continuation now says `not_transferable` for removed steps or reduced ownership; historical `blocked` outcomes are displayed honestly without rewriting history. Read-only `activation_preview` separates checkpoint, undetermined and no-checkpoint steps, per-attempt saved bytes and capture failures. It describes transfer eligibility, not launch readiness.
+- Activation refuses superseded capture failures unless the operator acknowledges each exact attempt with repeatable `--acknowledge-capture-failure`. Missing and unrelated acknowledgments have distinct refusal codes. Successful capture needs none; acknowledgment is part of the immutable command identity/outcome.
+- Grant previews disclose per-seat `fixed_selector` versus OMP `dynamic_default`, with explicit legacy/malformed labels. An omitted OMP selector resolves at each attempt start; use `--omp-model` for predictable autonomous runs. Markdown authorization reports show the persisted grant window, permissions and model policy, not claimed observed model identity.
+- Abandonment consistently records `abandoned` in attempt, inventory and operation receipt, keeps no continuation and retains its blocker/pause.
+- Deterministic managed-replan regression uses real WorkSupervisor, a real injected Claude child, bound MCP get/heartbeat, operator CLI transitions and Git preservation. After cancellation/reaping and checkpoint transfer, the same child continues from its owned-file marker; its external-effect log contains exactly one record. Unknown interrupted cost remains unknown, followed by explicit resume, new agreements and a fresh one-launch grant.
+- EN/RU/ZH READMEs retain concise installation, staged-review and shared-task entry points, replacing duplicated operator manuals with guide links. All three guides and both skills document the accepted behavior and authority boundaries. Local package, plugin, marketplace and lock metadata use 3.7.1.
+
+### Remaining limits
+
+- Managed-replan evidence covers the **Claude-child/shared-supervisor boundary**, not generic exactly-once external effects, OMP-native teardown or live-provider replan. The fixture's continuation marker is application logic, not atomic coordination between Git and arbitrary external services. Supervisor stop does not prove absence of effects.
+- Capture-failure acknowledgment records informed loss, not recovered bytes or acceptance. `not_transferable` does not create an execution blocker; pauses, blockers, agreements and grants remain separate gates.
+- Compatibility uses the pinned OMP binary and isolated localhost provider, not user credentials or an external-model evaluation. API/platform limits, disabled helpers and prior unexplained cleanup/wake failures remain; a later pass does not explain historical failures.
+- This is local release preparation only: no tag, publication, plugin install or application. Operator authority, explicit application and distinct independent acceptance are unchanged.
+
 ## 3.7.0 — 2026-09-13
 
 ### Changes

@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**软件包 3.7.0（2026-09-13 发布）** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**软件包 3.7.1（本地提案；尚未发布）** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -508,7 +508,7 @@ CAS 冲突表示卡片已变化：重新读取、理解变化，再用新 `opera
 python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK inspect
 python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK begin --proposal PROPOSAL [--expected-revision N] [--operation-id ID] --note NOTE
 python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK resolve --transition TRANSITION --attempt ATTEMPT --note NOTE --evidence EVIDENCE [--confirm-stopped] [--abandon] [--saved-commit SHA] [--expected-revision N] [--operation-id ID]
-python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK activate (--transition TRANSITION | --proposal PROPOSAL) [--expected-revision N] [--operation-id ID] --note NOTE
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK activate (--transition TRANSITION | --proposal PROPOSAL) [--acknowledge-capture-failure ATTEMPT] [--expected-revision N] [--operation-id ID] --note NOTE
 python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK withdraw (--transition TRANSITION | --proposal PROPOSAL) [--expected-revision N] [--operation-id ID] --note NOTE
 ```
 
@@ -520,7 +520,11 @@ python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transit
 2. **停止并检查副作用：**受管尝试需要 supervisor 的 `process_confirmed_gone` 证据，记录 `stop.source="supervisor_confirmed"`。静默、heartbeat 或模型陈述不能代替证明。Supervisor teardown 只确认**进程停止，不确认没有外部副作用**；操作者仍需检查输出和可能的效果。手动尝试必须传 `--confirm-stopped`，记录 `operator_attested`；此参数不能代替受管尝试的 supervisor 确认。
 3. **逐项 Resolve：**提供具体 `--note` 和一个或多个 `--evidence`。默认 disposition 为 `superseded`；`--abandon` 记录 `abandoned`、新增操作者阻塞并**暂停卡片**，不等于验收或重放。`WorkWorkspace.preserve` 在记录的组合基线上保存受管实现，使用提交的归属／字节验证；失败保留在 `saved.capture_failure`。手动实现可给出完整 `--saved-commit`，在固定仓库中按 submission 规则验证。保存的输出、报告和 intent 是证据，不自动成为已验收结果。
 4. **Activate：**`--transition` 要求冻结提案未变、清单全部处理且无活跃／`recovery_required` 尝试。没有 begin 时，只有不存在执行或待恢复尝试才允许 `--proposal`。激活安装新的草稿计划版本、清除共识／当前验收、保留阻塞（删除步骤的阻塞移至卡片级）、撤销 grant，并**保留已有暂停**，包括 abandon／未知费用引起的暂停。双方必须重新 agree；解除阻塞，暂停时显式 `resume`，受管执行还需新的操作者授权。
-5. **继续保存结果，而非重放命令：**历史为 superseded 尝试记录 `checkpoint`（已验证改动仍属于新步骤）、`blocked`（步骤删除或新归属不包含保存的文件）、`not_available`（没有已验证字节，包括 capture failure）。这些是继续使用结果的状态，**不会自动成为卡片阻塞**，也不证明副作用已经解决。继续前检查失败和剩余工作。Checkpoint 保留 commit/base 和操作者证据，交给新 claim；它不是 submission 或迁移的验收。不会自动重复旧命令。
+5. **继续结果，不重放命令：**`checkpoint` 表示验证的改动属于新步骤；`not_transferable` 表示步骤被删除或归属不包含保存文件；`not_available` 表示无已验证字节，包括捕获失败。这些是转移资格，**不是自动阻塞或启动就绪**。3.7.0 历史中的 `blocked` 以 `not_transferable` 展示，不重写历史。Checkpoint 保留 commit/base 和操作者证据，交给新 claim，不是 submission 或转移的验收。不会自动重放旧命令。
+
+激活前查看 get、`transition inspect` 或 Markdown 的 `activation_preview`：`steps_with_checkpoint`、`steps_undetermined`（disposition 待定）、`steps_without_checkpoint`、`capture_failures`、`capture_failures_unacknowledged`。各尝试显示保存的 commit/文件和转移结果。`ready` 只表示清单已处理，**不表示可启动**；暂停、阻塞、共识和 grant 仍是独立条件。
+
+对每个有 `saved.capture_failure` 的 superseded 尝试，操作者激活时必须知情添加 `--acknowledge-capture-failure ATTEMPT`，按精确 ID 重复该参数。缺少确认返回 `capture_failure_unacknowledged`，无关 ID 返回 `capture_failure_unknown`。确认是命令身份及记录结果的一部分：无法捕获的保存工作已丢失。成功保存不需确认。`--abandon` 在尝试、清单和操作回执中一致记录 `abandoned`，不保留 continuation，并留下阻塞和暂停；不是 `superseded`。
 
 begin 前 `withdraw --proposal` 只移除提案。begin 后 `withdraw --transition` 将其归档为 withdrawn，但保留 **sticky quiescence**：被隔离尝试仍需操作者 reconcile，已有暂停需要显式 resume。不会恢复旧凭据或撤销外部副作用。应急后备仍是操作者 `reconcile WORK STEP --resolution retry|abandon --confirm-stopped --note ... --evidence ...`；`retry` 仅允许满足其余条件后的有意新尝试，`abandon` 留下阻塞和暂停。
 
@@ -565,12 +569,12 @@ python -m omp_tandem.work_daemon --project-root CHILD_ROOT [--state-dir STATE] l
 #### 验证与本地打包边界
 
 ```sh
-uv run --frozen pytest -q -s -p no:cacheprovider tests/test_work_integration.py -k 'test_plan_transition_end_to_end_through_mcp_and_operator_cli or test_outer_nested_repository_handover_cli_mcp'
+uv run --frozen pytest -q -s -p no:cacheprovider tests/test_work_integration.py -k 'test_plan_transition_end_to_end_through_mcp_and_operator_cli or test_outer_nested_repository_handover_cli_mcp or test_managed_replan_preserves_checkpoint_without_repeating_effect'
 ```
 
-场景使用临时仓库中的真实 Git、FastMCP 客户端和 CLI 子进程。转换场景使用两个**手动**尝试，验证保存字节、隔离和新 claim；受管停止确认门槛和 preservation 由独立 store/workspace 回归覆盖。这些命令不验证 live-provider replan，也不验证跨受管计划转换的计数外部副作用进程。[兼容性验证](compatibility.md)使用固定 OMP 和隔离的 localhost fixture。
+场景使用临时仓库中的真实 Git、FastMCP 和 CLI。受管场景把确定性的 Claude 可执行程序注入真实 `WorkSupervisor`：绑定 get/heartbeat、一次外部效果记录与自有文件标记、真实取消/reap、supervisor 停止证据、不可变保存、激活及显式 resume/agree/authorize。同一程序根据 checkpoint 标记继续，两个 claim 后效果记录仍恰好一条。中断费用保持未知；单次启动 grant 防止 OMP 审查启动。这证明 **Claude-child/shared-supervisor 边界**，不证明通用 exactly-once 效果、OMP-native teardown 或 live-provider replan。[兼容性](compatibility.md)是单独的 pinned OMP/localhost fixture。
 
-3.7.0 是增加操作者命令并改变 `propose` 语义的 minor 版本（2026-09-13 发布）。`uv build --wheel`、`uv run --frozen python scripts/package.py` 与 `package.py --check` 只准备／检查本地产物。打包、测试和独立验收不创建标签、不发布版本、不安装到用户会话，也不应用结果；只有操作者决定发布。[两份原始请求](spec/plan-transition-and-git-root-2026-09-12.md)按原文及来源保存；实现决策写在本指南和 CHANGELOG。
+3.7.1 是基于已发布 3.7.0 的 patch，改进操作者易用性、披露和回归覆盖；**本地提案，尚未发布**。`uv build --wheel`、`uv run --frozen python scripts/package.py` 和 `package.py --check` 仅准备／检查本地产物，不创建标签、不发布、不安装到用户会话或应用结果；由操作者决定。[原始请求](spec/plan-transition-and-git-root-2026-09-12.md)按原文及来源保留。
 
 ### 在线手动模式：领取、真实提交、独立审查
 
@@ -678,9 +682,20 @@ python -m omp_tandem.work_daemon --project-root /absolute/project \
 
 `authorize --preview` 校验并打印 `stored=false`，不保存授权，也不证明任务已经就绪。先检查输出；操作者明确同意后，去掉 `--preview` 重复执行才激活授权。`--allow-work` 允许实现写入；`--allow-shell` 允许任意 shell（含网络和进程能力），不是测试沙箱。`--allow-tests` 是已弃用的同权限别名，并输出警告。不授予 shell 时应记录未执行检查，不能编造通过结果。
 
-`--claude-model` 默认 `sonnet`，`--omp-model` 是 `--model` 的明确别名；两者放在 `authorize` 前。模型选择固定在授权中，之后的 `run`/`start` 不能覆盖。请求/默认选择及其来源与实际观测模型身份分开，不借用交互会话设置。
+`preview.model_selection` 披露每个参与方的策略。Claude 是 `fixed_selector`，默认 `sonnet`；显式 `--omp-model`（`--model` 别名）也是授权时保存的 `fixed_selector`。省略后 OMP 使用 `dynamic_default`，在**每次尝试启动时**解析其配置选择，而不是固定某个模型。为自主运行的可预测性，建议 `--omp-model <provider/model>`。模型参数位于 `authorize` 前；`run`/`start` 不能覆盖策略。`legacy_unpinned` 需重新授权；`malformed` 在读取时标明并拒绝启动。请求选择不证明实际模型身份。Markdown `## Authorization` 显示保存的 authorized_at/deadline 窗口、权限和各方策略，不证明实际回答模型。
 
 `--max-attempt-cost-usd` 默认总预算的一半，与 `--max-launches` 无关；显式值不超过总预算。每次启动原子预留 `min(单次上限, 总预算 − 已知费用 − 活跃预留)`；并发就绪步骤按启动顺序分享未预留余额，不保证平分。未知用量停止新启动。授权及 `show` 展示 `max_attempt_cost_usd`、`attempt_cost_policy`、`preview.reserve_policy` 和 `preview.permissions`（`read`、`edit_write`、`shell`、进程不受限的 `network`、`os_sandbox=false`）。美元限额是估算软限制，不是账单硬上限；额度用完不会自动扩权。
+
+<a id="operator-unblock"></a>
+#### 操作者解除阻塞
+
+阻塞作者可通过 MCP 解除；可信操作者可通过 CLI 执行同一有证据的操作：
+
+```text
+python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] unblock WORK --blocker BLOCKER [--step STEP] --resolution resolved|not_applicable --note NOTE --evidence EVIDENCE --expected-revision N --operation-id ID
+```
+
+必须提供 `--blocker`、`--resolution`、`--note`、至少一个 `--evidence`、当前卡片 `--expected-revision` 和新 `--operation-id`。可重复 `--evidence`。`resolved` 解释条件如何满足；`not_applicable` 解释为何不再适用。`--step` 指向阻塞**当前**所属步骤；卡片级阻塞（含激活后迁移的阻塞）省略它。`operator_commands`、`next_actions`、Markdown `## Operator commands` 使用当前位置而非历史 origin。提示仍为 `allowed=false`、`operator_required`，不赋予智能体权限。遵守 CAS 和精确操作回放规则。Unblock **不会恢复暂停或授权执行**；显式 resume 与有效 grant 仍独立。
 
 #### 迁移与回滚限制
 

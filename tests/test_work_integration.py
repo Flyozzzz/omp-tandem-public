@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -2212,12 +2213,215 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(view["agreements"], {})
         self.assertIsNone(view["proposal"])
 
+    async def test_managed_replan_preserves_checkpoint_without_repeating_effect(self):
+        """Real supervisor/Claude-child boundary, not generic exactly-once effects."""
+        identifier = await self.create()
+        fixture = self.home / "fixture"
+        fixture.mkdir()
+        executable = fixture / "claude"
+        executable.write_text(
+            f"#!{sys.executable}\n"
+            + (Path(__file__).parent / "fixtures/managed_replan_child.py").read_text()
+        )
+        executable.chmod(0o700)
+        store = self.claude_bridge.work_items
+
+        async def authorize():
+            result = await self.daemon(
+                "authorize",
+                identifier,
+                "--budget-seconds",
+                "120",
+                "--max-launches",
+                "1",
+                "--max-cost-usd",
+                "1",
+                "--allow-work",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        async def wait_for(predicate):
+            async with asyncio.timeout(30):
+                while not (value := predicate()):
+                    await asyncio.sleep(0.05)
+                return value
+
+        async def launch():
+            # A dedicated bridge belongs to each real supervisor and is shut down
+            # by run(); the MCP clients remain available throughout the transition.
+            supervisor = WorkSupervisor(
+                self.bridge("claude"),
+                claude=str(executable),
+                concurrency=1,
+                work_id=identifier,
+            )
+            running = asyncio.create_task(asyncio.to_thread(supervisor.run, once=True))
+
+            async def cleanup():
+                supervisor.stop_event.set()
+                await asyncio.wait_for(asyncio.shield(running), 30)
+
+            self.addAsyncCleanup(cleanup)
+            return supervisor, running
+
+        with patch.dict(os.environ, {"TANDEM_REPLAN_FIXTURE": str(fixture)}):
+            await authorize()
+            supervisor, running = await launch()
+            ready = await wait_for(lambda: list(fixture.glob("*.json")))
+            first = json.loads(ready[0].read_text())
+            first_id = first["attempt_id"]
+            self.assertFalse(first["continuing"])
+            self.assertIsNone(first["checkpoint"])
+            os.kill(first["pid"], 0)
+            self.assertFalse(running.done())
+            current = await self.call(
+                self.claude, {"action": "get", "work_id": identifier}
+            )
+            self.assertIsNotNone(current["steps"][0]["attempt"]["heartbeat_at"])
+            plan = current["plan"]
+            plan["steps"][0]["goal"] = (
+                "Continue the saved module without repeating effects"
+            )
+            proposed = await self.mutate(self.claude, identifier, "propose", plan=plan)
+            begun = await self.daemon(
+                "transition",
+                identifier,
+                "begin",
+                "--proposal",
+                proposed["proposal"]["proposal_id"],
+                "--note",
+                "Stop and preserve",
+            )
+            self.assertEqual(begun.returncode, 0, begun.stderr)
+            transition_id = json.loads(begun.stdout)["transition"]["transition_id"]
+            await asyncio.wait_for(asyncio.shield(running), 30)
+            self.assertFalse(supervisor.threads)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(first["pid"], 0)
+            stopped = store.attempt(first_id)
+            self.assertTrue(stopped["process_confirmed_gone"])
+            self.assertIsNone(stopped["cost_usd"])
+            history = await self.call(
+                self.claude, {"action": "history", "work_id": identifier}
+            )
+            self.assertTrue(
+                any(
+                    event["kind"] == "process_stopped"
+                    and event["details"]["attempt_id"] == first_id
+                    for event in history["events"]
+                )
+            )
+            with self.assertRaises(ToolError):
+                await self.mutate(self.claude, identifier, "claim", step_id="change")
+            resolved = await self.daemon(
+                "transition",
+                identifier,
+                "resolve",
+                "--transition",
+                transition_id,
+                "--attempt",
+                first_id,
+                "--note",
+                "Inspected the single fixture effect",
+                "--evidence",
+                str(fixture / "effects.jsonl"),
+            )
+            self.assertEqual(resolved.returncode, 0, resolved.stderr)
+            inspected = await self.daemon("transition", identifier, "inspect")
+            self.assertEqual(inspected.returncode, 0, inspected.stderr)
+            inventory = json.loads(inspected.stdout)
+            preview = inventory["activation_preview"]
+            self.assertEqual(preview["steps_with_checkpoint"], ["change"])
+            self.assertEqual(preview["steps_undetermined"], [])
+            self.assertEqual(preview["steps_without_checkpoint"], [])
+            self.assertEqual(preview["capture_failures_unacknowledged"], [])
+            entry = next(
+                item
+                for item in inventory["transition"]["inventory"]
+                if item["attempt_id"] == first_id
+            )
+            self.assertEqual(entry["stop"]["source"], "supervisor_confirmed")
+            saved = entry["saved"]["preserved"]["commit"]
+            saved_bytes = "before\neffect completed\npartial work"
+            self.assertEqual(self.git("show", f"{saved}:module.txt"), saved_bytes)
+            with self.assertRaises(ToolError):
+                await self.mutate(self.claude, identifier, "claim", step_id="change")
+            activated = await self.daemon(
+                "transition",
+                identifier,
+                "activate",
+                "--transition",
+                transition_id,
+                "--note",
+                "Continue preserved bytes; capture succeeded",
+            )
+            self.assertEqual(activated.returncode, 0, activated.stderr)
+            current = await self.call(
+                self.claude, {"action": "get", "work_id": identifier}
+            )
+            self.assertEqual(current["status"], "paused")
+            self.assertTrue(current["authorization"]["unknown_cost"])
+            self.assertIsNotNone(current["authorization"]["revoked_at"])
+            self.assertEqual(current["agreements"], {})
+            self.assertEqual(store.ready(identifier), [])
+            await self.mutate(self.claude, identifier, "resume")
+            await self.mutate(self.claude, identifier, "agree")
+            await self.mutate(self.omp, identifier, "agree")
+            with self.assertRaisesRegex(ValueError, "authorization is required"):
+                store.reserve(
+                    identifier,
+                    "change",
+                    actor="claude",
+                    kind="implement",
+                    owner_id=supervisor.owner_id,
+                )
+            await authorize()
+            _, continued = await launch()
+            await asyncio.wait_for(asyncio.shield(continued), 30)
+            observations = [
+                json.loads(path.read_text()) for path in fixture.glob("*.json")
+            ]
+            self.assertEqual(len(observations), 2)
+            second = next(
+                item for item in observations if item["attempt_id"] != first_id
+            )
+            self.assertTrue(second["continuing"])
+            self.assertEqual(second["checkpoint"]["commit"], saved)
+            self.assertNotEqual(second["workspace"], first["workspace"])
+            expected = saved_bytes + "\ncontinued work\n"
+            self.assertEqual(
+                (Path(second["workspace"]) / "module.txt").read_text(), expected
+            )
+            current = await self.call(
+                self.claude, {"action": "get", "work_id": identifier}
+            )
+            submission = current["steps"][0]["submission"]
+            self.assertEqual(
+                self.git("show", f"{submission['commit']}:module.txt"), expected.strip()
+            )
+            self.assertEqual(self.git("show", f"{saved}:module.txt"), saved_bytes)
+            self.assertEqual(
+                (fixture / "effects.jsonl").read_text().splitlines(),
+                ['{"effect": "performed"}'],
+            )
+            self.assertEqual(current["authorization"]["launches"], 1)
+            self.assertEqual(current["steps"][0]["state"], "review")
+            with self.assertRaisesRegex(ValueError, "budget is exhausted or unknown"):
+                store.reserve(
+                    identifier,
+                    "change",
+                    actor="omp",
+                    kind="review",
+                    owner_id=supervisor.owner_id,
+                )
+            self.assertEqual((self.root / "module.txt").read_text(), "before\n")
+
     async def test_plan_transition_end_to_end_through_mcp_and_operator_cli(self):
         """Scenario 1: a plan change with live attempts, safe stop and continuation.
 
         Two manual attempts run through the real MCP surface; the operator drives
-        the transition through the documented CLI. Managed executors are covered at
-        store level with the supervisor's own teardown primitives.
+        the transition through the documented CLI. The managed companion scenario
+        exercises a real supervised Claude child and checkpoint continuation.
         """
         identifier = await self.create(owner="claude")
         view = await self.call(self.claude, {"action": "get", "work_id": identifier})

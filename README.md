@@ -73,11 +73,7 @@ Stage the intended changes, then use `/omp-tandem:tandem` or ask in natural lang
 
 > Use OMP Tandem to review my prepared commit, using staged changes only. Use this task's requirements and acceptance criteria; ask me if they are missing. Do not edit files. Report correctness risks with evidence and identify missing context.
 
-The agent uses **`tandem_review_run`**, not a manual sequence of low-level tools: one independent read-only assessment, then at most one comparison with separately supplied author proposal/rationale. Without author material there is only one stage. Progress stays compact; the terminal result includes the **full stage answers**. The default **600-second total budget** covers capture, startup, stages, and questions—not 600 seconds per stage. The scenario neither edits files nor runs supplied test commands.
-
-The review uses a saved **staged/index snapshot**, not unstaged working files. Include requirements, criteria, and explicitly needed unchanged callers/tests in that capture. Missing source context requires a **fresh expanded snapshot and review**, never silently joining live files to an old review. You do not need to learn the low-level tool catalog. Client command prefixes vary; natural-language instructions work with connected Tandem tools.
-
-For development, scale planning to uncertainty: a known local fix needs a brief risk/criteria check and a small plan, not a new audit of the whole project or a re-proof of user-confirmed facts. After one independent assessment and one comparison, choose an approach, run a distinguishing experiment, or state the unresolved question for the user. Do not loop until the agents agree.
+The agent uses `tandem_review_run`: a saved staged/index snapshot, one independent read-only assessment and at most one comparison with separately supplied author rationale. It does not edit files or run supplied test commands. Missing source context requires a fresh expanded snapshot, not live files added to an old review. [Review details](docs/guide.md#one-read-only-review-scenario).
 
 ### 5. Give both agents one shared task
 
@@ -87,56 +83,21 @@ For development, scale planning to uncertainty: a known local fix needs a brief 
 
 ## Two entry paths
 
-- **Prepared change:** use `tandem_review_run` with `source="staged"` for the intended commit's index snapshot; it is a read-only review, not implementation or test execution.
-- **Shared development:** use `tandem_work` for a two-agent plan, file ownership, claims, committed submissions and distinct review. The bound **project root must be a Git repository with a HEAD commit** for claim/submit; launching from its parent folder can produce `Work execution requires a Git repository with an immutable HEAD commit`. A task `cwd` cannot repair the launch boundary.
-- **Operator grant:** inspect `authorize --preview` before activating. `--claude-model` (default `sonnet`) and `--omp-model` (alias of `--model`) go before `authorize`; `--max-attempt-cost-usd`, `--allow-shell` and deprecated `--allow-tests` go after it. Shell means arbitrary execution, not a test sandbox. The grant's `preview.permissions` and reserve policy disclose the actual permissions and default attempt ceiling (half the total budget, independent of launch count); model selections are pinned, not proof of observed model identity.
-- **Independent-first review:** `report` → optional single `compare` → `accept`/`reject`. Author interpretation stays withheld through the independent report until comparison opens. Managed reviewers read only the pinned commit snapshot; a shell-granted review creates an operator blocker **before launch**, not a silently unrestricted review. A successful report is not acceptance.
-- **Migration and limits:** unresolved blockers survive `propose`; removed steps leave card-level blockers. Only the blocker author/operator can resolve them with evidence. Legacy grants retain total-budget/`max_launches` attempt ceilings and `allow_tests` decoding; legacy review attempts are labelled `legacy_disclosure`, not retrospectively independent. No migration restarts work. Acceptance does not apply code: stop/recovery and explicit operator apply remain separate.
-
-[Operator commands and migration details](docs/guide.md#shared-tasks). [Helper compatibility](docs/helper-compatibility.md) records **five unsatisfied gates**: child-tool restriction inheritance, project scout replacement, task-wide settings snapshots, exclusive parent usage, and extra model calls per spawn. Helpers remain disabled (`delegation.available=false`); stages C–F and helper savings are not released.
+- [Staged review](docs/guide.md#one-read-only-review-scenario): independent assessment of a saved snapshot.
+- [Shared development and operator grants](docs/guide.md#shared-tasks): plan, ownership, exact submissions and distinct review. Claim/submit require the bound Git root with HEAD; task `cwd` cannot repair that boundary. Unattended launches need explicit operator authorization. Shell is arbitrary execution, not a sandbox; reports are not acceptance.
+- [Migration and disabled helpers](docs/helper-compatibility.md): no migration restarts work or retroactively makes a review independent.
 
 ## Compact state and recovery
 
-- `tandem_work` defaults to `view="summary"`; request `plan`, `step` or `full` explicitly. History is paged; use its cursor and refetch on `cursor_stale`. `next_actions` are hints, not authorization.
-- Every task result carries `runtime_identity`: compare the loaded package/build and registered schema surface with the checkout, rather than assuming an updated checkout changed a running server.
-- `recovery` descriptors explain report-only closure of the same claim. An operator must authorize another host with `successor` before `recover`; this does not rerun a model, tests or implementation. Independent clarification requires a new snapshot, with exact `review_context_paths`; prior waivers do not automatically cover changed inputs.
-- `wake_acknowledgment` distinguishes `acknowledged`, `acknowledged_zero`, `deferred` and `not_attempted`. Acceptance is separate from application (`not_recorded` without evidence), `assess`, apply receipts and publication. Native usage is a scoped subtotal; Claude cost remains unknown unless separately measured.
+See [compact views, runtime identity and recovery](docs/guide.md#compact-contracts) and [operator blocker resolution](docs/guide.md#operator-unblock). Hints and notifications grant no authority; resolving a blocker never resumes or authorizes work. Independent acceptance is separate from operator application and publication.
 
-[Contract, reporting and recovery details](docs/guide.md#compact-contracts). Package 3.7.0 was released on 2026-09-13; see the [changelog](CHANGELOG.md). Building/checking a wheel or ZIP does not tag, publish, install into a user session or apply an accepted result. Publication and application require separate operator decisions.
+**3.7.1 is a local proposal, not published.** [Changelog](CHANGELOG.md). Building/checking packages does not tag, publish, install into a user session or apply code.
 
 ## Plan changes and repository handover
 
-- **Pending is not active:** differing MCP `propose` records `proposal{proposal_id, base_plan_revision, preview}` without changing the active `plan_revision`, agreements, attempts or grant. Preview is **card-wide** (`attempts`, changed/removed/added steps), including unchanged steps. A new differing proposal replaces it; proposing the current plan withdraws it before begin. During an open transition, `propose` fails with `transition_in_progress`.
-- **Operator, not agent:** agents propose, report, submit and review. Only the operator CLI drives transition begin/resolve/activate/withdraw, cancel/link, emergency reconcile and authorize. `operator_commands` supplies exact IDs, quoted root/state and observed revision; the `action="transition"` entry in `next_actions` is an `allowed=false`, `blocked_reason="operator_required"` hint, not permission.
-- **Stop is not absence of effects:** begin freezes the proposal and inventories/fences all active and recovery-required attempts. Managed stop requires supervisor teardown (`supervisor_confirmed`), proving **process stop, not absence of external effects**. Manual stop requires `--confirm-stopped` (`operator_attested`). The operator inspects effects and records note/evidence. Default disposition is `superseded`; `--abandon` records `abandoned`, adds a blocker and pauses the card.
-- **Saved results:** managed work is preserved on its composed base or a `capture_failure` is recorded; manual `--saved-commit` is validated like submission. Activation requires disposed inventory, installs a new draft revision, clears agreements, carries blockers, revokes the grant and preserves an existing pause. Continuation is `checkpoint` for saved bytes within new ownership, `blocked` for removed steps/shrunken ownership, or `not_available` without validated bytes. These are continuation outcomes, not automatic card blockers or acceptance. Re-agree and satisfy pause/blocker/authorization gates; never replay old effects.
-- **Withdrawal:** before begin, `--proposal` only removes the pending proposal. After begin, `--transition` leaves sticky quiescence: fenced attempts still require operator `reconcile`, and an existing pause needs explicit resume.
+See [plan transitions](docs/guide.md#plan-transitions) for stop evidence, saved checkpoints, capture-failure acknowledgments and fresh authorization; [repository handover](docs/guide.md#repository-handover) for boundary diagnostics and explicit closure/provenance commands.
 
-Operator syntax below uses the prepared package `python` (`uv run --frozen python` in this checkout). Global `--project-root ROOT [--state-dir STATE]` precedes every command. Placeholders are not evidence; brackets mean optional, `|` alternatives. Prefer both `--expected-revision N` (observed **card** revision) and `--operation-id ID`; re-read after mutation. Exact replay returns historical `replayed_operation.outcome`; changing any argument under that ID is refused.
-
-```text
-python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK inspect
-python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK begin --proposal PROPOSAL [--expected-revision N] [--operation-id ID] --note NOTE
-python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK resolve --transition TRANSITION --attempt ATTEMPT --note NOTE --evidence EVIDENCE [--confirm-stopped] [--abandon] [--saved-commit SHA] [--expected-revision N] [--operation-id ID]
-python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK activate (--transition TRANSITION | --proposal PROPOSAL) [--expected-revision N] [--operation-id ID] --note NOTE
-python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] transition WORK withdraw (--transition TRANSITION | --proposal PROPOSAL) [--expected-revision N] [--operation-id ID] --note NOTE
-python -m omp_tandem.work_daemon --project-root ROOT [--state-dir STATE] reconcile WORK STEP --resolution retry|abandon --confirm-stopped --note NOTE --evidence EVIDENCE
-```
-
-`activate --proposal` is only for no executing/recovery-required attempts; after begin use the frozen transition ID. [Full transition workflow](docs/guide.md#plan-transitions).
-
-Cards retain the pinned root/scope/provenance and initial Git toplevel/HEAD observation; create/propose/claim record `repository_observation`. Declared `owned_files` and `review_context_paths` reject nested repositories, `.git` files/worktrees, submodule contents and symlinks without opening/searching the child. The parent's **gitlink entry itself** is allowed by the path check, not automatically supported by managed snapshots. A boundary diagnostic names the declared path, pinned root and detected boundary: **“Launch Tandem at /outer/child and create a separate card in that scope”**. A symlink diagnostic identifies the link instead of dereferencing it. Non-Git pathless planning is `unverified`; declared paths and all claims require a valid Git root with HEAD.
-
-An unresolved commit fails **before submission intent**: `Submitted commit SHA could not be resolved in pinned repository ROOT: GIT_CAUSE`, followed by correct-scope creation and operator stop/dispose/cancel-or-supersede guidance. Never substitute another commit or repin the old card through task `cwd`.
-
-After disposing every old attempt and begun-transition inventory, create a separate child-scope card, then the operator records both directions in their own scopes:
-
-```text
-python -m omp_tandem.work_daemon --project-root OLD_ROOT [--state-dir STATE] cancel OLD_WORK --disposition cancelled|superseded --expected-revision N --operation-id ID --note NOTE --evidence EVIDENCE [--continuation-root ABSOLUTE_CHILD_ROOT --continuation-work-id CHILD_WORK]
-python -m omp_tandem.work_daemon --project-root CHILD_ROOT [--state-dir STATE] link CHILD_WORK --predecessor-root ABSOLUTE_OLD_ROOT --predecessor-work-id OLD_WORK --expected-revision N --operation-id ID --note NOTE --evidence EVIDENCE
-```
-
-Cancel is not stop or acceptance: it records `closure`, clears the pending proposal, archives an open disposed transition as cancelled, revokes the grant and makes the old card terminal `cancelled` for either disposition. Execution mutations fail with `work_terminal`; get/history remain readable. Link is provenance only: `target_verification=not_performed`, `reciprocal_link=unverified` even with both directions recorded. No read rights, agreements, grants or acceptance transfer. Fresh agreements and **independent acceptance only in the child scope** are required; `show WORK --format markdown` displays closure/continuation/predecessors. Acceptance is not application. [Handover, exact diagnostics and CLI/MCP scenarios](docs/guide.md#repository-handover); [verbatim requirements and provenance](docs/spec/plan-transition-and-git-root-2026-09-12.md).
+Only the operator drives transitions and execution reconciliation. Supervisor teardown proves process stop, not absence of external effects. Never replay uncertain effects. Cross-scope links transfer no access, agreements, grants or acceptance; review the exact result in its own scope before explicit application.
 
 ## How it works
 
