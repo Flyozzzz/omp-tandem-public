@@ -3321,6 +3321,11 @@ class WorkItemsTests(unittest.TestCase):
         )
         rendered = self.store.report_markdown(self.view(), actor="claude")
         self.assertIn("## Authorization", rendered)
+        self.assertIn("active grant", rendered)
+        self.assertIn(": 300s until ", rendered)
+        self.assertNotIn(
+            "None", rendered.split("## Authorization")[1].split("\n## ")[0]
+        )
         self.assertIn(
             "Model policy omp: fixed_selector `openai-codex/gpt-6-astra` (resolved at authorization)",
             rendered,

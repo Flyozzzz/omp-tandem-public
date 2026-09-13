@@ -1450,10 +1450,20 @@ class WorkStore:
             lines.append("- none: autonomous execution is not authorized")
         else:
             grant_view = authorization.get("preview") or {}
+            # A stored grant keeps authorized_at and deadline, not the requested
+            # budget_seconds; render the persisted window.
+            authorized_at = authorization.get("authorized_at")
+            deadline = authorization.get("deadline")
+            window = (
+                f"{round(deadline - authorized_at)}s until {self._when(deadline)}"
+                if isinstance(authorized_at, (int, float))
+                and isinstance(deadline, (int, float))
+                else "unknown window"
+            )
             lines.append(
                 "- "
                 + ("revoked" if authorization.get("revoked_at") else "active")
-                + f" grant {authorization.get('authorization_id')}: budget {authorization.get('budget_seconds')}s, "
+                + f" grant {authorization.get('authorization_id')}: {window}, "
                 f"max launches {authorization.get('max_launches')}, max cost {authorization.get('max_cost_usd')} USD, "
                 f"per-attempt ceiling {grant_view.get('max_attempt_cost_usd')} ({grant_view.get('attempt_cost_policy')})"
             )
