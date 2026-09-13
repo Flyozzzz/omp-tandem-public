@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**软件包 3.7.0（2026-09-12 本地提案；尚未发布）** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**软件包 3.7.0（2026-09-13 发布）** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -570,7 +570,7 @@ uv run --frozen pytest -q -s -p no:cacheprovider tests/test_work_integration.py 
 
 场景使用临时仓库中的真实 Git、FastMCP 客户端和 CLI 子进程。转换场景使用两个**手动**尝试，验证保存字节、隔离和新 claim；受管停止确认门槛和 preservation 由独立 store/workspace 回归覆盖。这些命令不验证 live-provider replan，也不验证跨受管计划转换的计数外部副作用进程。[兼容性验证](compatibility.md)使用固定 OMP 和隔离的 localhost fixture。
 
-3.7.0 是增加操作者命令并改变 `propose` 语义的**本地 minor 版本提案**。`uv build --wheel`、`uv run --frozen python scripts/package.py` 与 `package.py --check` 只准备／检查本地产物。打包、测试和独立验收不创建标签、不发布版本、不安装到用户会话，也不应用结果；只有操作者决定发布。[两份原始请求](spec/plan-transition-and-git-root-2026-09-12.md)按原文及来源保存；实现决策写在本指南和 CHANGELOG。
+3.7.0 是增加操作者命令并改变 `propose` 语义的 minor 版本（2026-09-13 发布）。`uv build --wheel`、`uv run --frozen python scripts/package.py` 与 `package.py --check` 只准备／检查本地产物。打包、测试和独立验收不创建标签、不发布版本、不安装到用户会话，也不应用结果；只有操作者决定发布。[两份原始请求](spec/plan-transition-and-git-root-2026-09-12.md)按原文及来源保存；实现决策写在本指南和 CHANGELOG。
 
 ### 在线手动模式：领取、真实提交、独立审查
 

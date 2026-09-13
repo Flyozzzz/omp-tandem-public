@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Package 3.7.0 (local proposal, 2026-09-12; not published)** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Package 3.7.0 (released 2026-09-13)** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -569,7 +569,7 @@ uv run --frozen pytest -q -s -p no:cacheprovider tests/test_work_integration.py 
 
 They use real Git, FastMCP clients and operator CLI subprocesses on disposable repositories. The transition scenario has two **manual** attempts, saved bytes, fencing and fresh claims; managed stop-confirmation gates and preservation are separate store/workspace regressions. These commands do not exercise a live-provider replan or a counted external-effect process across managed replan. Provider compatibility uses a pinned OMP binary and isolated localhost fixture; see [actual report and reproduction](compatibility.md).
 
-3.7.0 is a **local minor-version proposal** for new operator commands and changed `propose` semantics. `uv build --wheel` and `uv run --frozen python scripts/package.py` prepare local distributions; `package.py --check` checks source hashes. Neither packaging, tests nor independent acceptance tags, publishes, installs into a user session or applies the result. Only the operator decides publication. The two original requests are preserved separately, [verbatim with provenance](spec/plan-transition-and-git-root-2026-09-12.md); this guide and the changelog describe implementation decisions.
+3.7.0 is a minor version (released 2026-09-13) for new operator commands and changed `propose` semantics. `uv build --wheel` and `uv run --frozen python scripts/package.py` prepare local distributions; `package.py --check` checks source hashes. Neither packaging, tests nor independent acceptance tags, publishes, installs into a user session or applies the result. Only the operator decides publication. The two original requests are preserved separately, [verbatim with provenance](spec/plan-transition-and-git-root-2026-09-12.md); this guide and the changelog describe implementation decisions.
 
 ### Attached/manual work
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.7.0 — 2026-09-12 (local proposal; not published)
+## 3.7.0 — 2026-09-13
 
 ### Changes
 
@@ -15,7 +15,7 @@
 
 ### Remaining limits
 
-- This is a local release proposal, not an operator-approved publication. No tag, push, release, plugin installation or application to a user checkout is implied. Independent acceptance, explicit application and publication remain separate.
+- Release preparation implies no automatic application of the accepted result to a user checkout. Existing tags and archives are unchanged. Independent acceptance, explicit application and publication remain separate decisions.
 - CLI/MCP transition evidence uses two manual attempts on disposable Git repositories. Managed confirmation/preservation have store/workspace regressions; the documented end-to-end commands do not run a live-provider replan or a counted external-effect process across managed replan. The pinned OMP verifier uses an isolated localhost model fixture, not user-provider credentials or an external-model evaluation.
 - Capture failure yields `continuation.status="not_available"`; ownership loss or a removed step yields `blocked`. These continuation outcomes do not automatically block card activation/execution. Operators must inspect preservation failures, remaining work and external effects; there is no generic cross-card importer or automatic rollback/replay.
 - Links remain `target_verification="not_performed"` and `reciprocal_link="unverified"` even when both sides were recorded. They are operator provenance assertions, not cross-scope read capabilities or proof of a matching target. Fresh agreements and independent acceptance occur only in the successor's scope.
