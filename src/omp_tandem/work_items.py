@@ -1444,6 +1444,39 @@ class WorkStore:
                     else "not agreed"
                 )
             )
+        authorization = current.get("authorization")
+        lines.extend(["", "## Authorization"])
+        if not authorization:
+            lines.append("- none: autonomous execution is not authorized")
+        else:
+            grant_view = authorization.get("preview") or {}
+            lines.append(
+                "- "
+                + ("revoked" if authorization.get("revoked_at") else "active")
+                + f" grant {authorization.get('authorization_id')}: budget {authorization.get('budget_seconds')}s, "
+                f"max launches {authorization.get('max_launches')}, max cost {authorization.get('max_cost_usd')} USD, "
+                f"per-attempt ceiling {grant_view.get('max_attempt_cost_usd')} ({grant_view.get('attempt_cost_policy')})"
+            )
+            permissions = grant_view.get("permissions") or {}
+            lines.append(
+                f"- Permissions: edit/write {permissions.get('edit_write')}, shell {permissions.get('shell')}, "
+                f"os sandbox {permissions.get('os_sandbox')}"
+            )
+            for seat, policy in (grant_view.get("model_selection") or {}).items():
+                lines.append(
+                    f"- Model policy {seat}: {policy.get('mode')}"
+                    + (f" `{policy['selector']}`" if policy.get("selector") else "")
+                    + (
+                        f" (resolved at {policy['resolution_time']})"
+                        if policy.get("resolution_time")
+                        else ""
+                    )
+                    + (f"; {policy['note']}" if policy.get("note") else "")
+                )
+            if authorization.get("model_selection_error"):
+                lines.append(
+                    "- Model selection error: " + authorization["model_selection_error"]
+                )
         unresolved = [
             blocker for blocker in current["blockers"] if blocker["resolved_at"] is None
         ]
@@ -1591,7 +1624,12 @@ class WorkStore:
                     "- Before activation (transfer eligibility, not launch readiness): "
                     f"steps with checkpoint {preview['steps_with_checkpoint']}, "
                     f"steps starting without checkpoint {preview['steps_without_checkpoint']}, "
-                    f"pending dispositions {preview['pending_dispositions']}, "
+                    + (
+                        f"steps undetermined until their dispositions land {preview['steps_undetermined']}, "
+                        if preview["steps_undetermined"]
+                        else ""
+                    )
+                    + f"pending dispositions {preview['pending_dispositions']}, "
                     f"capture failures {preview['capture_failures']}"
                     + (
                         f" (unacknowledged: {preview['capture_failures_unacknowledged']})"
@@ -1610,8 +1648,15 @@ class WorkStore:
                             else ""
                         )
                     )
-            for item in current.get("operator_commands") or []:
-                lines.append(f"- Operator: {item['purpose']}: `{item['command']}`")
+        if current.get("operator_commands"):
+            lines.extend(
+                [
+                    "",
+                    "## Operator commands (operator seat only; shown for discoverability, not permission)",
+                ]
+            )
+            for item in current["operator_commands"]:
+                lines.append(f"- {item['purpose']}: `{item['command']}`")
         application = current.get("application") or {
             "status": "not_recorded",
             "records": [],
@@ -4755,6 +4800,13 @@ class WorkStore:
             ):
                 capture_failures.append(attempt_id)
         acknowledged = sorted(transition.get("acknowledged_capture_failures") or [])
+        # A step whose attempt is not yet disposed may still yield a checkpoint;
+        # it is undetermined, not "without checkpoint", until the disposition lands.
+        undetermined = {
+            transition["inventory"][attempt_id]["step_id"]
+            for attempt_id in pending
+            if transition["inventory"][attempt_id]["step_id"] in plan_steps
+        } - with_checkpoint
         return {
             "proposal_id": proposal["proposal_id"],
             "transition_id": transition["transition_id"],
@@ -4763,8 +4815,11 @@ class WorkStore:
             "pending_dispositions": pending,
             "attempts": attempts,
             "steps_with_checkpoint": sorted(with_checkpoint),
+            "steps_undetermined": sorted(undetermined),
             "steps_without_checkpoint": sorted(
-                step_id for step_id in plan_steps if step_id not in with_checkpoint
+                step_id
+                for step_id in plan_steps
+                if step_id not in with_checkpoint and step_id not in undetermined
             ),
             "capture_failures": sorted(capture_failures),
             "capture_failures_unacknowledged": sorted(

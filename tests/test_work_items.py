@@ -3090,6 +3090,15 @@ class WorkItemsTests(unittest.TestCase):
             preview["attempts"][managed["attempt_id"]]["continuation"]["status"],
             "pending",
         )
+        # Undisposed attempts leave their step undetermined, never "without checkpoint".
+        self.assertEqual(preview["steps_undetermined"], ["backend"])
+        self.assertEqual(
+            preview["steps_without_checkpoint"], ["frontend", "integration"]
+        )
+        self.assertIn(
+            "steps undetermined until their dispositions land ['backend']",
+            self.store.report_markdown(self.view(), actor="claude"),
+        )
         self.store.confirm_stopped(managed["attempt_id"])
         # The fake workspace has no manifest: preservation fails and is recorded.
         resolved = self.resolve(
@@ -3109,6 +3118,7 @@ class WorkItemsTests(unittest.TestCase):
         self.assertEqual(
             preview["steps_without_checkpoint"], ["backend", "frontend", "integration"]
         )
+        self.assertEqual(preview["steps_undetermined"], [])
         self.assertEqual(
             preview["attempts"][managed["attempt_id"]]["continuation"]["status"],
             "not_available",
@@ -3221,6 +3231,12 @@ class WorkItemsTests(unittest.TestCase):
             f"--expected-revision {blocked['revision']} --resolution resolved",
             hints[0]["command"],
         )
+        # Markdown shows the same command without any transition on the card.
+        rendered = self.store.report_markdown(blocked, actor="claude")
+        self.assertIn("## Operator commands", rendered)
+        self.assertIn(
+            f"unblock {self.work_id} --blocker {blocker['blocker_id']}", rendered
+        )
         summary = perform_work(
             self.store, {"action": "get", "work_id": self.work_id}, actor="claude"
         )
@@ -3303,6 +3319,13 @@ class WorkItemsTests(unittest.TestCase):
             ],
             "openai-codex/gpt-6-astra",
         )
+        rendered = self.store.report_markdown(self.view(), actor="claude")
+        self.assertIn("## Authorization", rendered)
+        self.assertIn(
+            "Model policy omp: fixed_selector `openai-codex/gpt-6-astra` (resolved at authorization)",
+            rendered,
+        )
+        self.assertIn("Model policy claude: fixed_selector `sonnet`", rendered)
         legacy = grant_preview(
             {
                 "budget_seconds": 1,
