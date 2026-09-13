@@ -82,11 +82,67 @@ def attempt_budget(grant: dict) -> dict:
     }
 
 
+def model_policy(grant: dict) -> dict:
+    """How each seat's model is chosen: a fixed selector or OMP's dynamic default.
+
+    A fixed selector is the operator's requested selector, not proof of the
+    provider/model implementation that actually answers. The dynamic default is
+    OMP's own configured selection, evaluated when each attempt starts.
+    """
+    try:
+        selection = model_selection(grant)
+    except ValueError as error:
+        # A malformed record is labelled, never fatal for a read; launch refuses it.
+        return {
+            "claude": {"mode": "malformed", "selector": None, "resolution_time": None},
+            "omp": {
+                "mode": "malformed",
+                "selector": None,
+                "resolution_time": None,
+                "note": str(error),
+            },
+        }
+    omp_provenance = selection["model_provenance"]["omp"]
+    if omp_provenance == "legacy_unpinned":
+        omp = {
+            "mode": "legacy_unpinned",
+            "selector": None,
+            "resolution_time": None,
+            "note": "Pre-3.5 grant without a recorded OMP policy; launch is refused until reauthorized.",
+        }
+    elif selection["omp_model"] is None:
+        omp = {
+            "mode": "dynamic_default",
+            "selector": None,
+            "resolution_time": "attempt_start",
+            "note": "OMP's configured default selection is evaluated when each attempt starts; pass --omp-model for a fixed selector.",
+        }
+    else:
+        omp = {
+            "mode": "fixed_selector",
+            "selector": selection["omp_model"],
+            "resolution_time": "authorization",
+            "note": "The requested selector is recorded at authorization; the answering model is reported separately as observed identity.",
+        }
+    return {
+        "claude": {
+            "mode": "fixed_selector",
+            "selector": selection["claude_model"],
+            "resolution_time": "authorization",
+            "note": "Managed Claude runs the recorded selector; the documented default is "
+            + CLAUDE_DEFAULT_MODEL
+            + ".",
+        },
+        "omp": omp,
+    }
+
+
 def grant_preview(grant: dict) -> dict:
     """Operator-facing summary of what an authorization actually permits."""
     budget = attempt_budget(grant)
     return {
         **budget,
+        "model_selection": model_policy(grant),
         "reserve_policy": (
             "Each launch reserves min(max_attempt_cost_usd, max_cost_usd - used - "
             "active reserves); concurrent ready steps share the unreserved remainder "
@@ -704,6 +760,7 @@ def present_work(
                 "closure",
                 "predecessors",
                 "provenance",
+                "activation_preview",
             )
             if key in payload
         }
@@ -1220,6 +1277,7 @@ class WorkStore:
             "reciprocal_link": "unverified; record each direction in its own scope",
             "authority_transfer": "none",
         }
+        view["activation_preview"] = self._activation_preview(card)
         view["operator_commands"] = self._operator_commands(card)
         view["next_action"] = (
             "Terminal cancellation; history is retained, not accepted. Continue only under a separately agreed card."
@@ -1509,11 +1567,46 @@ class WorkStore:
                         f"disposition {disposition.get('kind') or 'none'}"
                     )
                 for attempt_id, outcome in (past.get("continuation") or {}).items():
+                    status = outcome.get("status")
+                    if status == "blocked":
+                        # 3.7.0 wrote "blocked" for a failed transfer; it never
+                        # gated execution and is shown under its current name.
+                        status = "not_transferable (recorded as 'blocked' by 3.7.0)"
                     lines.append(
-                        f"  - continuation for {attempt_id}: {outcome.get('status')}"
+                        f"  - continuation for {attempt_id}: {status}"
                         + (
                             f" — {outcome.get('reason')}"
                             if outcome.get("reason")
+                            else ""
+                        )
+                        + (
+                            " (capture failure acknowledged)"
+                            if outcome.get("acknowledged")
+                            else ""
+                        )
+                    )
+            preview = current.get("activation_preview")
+            if preview:
+                lines.append(
+                    "- Before activation (transfer eligibility, not launch readiness): "
+                    f"steps with checkpoint {preview['steps_with_checkpoint']}, "
+                    f"steps starting without checkpoint {preview['steps_without_checkpoint']}, "
+                    f"pending dispositions {preview['pending_dispositions']}, "
+                    f"capture failures {preview['capture_failures']}"
+                    + (
+                        f" (unacknowledged: {preview['capture_failures_unacknowledged']})"
+                        if preview["capture_failures_unacknowledged"]
+                        else ""
+                    )
+                )
+                for attempt_id, item in preview["attempts"].items():
+                    outcome = item["continuation"]
+                    lines.append(
+                        f"  - {attempt_id} ({item['step_id']}): {outcome['status']}"
+                        + (f" — {outcome['reason']}" if outcome.get("reason") else "")
+                        + (
+                            f"; preserved {item['preserved']['commit'][:12]} {item['preserved']['changed_files']}"
+                            if item.get("preserved")
                             else ""
                         )
                     )
@@ -2881,14 +2974,13 @@ class WorkStore:
                 != card["plan_revision"]
             ):
                 add("agree", None, None)
-            transition = card.get("transition")
-            if (transition and transition["phase"] in TRANSITION_OPEN) or card.get(
-                "proposal"
-            ):
-                for item in self._operator_commands(card):
+            # Operator commands (transition steps, blocker resolution) are shown to
+            # participants as discoverability only; none of them is allowed here.
+            for item in self._operator_commands(card):
+                if True:
                     actions.append(
                         {
-                            "action": "transition",
+                            "action": item.get("action", "transition"),
                             "step_id": None,
                             "kind": None,
                             "stage": None,
@@ -3786,6 +3878,44 @@ class WorkStore:
         proposal = card.get("proposal")
         revision = ["--expected-revision", str(card["revision"])]
         commands = []
+        # Blockers name their CURRENT location (card-level or the step that holds
+        # them now), never their historical origin, so the command resolves the
+        # blocker where the store actually keeps it. Resolving a blocker does not
+        # resume a paused card or authorize execution.
+        for step_id, blockers in (
+            (None, card["blockers"]),
+            *((step["id"], step["blockers"]) for step in card["steps"]),
+        ):
+            for blocker in blockers:
+                if blocker["resolved_at"] is not None:
+                    continue
+                commands.append(
+                    {
+                        "action": "unblock",
+                        "purpose": (
+                            f"resolve blocker {blocker['blocker_id']} "
+                            f"({'card-level' if step_id is None else 'step ' + step_id}; "
+                            f"condition: {blocker['condition']}) with evidence, or mark it not_applicable with a reason"
+                        ),
+                        "blocker_id": blocker["blocker_id"],
+                        "step_id": step_id,
+                        "command": self._operator_command(
+                            work_id,
+                            "unblock",
+                            work_id,
+                            "--blocker",
+                            blocker["blocker_id"],
+                            *(("--step", step_id) if step_id else ()),
+                            *revision,
+                            "--resolution",
+                            "resolved",
+                            "--note",
+                            "'…'",
+                            "--evidence",
+                            "'…'",
+                        ),
+                    }
+                )
         if transition and transition["phase"] in TRANSITION_OPEN:
             bound = ["--transition", transition["transition_id"]]
             commands.append(
@@ -3827,9 +3957,21 @@ class WorkStore:
             if all(
                 entry.get("disposition") for entry in transition["inventory"].values()
             ):
+                acknowledgments = [
+                    flag
+                    for attempt_id, entry in transition["inventory"].items()
+                    if (entry.get("saved") or {}).get("capture_failure")
+                    and (entry.get("disposition") or {}).get("kind") == "superseded"
+                    for flag in ("--acknowledge-capture-failure", attempt_id)
+                ]
                 commands.append(
                     {
-                        "purpose": "activate the frozen proposal as the next draft revision",
+                        "purpose": "activate the frozen proposal as the next draft revision"
+                        + (
+                            " (acknowledging the listed capture failures: their saved work is lost)"
+                            if acknowledgments
+                            else ""
+                        ),
                         "command": self._operator_command(
                             work_id,
                             "transition",
@@ -3837,6 +3979,7 @@ class WorkStore:
                             "activate",
                             *bound,
                             *revision,
+                            *acknowledgments,
                             "--note",
                             "'…'",
                         ),
@@ -4031,6 +4174,7 @@ class WorkStore:
             if transition
             else None,
             "transition_history": card.get("transition_history") or [],
+            "activation_preview": self._activation_preview(card),
             "commands": self._operator_commands(card),
         }
 
@@ -4449,7 +4593,9 @@ class WorkStore:
                     "evidence": evidence,
                     "at": time.time(),
                     "transition_id": transition["transition_id"],
-                    "disposition": "superseded",
+                    # One decision, one word: the attempt record, the transition
+                    # inventory and the operation receipt must agree.
+                    "disposition": "abandoned" if abandon else "superseded",
                 },
             )
             self._save_attempt(db, attempt)
@@ -4515,6 +4661,121 @@ class WorkStore:
                 },
             )
 
+    @staticmethod
+    def _continuation_outcome(entry, plan_steps):
+        """How one inventory attempt's saved work would continue under a plan.
+
+        Transfer eligibility only: `checkpoint` (validated saved bytes fit the new
+        ownership), `not_transferable` (step removed or ownership excludes saved
+        files) or `not_available` (no validated saved bytes, including a capture
+        failure). None of these gates launch readiness by itself.
+        """
+        disposition = entry.get("disposition")
+        saved = entry.get("saved") or {}
+        preserved = saved.get("preserved")
+        if not disposition:
+            return {"status": "pending", "reason": "attempt not yet disposed"}
+        if disposition["kind"] != "superseded":
+            return {
+                "status": "none",
+                "reason": f"disposition {disposition['kind']} keeps no continuation",
+            }
+        if not preserved:
+            return {
+                "status": "not_available",
+                "reason": saved.get("capture_failure") or "no validated saved bytes",
+                "capture_failure": saved.get("capture_failure"),
+            }
+        spec = plan_steps.get(entry["step_id"])
+        if spec is None:
+            return {
+                "status": "not_transferable",
+                "reason": f"step {entry['step_id']} is not part of the new plan",
+                "commit": preserved["commit"],
+            }
+        outside = sorted(set(preserved["changed_files"]) - set(spec["owned_files"]))
+        if outside:
+            return {
+                "status": "not_transferable",
+                "reason": f"preserved changes outside the new ownership: {outside}",
+                "commit": preserved["commit"],
+            }
+        return {
+            "status": "checkpoint",
+            "step_id": entry["step_id"],
+            "commit": preserved["commit"],
+        }
+
+    def _activation_preview(self, card):
+        """Read-only view of what activation would carry over; nothing is mutated.
+
+        Derived from the frozen proposal and the current inventory so the operator
+        sees what was preserved, what failed and which new steps would start
+        without a checkpoint before deciding. It describes transfer eligibility,
+        not launch readiness: pauses, blockers, agreements and authorization stay
+        separate gates.
+        """
+        transition = card.get("transition")
+        proposal = card.get("proposal")
+        if not (transition and transition["phase"] in TRANSITION_OPEN and proposal):
+            return None
+        plan_steps = {step["id"]: step for step in proposal["plan"]["steps"]}
+        attempts = {}
+        with_checkpoint = set()
+        capture_failures = []
+        pending = []
+        for attempt_id, entry in transition["inventory"].items():
+            outcome = self._continuation_outcome(entry, plan_steps)
+            saved = entry.get("saved") or {}
+            preserved = saved.get("preserved")
+            attempts[attempt_id] = {
+                "step_id": entry["step_id"],
+                "actor": entry["actor"],
+                "kind": entry["kind"],
+                "autonomous": entry["autonomous"],
+                "disposition": (entry.get("disposition") or {}).get("kind"),
+                "stop": (entry.get("stop") or {}).get("source"),
+                "preserved": {
+                    "commit": preserved["commit"],
+                    "changed_files": preserved["changed_files"],
+                }
+                if preserved
+                else None,
+                "capture_failure": saved.get("capture_failure"),
+                "continuation": outcome,
+            }
+            if outcome["status"] == "checkpoint":
+                with_checkpoint.add(entry["step_id"])
+            if outcome["status"] == "pending":
+                pending.append(attempt_id)
+            if (
+                outcome["status"] == "not_available"
+                and saved.get("capture_failure")
+                and (entry.get("disposition") or {}).get("kind") == "superseded"
+            ):
+                capture_failures.append(attempt_id)
+        acknowledged = sorted(transition.get("acknowledged_capture_failures") or [])
+        return {
+            "proposal_id": proposal["proposal_id"],
+            "transition_id": transition["transition_id"],
+            "plan_revision_after": card["plan_revision"] + 1,
+            "ready": not pending,
+            "pending_dispositions": pending,
+            "attempts": attempts,
+            "steps_with_checkpoint": sorted(with_checkpoint),
+            "steps_without_checkpoint": sorted(
+                step_id for step_id in plan_steps if step_id not in with_checkpoint
+            ),
+            "capture_failures": sorted(capture_failures),
+            "capture_failures_unacknowledged": sorted(
+                set(capture_failures) - set(acknowledged)
+            ),
+            "meaning": (
+                "Transfer eligibility of saved work, not launch readiness: pauses, "
+                "blockers, fresh agreements and authorization remain separate gates."
+            ),
+        }
+
     def transition_activate(
         self,
         work_id,
@@ -4524,11 +4785,13 @@ class WorkStore:
         proposal_id=None,
         expected_revision=None,
         operation_id=None,
+        acknowledge_capture_failures=(),
         actor="operator",
     ) -> dict:
         self._require_operator(actor)
         if not note:
             raise ValueError("Activate requires a note")
+        acknowledged = sorted(set(acknowledge_capture_failures or ()))
         fingerprint = self._transition_request(
             "activate",
             work_id=work_id,
@@ -4536,6 +4799,7 @@ class WorkStore:
             transition_id=transition_id,
             proposal_id=proposal_id,
             expected_revision=expected_revision,
+            acknowledge_capture_failures=acknowledged,
         )
         with self._transaction() as db:
             card = self._load(db, work_id)
@@ -4590,6 +4854,31 @@ class WorkStore:
                 raise ValueError(
                     "inventory_not_disposed: a live attempt appeared after begin"
                 )
+            # Capture failures are an informed operator decision, not a footnote:
+            # every superseded attempt whose saved bytes could not be captured must
+            # be acknowledged by exact attempt id before the plan changes.
+            plan_steps = {step["id"]: step for step in proposal["plan"]["steps"]}
+            outcomes = {
+                attempt_id: self._continuation_outcome(entry, plan_steps)
+                for attempt_id, entry in transition["inventory"].items()
+            }
+            failed = sorted(
+                attempt_id
+                for attempt_id, outcome in outcomes.items()
+                if outcome.get("capture_failure")
+            )
+            unknown = sorted(set(acknowledged) - set(failed))
+            if unknown:
+                raise ValueError("capture_failure_unknown: " + ", ".join(unknown))
+            missing = sorted(set(failed) - set(acknowledged))
+            if missing:
+                raise ValueError(
+                    "capture_failure_unacknowledged: "
+                    + ", ".join(missing)
+                    + " (repeat --acknowledge-capture-failure ATTEMPT for each)"
+                )
+            if acknowledged:
+                transition["acknowledged_capture_failures"] = acknowledged
             was_paused = card["status"] == "paused"
             self._activate_plan(db, card, proposal["plan"])
             self._record_transition_operation(
@@ -4601,40 +4890,27 @@ class WorkStore:
                     "transition_id": transition["transition_id"],
                     "proposal_id": proposal["proposal_id"],
                     "plan_revision": card["plan_revision"],
+                    "acknowledged_capture_failures": acknowledged,
                 },
             )
             if was_paused:
                 # Activation never clears an operator pause or unknown-cost fence.
                 card["status"] = "paused"
-            new_steps = {step["id"]: step for step in card["plan"]["steps"]}
             for attempt_id, entry in transition["inventory"].items():
-                preserved = (entry.get("saved") or {}).get("preserved")
+                outcome = outcomes[attempt_id]
                 step_id = entry["step_id"]
-                if entry.get("disposition", {}).get("kind") != "superseded":
+                if outcome["status"] in {"pending", "none"}:
                     continue
-                if not preserved:
+                if outcome["status"] != "checkpoint":
                     transition["continuation"][attempt_id] = {
-                        "status": "not_available",
-                        "reason": (entry.get("saved") or {}).get("capture_failure")
-                        or "no validated saved bytes",
+                        key: value
+                        for key, value in outcome.items()
+                        if key != "capture_failure" or value
                     }
+                    if attempt_id in acknowledged:
+                        transition["continuation"][attempt_id]["acknowledged"] = True
                     continue
-                spec = new_steps.get(step_id)
-                if spec is None:
-                    transition["continuation"][attempt_id] = {
-                        "status": "blocked",
-                        "reason": f"step {step_id} is not part of the new plan",
-                    }
-                    continue
-                outside = sorted(
-                    set(preserved["changed_files"]) - set(spec["owned_files"])
-                )
-                if outside:
-                    transition["continuation"][attempt_id] = {
-                        "status": "blocked",
-                        "reason": f"preserved changes outside the new ownership: {outside}",
-                    }
-                    continue
+                preserved = entry["saved"]["preserved"]
                 self._step(card, step_id)["checkpoint"] = {
                     **{
                         key: preserved[key]

@@ -181,6 +181,35 @@ def parser():
         "--saved-commit",
         help="Manual implementation attempt: exact commit in the pinned repository holding its preserved work",
     )
+    transition.add_argument(
+        "--acknowledge-capture-failure",
+        action="append",
+        default=[],
+        metavar="ATTEMPT",
+        help="activate: acknowledge that this superseded attempt's saved work could not be captured and is lost; repeat per attempt. Activation refuses unacknowledged capture failures",
+    )
+    unblock = commands.add_parser(
+        "unblock",
+        help="Operator resolution of one recorded blocker; never resumes or authorizes execution by itself",
+    )
+    unblock.add_argument("work_id")
+    unblock.add_argument(
+        "--blocker", required=True, help="Exact blocker id shown in the card"
+    )
+    unblock.add_argument(
+        "--step",
+        help="Step the blocker currently belongs to; omit for a card-level blocker",
+    )
+    unblock.add_argument(
+        "--resolution",
+        choices=("resolved", "not_applicable"),
+        required=True,
+        help="resolved: the condition was met (say how in --note); not_applicable: the condition no longer applies (say why)",
+    )
+    unblock.add_argument("--expected-revision", type=int, required=True)
+    unblock.add_argument("--operation-id", required=True)
+    unblock.add_argument("--note", required=True)
+    unblock.add_argument("--evidence", action="append", required=True)
     cancel = commands.add_parser(
         "cancel", help="Close a disposed card without acceptance; never stops execution"
     )
@@ -510,6 +539,7 @@ def main(argv=None):
                         proposal_id=args.proposal,
                         expected_revision=args.expected_revision,
                         operation_id=args.operation_id,
+                        acknowledge_capture_failures=args.acknowledge_capture_failure,
                     )
                 else:
                     result = store.transition_withdraw(
@@ -528,10 +558,62 @@ def main(argv=None):
                         "status": result["status"],
                         "proposal": result.get("proposal"),
                         "transition": result.get("transition"),
+                        "activation_preview": result.get("activation_preview"),
                         "next_action": result.get("next_action"),
                         "operator_commands": result.get("operator_commands"),
                         "replayed_operation": result.get("replayed_operation"),
                     }
+            elif args.command == "unblock":
+                # The same store action a blocker author uses over MCP, performed
+                # from the operator seat; CAS and exact-operation receipts are the
+                # existing work_operations path.
+                view = store.perform(
+                    {
+                        "action": "unblock",
+                        "work_id": args.work_id,
+                        **({"step_id": args.step} if args.step else {}),
+                        "blocker_id": args.blocker,
+                        "resolution": args.resolution,
+                        "note": args.note,
+                        "evidence": args.evidence,
+                        "expected_revision": args.expected_revision,
+                        "operation_id": args.operation_id,
+                    },
+                    actor="operator",
+                )
+                resolved = next(
+                    (
+                        blocker
+                        for blockers in (
+                            view["blockers"],
+                            *(step["blockers"] for step in view["steps"]),
+                        )
+                        for blocker in blockers
+                        if blocker["blocker_id"] == args.blocker
+                    ),
+                    None,
+                )
+                result = {
+                    "work_id": view["work_id"],
+                    "revision": view["revision"],
+                    "status": view["status"],
+                    "blocker": resolved,
+                    "unresolved_blockers": [
+                        {
+                            "blocker_id": blocker["blocker_id"],
+                            "step_id": step_id,
+                            "note": blocker["note"],
+                        }
+                        for step_id, blockers in (
+                            (None, view["blockers"]),
+                            *((step["id"], step["blockers"]) for step in view["steps"]),
+                        )
+                        for blocker in blockers
+                        if blocker["resolved_at"] is None
+                    ],
+                    "next_action": view.get("next_action"),
+                    "operator_commands": view.get("operator_commands"),
+                }
             elif args.command == "assess":
                 view = store.perform(
                     {"action": "get", "work_id": args.work_id}, actor="operator"

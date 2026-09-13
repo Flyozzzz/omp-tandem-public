@@ -2039,6 +2039,107 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ToolError):
             await self.mutate(self.claude, identifier, "heartbeat", step_id="change")
 
+    async def test_operator_unblock_through_the_cli(self):
+        identifier = await self.create()
+        blocked = await self.mutate(
+            self.omp,
+            identifier,
+            "block",
+            step_id="change",
+            note="Waiting for the schema",
+            condition="Schema supplied",
+        )
+        blocker = blocked["steps"][0]["blockers"][0]["blocker_id"]
+        hint = next(
+            item
+            for item in blocked["next_actions"]
+            if item["action"] == "unblock" and item.get("command")
+        )
+        self.assertFalse(hint["allowed"])
+        self.assertIn(f"--blocker {blocker} --step change", hint["command"])
+        await self.mutate(self.claude, identifier, "pause")
+        current = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        stale = await self.daemon(
+            "unblock",
+            identifier,
+            "--blocker",
+            blocker,
+            "--step",
+            "change",
+            "--resolution",
+            "resolved",
+            "--expected-revision",
+            str(current["revision"] - 1),
+            "--operation-id",
+            "unblock-1",
+            "--note",
+            "schema supplied",
+            "--evidence",
+            "schema.json",
+        )
+        self.assertNotEqual(stale.returncode, 0)
+        self.assertIn("revision", stale.stderr)
+        unknown = await self.daemon(
+            "unblock",
+            identifier,
+            "--blocker",
+            "not-a-blocker",
+            "--step",
+            "change",
+            "--resolution",
+            "resolved",
+            "--expected-revision",
+            str(current["revision"]),
+            "--operation-id",
+            "unblock-2",
+            "--note",
+            "x",
+            "--evidence",
+            "y",
+        )
+        self.assertNotEqual(unknown.returncode, 0)
+        self.assertIn("Unknown unresolved blocker", unknown.stderr)
+        command = [
+            "unblock",
+            identifier,
+            "--blocker",
+            blocker,
+            "--step",
+            "change",
+            "--resolution",
+            "resolved",
+            "--expected-revision",
+            str(current["revision"]),
+            "--operation-id",
+            "unblock-3",
+            "--note",
+            "schema supplied",
+            "--evidence",
+            "schema.json",
+        ]
+        resolved = await self.daemon(*command)
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        payload = json.loads(resolved.stdout)
+        self.assertEqual(payload["blocker"]["resolved_by"], "operator")
+        self.assertEqual(payload["blocker"]["resolution_kind"], "resolved")
+        self.assertEqual(payload["unresolved_blockers"], [])
+        # Resolving a blocker neither resumes nor authorizes anything.
+        self.assertEqual(payload["status"], "paused")
+        replayed = await self.daemon(*command)
+        self.assertEqual(replayed.returncode, 0, replayed.stderr)
+        self.assertEqual(json.loads(replayed.stdout)["revision"], payload["revision"])
+        different = await self.daemon(*command[:-2], "--evidence", "other.json")
+        self.assertNotEqual(different.returncode, 0)
+        after = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        self.assertEqual(
+            [item for item in after["next_actions"] if item["action"] == "unblock"],
+            [],
+        )
+        report = await self.daemon("show", identifier, "--format", "markdown")
+        # The resolved blocker is no longer listed as open on its step.
+        self.assertNotIn(f"Blocker {blocker}: Waiting for the schema", report.stdout)
+        self.assertNotIn("unblock " + identifier, report.stdout)
+
     async def test_removing_live_step_cannot_strand_its_recovery(self):
         identifier = await self.create()
         claimed = await self.mutate(self.claude, identifier, "claim", step_id="change")

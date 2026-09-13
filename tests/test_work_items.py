@@ -2544,7 +2544,13 @@ class WorkItemsTests(unittest.TestCase):
         )
         ready = self.view()
         self.assertEqual(ready["transition"]["phase"], "ready")
-        activated = self.activate(note="Activate")
+        # The managed workspace could not be captured: activation demands an
+        # explicit acknowledgment of that exact attempt.
+        with self.assertRaisesRegex(ValueError, "capture_failure_unacknowledged"):
+            self.activate(note="Activate")
+        activated = self.activate(
+            note="Activate", acknowledge_capture_failures=[managed["attempt_id"]]
+        )
         self.assertEqual(activated["plan_revision"], before["plan_revision"] + 1)
         self.assertEqual(activated["plan"], revised)
         self.assertEqual(activated["agreements"], {})
@@ -2633,12 +2639,36 @@ class WorkItemsTests(unittest.TestCase):
         # A new proposal can still be negotiated; abandonment records a blocker.
         self.change("propose", plan=revised)
         self.begin(note="again")
-        self.resolve(
+        abandoned = self.resolve(
             manual["attempt_id"],
             note="Work discarded",
             evidence=["nothing to keep"],
             confirm_stopped=True,
             abandon=True,
+            operation_id="abandon-once",
+        )
+        # One decision, one word: the attempt record, the transition inventory
+        # and the operation receipt must all say "abandoned".
+        self.assertEqual(
+            self.store.attempt(manual["attempt_id"])["reconciliation"]["disposition"],
+            "abandoned",
+        )
+        self.assertEqual(
+            abandoned["transition"]["inventory"][manual["attempt_id"]]["disposition"][
+                "kind"
+            ],
+            "abandoned",
+        )
+        replayed = self.resolve(
+            manual["attempt_id"],
+            note="Work discarded",
+            evidence=["nothing to keep"],
+            confirm_stopped=True,
+            abandon=True,
+            operation_id="abandon-once",
+        )
+        self.assertEqual(
+            replayed["replayed_operation"]["outcome"]["disposition"], "abandoned"
         )
         # Abandoning possibly-effectful work pauses the card; activation keeps it.
         self.assertEqual(self.view()["status"], "paused")
@@ -2711,14 +2741,26 @@ class WorkItemsTests(unittest.TestCase):
             saved_commit=saved,
             workspaces=WorkWorkspace(self.scope),
         )
+        # The preview names the outcome before the plan changes; activation then
+        # records the same outcome. Neither is an execution blocker.
+        preview = self.view()["activation_preview"]
+        self.assertTrue(preview["ready"])
+        self.assertEqual(
+            preview["attempts"][second["attempt_id"]]["continuation"]["status"],
+            "not_transferable",
+        )
+        self.assertEqual(
+            preview["steps_without_checkpoint"], ["backend", "integration"]
+        )
         blocked = self.activate(note="activate")
         self.assertIsNone(blocked["steps"][0]["checkpoint"])
         self.assertEqual(
             blocked["transition_history"][-1]["continuation"][second["attempt_id"]][
                 "status"
             ],
-            "blocked",
+            "not_transferable",
         )
+        self.assertEqual(blocked["steps"][0]["blockers"], [])
 
     def test_begun_transition_survives_reopen_and_removed_step_is_retired(self):
         self.agreed(parallel=True)
@@ -3025,6 +3067,252 @@ class WorkItemsTests(unittest.TestCase):
             entries[manual["attempt_id"]]["stop"]["source"], "operator_attested"
         )
         self.assertNotIn(manual["token"], json.dumps(self.view()))
+
+    def test_capture_failure_needs_exact_operator_acknowledgment(self):
+        from omp_tandem.work_workspace import WorkWorkspace
+
+        self.agreed(parallel=True)
+        self.authorize()
+        managed = self.reserve("backend")
+        self.store.started(
+            managed["attempt_id"],
+            workspace=str(self.scope.directory / "worktrees" / managed["attempt_id"]),
+        )
+        revised = json.loads(json.dumps(self.view()["plan"]))
+        revised["steps"][0]["goal"] = "Changed backend"
+        pending = self.change("propose", plan=revised)
+        self.assertIsNone(pending["activation_preview"])
+        self.begin(note="begin")
+        preview = self.view()["activation_preview"]
+        self.assertFalse(preview["ready"])
+        self.assertEqual(preview["pending_dispositions"], [managed["attempt_id"]])
+        self.assertEqual(
+            preview["attempts"][managed["attempt_id"]]["continuation"]["status"],
+            "pending",
+        )
+        self.store.confirm_stopped(managed["attempt_id"])
+        # The fake workspace has no manifest: preservation fails and is recorded.
+        resolved = self.resolve(
+            managed["attempt_id"],
+            note="teardown confirmed",
+            evidence=["log"],
+            workspaces=WorkWorkspace(self.scope),
+        )
+        entry = resolved["transition"]["inventory"][managed["attempt_id"]]
+        self.assertIsNotNone(entry["saved"]["capture_failure"])
+        preview = resolved["activation_preview"]
+        self.assertTrue(preview["ready"])
+        self.assertEqual(preview["capture_failures"], [managed["attempt_id"]])
+        self.assertEqual(
+            preview["capture_failures_unacknowledged"], [managed["attempt_id"]]
+        )
+        self.assertEqual(
+            preview["steps_without_checkpoint"], ["backend", "frontend", "integration"]
+        )
+        self.assertEqual(
+            preview["attempts"][managed["attempt_id"]]["continuation"]["status"],
+            "not_available",
+        )
+        activate_hint = next(
+            item
+            for item in resolved["operator_commands"]
+            if " activate " in item["command"]
+        )
+        self.assertIn(
+            f"--acknowledge-capture-failure {managed['attempt_id']}",
+            activate_hint["command"],
+        )
+        self.assertIn("saved work is lost", activate_hint["purpose"])
+        rendered = self.store.report_markdown(resolved, actor="claude")
+        self.assertIn("Before activation", rendered)
+        self.assertIn("capture failures ['" + managed["attempt_id"], rendered)
+        # No acknowledgment, a wrong id, then the exact id.
+        with self.assertRaisesRegex(ValueError, "capture_failure_unacknowledged"):
+            self.activate(note="go")
+        with self.assertRaisesRegex(ValueError, "capture_failure_unknown"):
+            self.activate(
+                note="go",
+                acknowledge_capture_failures=[managed["attempt_id"], "other"],
+            )
+        before = self.view()["plan_revision"]
+        activated = self.activate(
+            note="go",
+            acknowledge_capture_failures=[managed["attempt_id"]],
+            operation_id="activate-ack",
+        )
+        self.assertEqual(activated["plan_revision"], before + 1)
+        past = activated["transition_history"][-1]
+        outcome = past["continuation"][managed["attempt_id"]]
+        self.assertEqual(outcome["status"], "not_available")
+        self.assertTrue(outcome["acknowledged"])
+        self.assertEqual(past["acknowledged_capture_failures"], [managed["attempt_id"]])
+        self.assertIsNone(activated["activation_preview"])
+        # The acknowledgment is part of the exact command identity.
+        replayed = self.store.transition_activate(
+            self.work_id,
+            note="go",
+            transition_id=past["transition_id"],
+            proposal_id=past["proposal_id"],
+            acknowledge_capture_failures=[managed["attempt_id"]],
+            operation_id="activate-ack",
+        )
+        self.assertEqual(
+            replayed["replayed_operation"]["outcome"]["acknowledged_capture_failures"],
+            [managed["attempt_id"]],
+        )
+        with self.assertRaisesRegex(WorkConflict, "different command"):
+            self.store.transition_activate(
+                self.work_id,
+                note="go",
+                transition_id=past["transition_id"],
+                proposal_id=past["proposal_id"],
+                operation_id="activate-ack",
+            )
+        rendered = self.store.report_markdown(activated, actor="claude")
+        self.assertIn("capture failure acknowledged", rendered)
+
+    def test_legacy_blocked_continuation_is_shown_under_its_current_name(self):
+        self.agreed()
+        with sqlite3.connect(self.store.database) as db:
+            card = json.loads(
+                db.execute(
+                    "SELECT card FROM work_cards WHERE work_id=?", (self.work_id,)
+                ).fetchone()[0]
+            )
+            card["transition_history"] = [
+                {
+                    "transition_id": "t-legacy",
+                    "proposal_id": "p-legacy",
+                    "phase": "activated",
+                    "inventory": {},
+                    "continuation": {
+                        "a-legacy": {"status": "blocked", "reason": "ownership"}
+                    },
+                }
+            ]
+            db.execute(
+                "UPDATE work_cards SET card=? WHERE work_id=?",
+                (json.dumps(card), self.work_id),
+            )
+        self.store = WorkStore(self.store.database, self.scope)
+        rendered = self.store.report_markdown(self.view(), actor="claude")
+        self.assertIn("not_transferable (recorded as 'blocked' by 3.7.0)", rendered)
+
+    def test_operator_unblock_hints_name_the_current_location(self):
+        from omp_tandem.work_access import perform_work
+
+        self.agreed()
+        blocked = self.change(
+            "block",
+            actor="omp",
+            step_id="backend",
+            note="Missing service contract",
+            condition="Supply contract",
+        )
+        blocker = blocked["steps"][0]["blockers"][0]
+        hints = [
+            item for item in blocked["operator_commands"] if item["action"] == "unblock"
+        ]
+        self.assertEqual(len(hints), 1)
+        self.assertEqual(hints[0]["blocker_id"], blocker["blocker_id"])
+        self.assertEqual(hints[0]["step_id"], "backend")
+        self.assertIn(
+            f"unblock {self.work_id} --blocker {blocker['blocker_id']} --step backend "
+            f"--expected-revision {blocked['revision']} --resolution resolved",
+            hints[0]["command"],
+        )
+        summary = perform_work(
+            self.store, {"action": "get", "work_id": self.work_id}, actor="claude"
+        )
+        agent_hint = next(
+            item for item in summary["next_actions"] if item["action"] == "unblock"
+        )
+        self.assertFalse(agent_hint["allowed"])
+        self.assertEqual(agent_hint["blocked_reason"], "operator_required")
+        # Removing the step carries the blocker to card level; the hint follows it.
+        replacement = plan()
+        replacement["steps"] = replacement["steps"][1:]
+        replacement["steps"][0]["depends_on"] = []
+        carried = self.revise(replacement)
+        hints = [
+            item for item in carried["operator_commands"] if item["action"] == "unblock"
+        ]
+        self.assertEqual(len(hints), 1)
+        self.assertIsNone(hints[0]["step_id"])
+        self.assertNotIn("--step", hints[0]["command"])
+        self.assertIn("card-level", hints[0]["purpose"])
+        # Resolving from the operator seat through the same store action removes
+        # the hint without resuming or authorizing anything.
+        self.change("pause", actor="claude")
+        resolved = self.store.perform(
+            {
+                "action": "unblock",
+                "work_id": self.work_id,
+                "blocker_id": blocker["blocker_id"],
+                "resolution": "resolved",
+                "note": "Contract supplied",
+                "evidence": ["contract.md"],
+                "expected_revision": self.view()["revision"],
+                "operation_id": "unblock-once",
+            },
+            actor="operator",
+        )
+        self.assertEqual(resolved["status"], "paused")
+        self.assertEqual(
+            [
+                item
+                for item in resolved["operator_commands"]
+                if item["action"] == "unblock"
+            ],
+            [],
+        )
+        self.assertEqual(resolved["blockers"][0]["resolved_by"], "operator")
+        self.assertEqual(resolved["blockers"][0]["resolution_kind"], "resolved")
+
+    def test_grant_preview_discloses_model_policy(self):
+        from omp_tandem.work_items import grant_preview
+
+        self.agreed()
+        dynamic = self.store.preview_authorization(
+            budget_seconds=300,
+            max_launches=2,
+            max_cost_usd=4.0,
+            allow_work=True,
+            allow_shell=False,
+        )["preview"]["model_selection"]
+        self.assertEqual(dynamic["omp"]["mode"], "dynamic_default")
+        self.assertIsNone(dynamic["omp"]["selector"])
+        self.assertEqual(dynamic["omp"]["resolution_time"], "attempt_start")
+        self.assertEqual(dynamic["claude"]["mode"], "fixed_selector")
+        self.assertEqual(dynamic["claude"]["selector"], "sonnet")
+        fixed = self.store.preview_authorization(
+            budget_seconds=300,
+            max_launches=2,
+            max_cost_usd=4.0,
+            allow_work=True,
+            allow_shell=False,
+            omp_model="openai-codex/gpt-6-astra",
+        )["preview"]["model_selection"]["omp"]
+        self.assertEqual(fixed["mode"], "fixed_selector")
+        self.assertEqual(fixed["selector"], "openai-codex/gpt-6-astra")
+        self.assertEqual(fixed["resolution_time"], "authorization")
+        self.authorize(omp_model="openai-codex/gpt-6-astra")
+        self.assertEqual(
+            self.view()["authorization"]["preview"]["model_selection"]["omp"][
+                "selector"
+            ],
+            "openai-codex/gpt-6-astra",
+        )
+        legacy = grant_preview(
+            {
+                "budget_seconds": 1,
+                "max_launches": 1,
+                "max_cost_usd": 1.0,
+                "allow_work": True,
+                "allow_shell": False,
+            }
+        )
+        self.assertEqual(legacy["model_selection"]["omp"]["mode"], "legacy_unpinned")
 
     def test_unknown_managed_cost_pauses_and_activation_keeps_the_pause(self):
         self.agreed()
