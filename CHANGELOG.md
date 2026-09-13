@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.7.1 — 2026-09-13 (local proposal; not published)
+## 3.7.1 — 2026-09-13
 
 ### Changes
 
@@ -17,7 +17,7 @@
 - Managed-replan evidence covers the **Claude-child/shared-supervisor boundary**, not generic exactly-once external effects, OMP-native teardown or live-provider replan. The fixture's continuation marker is application logic, not atomic coordination between Git and arbitrary external services. Supervisor stop does not prove absence of effects.
 - Capture-failure acknowledgment records informed loss, not recovered bytes or acceptance. `not_transferable` does not create an execution blocker; pauses, blockers, agreements and grants remain separate gates.
 - Compatibility uses the pinned OMP binary and isolated localhost provider, not user credentials or an external-model evaluation. API/platform limits, disabled helpers and prior unexplained cleanup/wake failures remain; a later pass does not explain historical failures.
-- This is local release preparation only: no tag, publication, plugin install or application. Operator authority, explicit application and distinct independent acceptance are unchanged.
+- Release preparation implies no automatic application of the accepted result to a user checkout. Operator authority, explicit application and distinct independent acceptance are unchanged.
 
 ## 3.7.0 — 2026-09-13
 

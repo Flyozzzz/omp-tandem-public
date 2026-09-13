@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Package 3.7.1 (local proposal; not published)** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Package 3.7.1 (released 2026-09-13)** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -573,7 +573,7 @@ uv run --frozen pytest -q -s -p no:cacheprovider tests/test_work_integration.py 
 
 These scenarios use real Git, FastMCP clients and operator CLI subprocesses on disposable repositories. The managed scenario injects a deterministic Claude executable into the real `WorkSupervisor`: bound get/heartbeat, one external-effect record and an owned-file marker, real cancellation/reaping, supervisor stop evidence, immutable preservation, activation and explicit resume/re-agreement/reauthorization. The same child continues from the checkpoint marker with exactly one effect record across both claims. Interrupted cost remains unknown; a one-launch grant prevents an OMP reviewer launch. This proves the **Claude-child/shared-supervisor boundary**, not generic exactly-once external effects, OMP-native teardown or a live-provider replan. [Provider compatibility](compatibility.md) is a separate pinned OMP/localhost fixture.
 
-3.7.1 is a patch-level **local proposal, not published**, improving operator ergonomics, disclosure and regression coverage on released 3.7.0. `uv build --wheel` and `uv run --frozen python scripts/package.py` prepare local distributions; `package.py --check` checks source hashes. Packaging, tests and independent acceptance do not tag, publish, install into a user session or apply results. Only the operator decides publication. The original requests remain [verbatim with provenance](spec/plan-transition-and-git-root-2026-09-12.md).
+3.7.1 is a patch-level release (2026-09-13) improving operator ergonomics, disclosure and regression coverage on released 3.7.0. `uv build --wheel` and `uv run --frozen python scripts/package.py` prepare local distributions; `package.py --check` checks source hashes. Packaging, tests and independent acceptance do not tag, publish, install into a user session or apply results. Only the operator decides publication. The original requests remain [verbatim with provenance](spec/plan-transition-and-git-root-2026-09-12.md).
 
 ### Attached/manual work
 

@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**软件包 3.7.1（本地提案；尚未发布）** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**软件包 3.7.1（2026-09-13 发布）** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -574,7 +574,7 @@ uv run --frozen pytest -q -s -p no:cacheprovider tests/test_work_integration.py 
 
 场景使用临时仓库中的真实 Git、FastMCP 和 CLI。受管场景把确定性的 Claude 可执行程序注入真实 `WorkSupervisor`：绑定 get/heartbeat、一次外部效果记录与自有文件标记、真实取消/reap、supervisor 停止证据、不可变保存、激活及显式 resume/agree/authorize。同一程序根据 checkpoint 标记继续，两个 claim 后效果记录仍恰好一条。中断费用保持未知；单次启动 grant 防止 OMP 审查启动。这证明 **Claude-child/shared-supervisor 边界**，不证明通用 exactly-once 效果、OMP-native teardown 或 live-provider replan。[兼容性](compatibility.md)是单独的 pinned OMP/localhost fixture。
 
-3.7.1 是基于已发布 3.7.0 的 patch，改进操作者易用性、披露和回归覆盖；**本地提案，尚未发布**。`uv build --wheel`、`uv run --frozen python scripts/package.py` 和 `package.py --check` 仅准备／检查本地产物，不创建标签、不发布、不安装到用户会话或应用结果；由操作者决定。[原始请求](spec/plan-transition-and-git-root-2026-09-12.md)按原文及来源保留。
+3.7.1 是基于 3.7.0 的 patch 版本（2026-09-13 发布），改进操作者易用性、披露和回归覆盖。`uv build --wheel`、`uv run --frozen python scripts/package.py` 和 `package.py --check` 仅准备／检查本地产物，不创建标签、不发布、不安装到用户会话或应用结果；由操作者决定。[原始请求](spec/plan-transition-and-git-root-2026-09-12.md)按原文及来源保留。
 
 ### 在线手动模式：领取、真实提交、独立审查
 
