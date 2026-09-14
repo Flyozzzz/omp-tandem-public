@@ -218,6 +218,70 @@ class FindingStore:
             raise ValueError("Task is not bound to the specified review snapshot")
         return row
 
+    def _finding_task(self, db, task_id, current, review_id):
+        """Only an explicitly bound corrective stage may cross conversations."""
+        task = self._task(db, task_id, review_id=review_id)
+        if task["conversation_id"] == current["conversation_id"]:
+            return task
+        columns = task.keys()
+        if "review_stage" not in columns or task["review_stage"] not in (
+            "independent",
+            "comparison",
+        ):
+            raise ValueError("Task belongs to another conversation")
+        if "review_run_id" in columns and task["review_run_id"]:
+            run = db.execute(
+                "SELECT * FROM review_runs WHERE run_id=?", (task["review_run_id"],)
+            ).fetchone()
+            if (
+                run is None
+                or run["review_id"] != review_id
+                or run[task["review_stage"] + "_task_id"] != task_id
+            ):
+                raise ValueError("Task is not linked to this corrective review")
+        manifest = json.loads(
+            db.execute(
+                "SELECT manifest FROM reviews WHERE review_id=?", (review_id,)
+            ).fetchone()["manifest"]
+        )
+        corrective = manifest.get("corrective") or {}
+        applicability = corrective.get("applicability", {})
+        reference = next(
+            (
+                item
+                for item in corrective.get("open_findings", [])
+                if item["finding_id"] == current["finding_id"]
+            ),
+            None,
+        )
+        if (
+            reference is None
+            or applicability.get("review_id") != review_id
+            or applicability.get("code_fingerprint") != manifest.get("code_fingerprint")
+            or applicability.get("scope") != "new_snapshot_only"
+            or corrective.get("previous_review_id") == review_id
+        ):
+            raise ValueError("Finding is not declared for this corrective snapshot")
+        pinned = db.execute(
+            "SELECT review_id, validity, resolution FROM finding_history "
+            "WHERE finding_id=? AND revision=?",
+            (current["finding_id"], reference["expected_revision"]),
+        ).fetchone()
+        if (
+            pinned is None
+            or pinned["review_id"] != corrective["previous_review_id"]
+            or pinned["validity"] == "rejected"
+            or pinned["resolution"] == "verified_fixed"
+            or current["revision"] < reference["expected_revision"]
+            or db.execute(
+                "SELECT 1 FROM finding_history WHERE finding_id=? "
+                "AND revision>? AND review_id<>? LIMIT 1",
+                (current["finding_id"], reference["expected_revision"], review_id),
+            ).fetchone()
+        ):
+            raise FindingConflict("Corrective finding reference is stale")
+        return task
+
     @staticmethod
     def _row(db, finding_id):
         _identifier(finding_id)
@@ -478,7 +542,7 @@ class FindingStore:
                 "A finding update requires its current or a newer snapshot"
             )
         if task_id is not None:
-            self._task(db, task_id, current["conversation_id"], change.review_id)
+            self._finding_task(db, task_id, current, change.review_id)
         validity, resolution = current["validity"], current["resolution"]
         action = change.action
         if action == "confirm":
@@ -506,10 +570,10 @@ class FindingStore:
                 raise ValueError(
                     "Verification requires a confirmed finding with a claimed fix"
                 )
-            verification = self._task(
+            verification = self._finding_task(
                 db,
                 change.verification_task_id,
-                current["conversation_id"],
+                current,
                 change.review_id,
             )
             if verification["status"] != "completed":

@@ -1697,6 +1697,194 @@ def install_fixture_runtime(root, wheel, report):
         return python
 
 
+async def exercise_context_packets(client, bridge, project, provider):
+    """Exercise 3.8 admission, pinned retrieval and fresh context on the real RPC path."""
+    from fastmcp.exceptions import ToolError
+    from pydantic_core import to_jsonable_python
+
+    async def invoke(name, arguments):
+        return to_jsonable_python((await client.call_tool(name, arguments)).data)
+
+    def task_count():
+        with bridge.tasks.connect() as db:
+            return db.execute("SELECT count(*) FROM tasks").fetchone()[0]
+
+    context = await invoke(
+        "tandem_project_context",
+        {
+            "action": "publish",
+            "expected_revision": 0,
+            "context": {
+                "project_id": "installed-context-fixture",
+                "product_summary": "PINNED-OVERVIEW " + "background " * 700,
+                "rules": [
+                    {
+                        "id": "offline",
+                        "text": "KEEP-OFFLINE-CHECKOUT",
+                        "source": "Immutable fixture requirement",
+                        "positive_examples": ["COLD-EXAMPLE " + "details " * 200],
+                    }
+                ],
+                "decisions": [
+                    {
+                        "id": "old-fsm",
+                        "text": "NEVER-REENABLE-OLD-FSM",
+                        "status": "rejected",
+                        "source": "Explicit fixture decision",
+                    }
+                ],
+            },
+        },
+    )
+    context_id = context["context_id"]
+    baseline, requests = task_count(), provider.total_requests
+    admission = {
+        "cwd": str(project),
+        "mode": "analyze",
+        "contract": {
+            "goal": "Check declared requirements before any worker",
+            "requirements": {
+                "requires_shell": True,
+                "entry_paths": ["module.txt"],
+            },
+        },
+        "preflight": True,
+        "timeout_seconds": 60,
+    }
+    try:
+        await invoke("tandem_start", admission)
+    except ToolError:
+        pass
+    else:
+        raise RuntimeError("Shell-required analyze preflight was accepted")
+    preview = await invoke("tandem_start", {**admission, "mode": "work"})
+    require(preview["admissible"], "Valid declared work preflight refused")
+    require(
+        task_count() == baseline and provider.total_requests == requests,
+        "Preflight created a task or model request",
+    )
+
+    def packet_for(goal):
+        for request in provider.requests:
+            for message in reversed(request.get("messages", [])):
+                if message.get("role") != "user":
+                    continue
+                content = message.get("content")
+                texts = (
+                    [content]
+                    if isinstance(content, str)
+                    else [
+                        part.get("text", "")
+                        for part in content or []
+                        if isinstance(part, dict)
+                    ]
+                )
+                for text in texts:
+                    try:
+                        value = json.loads(text)
+                    except (ValueError, TypeError):
+                        continue
+                    if (
+                        isinstance(value, dict)
+                        and value.get("task", {}).get("goal") == goal
+                    ):
+                        return value
+        raise RuntimeError("Requested task packet not observed at model boundary")
+
+    provider.prepare(
+        [
+            (
+                "tandem_context_read",
+                {"pointer": "/rules/0/positive_examples", "max_bytes": 8192},
+            ),
+            finish("capsule-read-complete"),
+            "Ended.",
+        ]
+    )
+    first = await invoke(
+        "tandem_start",
+        {
+            "cwd": str(project),
+            "mode": "think",
+            "contract": {"goal": "Read omitted pinned example"},
+            "project_context_id": context_id,
+            "execution": {"thinking": "off", "timeout_seconds": 60},
+        },
+    )
+    first_result = await asyncio.to_thread(await_task, bridge, first["task_id"])
+    completed(first_result, "capsule-read-complete")
+    original = packet_for("Read omitted pinned example")
+    require(
+        "COLD-EXAMPLE" not in json.dumps(original)
+        and "KEEP-OFFLINE-CHECKOUT" in json.dumps(original),
+        "Capsule either repeated cold examples or dropped required policy",
+    )
+    retrieved = json.loads(provider.results()["tandem_context_read"])
+    require(
+        retrieved["context_id"] == context_id
+        and "COLD-EXAMPLE" in retrieved["content"]
+        and retrieved["complete"],
+        "Native reader did not retrieve the exact omitted pinned material",
+    )
+
+    provider.prepare([finish("resume-complete"), "Ended."])
+    resumed = await invoke(
+        "tandem_continue",
+        {
+            "conversation_id": first["conversation_id"],
+            "contract": {"goal": "Continue only the current criterion"},
+        },
+    )
+    completed(
+        await asyncio.to_thread(await_task, bridge, resumed["task_id"]),
+        "resume-complete",
+    )
+    current = packet_for("Continue only the current criterion")
+    require(
+        "product_summary" not in current["project_context"]["context"]
+        and "KEEP-OFFLINE-CHECKOUT" in json.dumps(current)
+        and "NEVER-REENABLE-OLD-FSM" in json.dumps(current),
+        "Unchanged continuation repeated overview or lost an invariant",
+    )
+
+    provider.prepare([finish("fresh-complete"), "Ended."])
+    fresh = await invoke(
+        "tandem_continue",
+        {
+            "conversation_id": first["conversation_id"],
+            "continuation": "fresh",
+            "handoff": {
+                "reason": "A new bounded deliverable",
+                "summary": "Previously inspected immutable offline requirement.",
+                "invalidated_assumptions": ["Old FSM is not a live entry point"],
+            },
+            "contract": {"goal": "Start a new bounded deliverable"},
+        },
+    )
+    completed(
+        await asyncio.to_thread(await_task, bridge, fresh["task_id"]),
+        "fresh-complete",
+    )
+    renewed = packet_for("Start a new bounded deliverable")
+    require(
+        fresh["conversation_id"] != first["conversation_id"]
+        and "product_summary" in renewed["project_context"]["context"]
+        and "COLD-EXAMPLE" not in json.dumps(provider.requests)
+        and "Read omitted pinned example" not in json.dumps(provider.requests),
+        "Fresh handoff replayed old native history or omitted the fresh overview",
+    )
+    return {
+        "preflight": "refusal and positive preview; no tasks/model requests",
+        "pinned_context_id": context_id,
+        "first_packet_bytes": len(json.dumps(original, ensure_ascii=False).encode()),
+        "continued_packet_bytes": len(json.dumps(current, ensure_ascii=False).encode()),
+        "native_pinned_retrieval": True,
+        "required_invariants_preserved": True,
+        "fresh_history_not_replayed": True,
+        "tasks": [first["task_id"], resumed["task_id"], fresh["task_id"]],
+    }
+
+
 async def installed_shared_flow(root, executable, report_path):
     from fastmcp import Client
     from fastmcp.exceptions import ToolError
@@ -2048,6 +2236,9 @@ async def installed_shared_flow(root, executable, report_path):
                         cwd=root,
                         evidence=evidence["commands"],
                     )
+                evidence["context_protocol"] = await exercise_context_packets(
+                    omp, reviewer, project, provider
+                )
         evidence["runtime_identity"] = runtime_identity()
         evidence["boundaries"] = {
             "mode": "manual/disclosed fixture; protocol checks are not OS confinement",

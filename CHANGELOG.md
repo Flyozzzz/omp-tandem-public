@@ -1,5 +1,34 @@
 # Changelog
 
+## 3.8.0 — 2026-09-14
+
+### Changes
+
+- Pinned product-context capsules retain required rules and current decision provenance, with a bounded `tandem_context_read` reader for omitted examples/details. Unchanged continuations do not repeat the complete snapshot; explicit full delivery remains available.
+- Start/continue `preflight=true` checks declared Git entry/boundary paths, actual execution capabilities and cumulative verification estimates without dispatch or reservation. Live-route claims remain attributed evidence, not proof inferred from file existence.
+- Explicit `continuation=fresh` records a bounded source-backed handoff and starts a new native context without copying history, claims, grants or acceptance. Existing mode/root/policy/model constraints remain; unsafe source work is refused rather than replayed.
+- Managed workers receive role-specific step capsules. Implementation and review requirements/verification are separate; required global rules are not truncated and reviewer write requirements remain invalid.
+- Corrective review captures a new exact snapshot linked to the prior fingerprint and declared open findings, with a source delta and explicit prior-exposure provenance. It never transfers an old verdict to new bytes.
+- Explicit targeted/candidate/integration check ladders preserve required earlier phases and structured check history; success needs selected current passing check evidence. Commands and estimates are declarations, not automatic execution or permission.
+- Public lists and histories use SQL pagination. Large summary sections have explicit bounded readers, actor/stage/revision-bound cursors and no unbounded remaining-ID arrays. Recent-task summaries avoid full artifact/report/conversation processing; requested full answers remain available.
+- Operator runtime pin/refresh/unpin selects verified immutable prepared generations for future launches. Candidate mode uses separate private state and local no-provider diagnostics; active runtime generations are never overwritten.
+- New runtimes reject unsupported state schemas before migration. EN/RU/ZH guides and skills document the new surfaces and safety boundaries.
+
+### Verification
+
+- Local final regression suite: 728 tests and 537 subtests passed; two existing Authlib deprecation warnings remain.
+- Real pinned OMP/SDK and fresh installed-wheel verifier: 18 checks passed, including context retrieval, no-dispatch preflight, unchanged-context invariants and fresh-history isolation. The recorded fixture packet shrank from 10,568 to 2,824 bytes on continuation; this is not a provider-cost benchmark.
+- Independent review findings were reproduced and fixed, including comparison-admission races, initial/unbound independent disclosure, corrective finding provenance/update linkage and chronological/current-input check assessment. The concurrent recapture regression fails on the pre-fix source and passes after transactional admission checks.
+- Actual launcher pin/candidate/refresh smoke preserved the old generation and sentinel live state. CI builds and checks an installed wheel on both Linux and macOS.
+
+### Remaining limits
+
+- Capsules reduce bytes, not necessarily invoice cost by the same ratio. Required policy remains inline; omitted data must be retrieved from its pin without assuming native compaction retained history.
+- Fresh is explicit, not automatic retry or a remedy for unresolved side effects/provider-policy refusal. Corrective review is prior-exposed; independent assessment and exact acceptance remain separate.
+- Declared verification does not prove commands ran or that a path is a live production entry. Existing no-shell independent-review and operator gates remain.
+- Schema guards cannot retroactively control older binaries that ignore them. Stop/inspect old clients and back up before intentionally upgrading live state; candidate fixtures must remain separate.
+- Compatibility evidence uses pinned binaries and isolated localhost models, not user credentials or external-model evaluation. Helpers remain disabled; historical unexplained cleanup/wake failures are not explained by later passes.
+
 ## 3.7.1 — 2026-09-13
 
 ### Changes

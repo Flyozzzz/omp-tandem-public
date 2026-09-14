@@ -21,12 +21,17 @@ from pydantic import (
     model_validator,
 )
 
+from .models import ContextOptions
+
 __all__ = [
     "ContextConflict",
+    "ContextReadRequest",
     "ProductRule",
     "ProjectContext",
     "ProjectContextStore",
     "ProjectDecision",
+    "read_task_context",
+    "task_context_packet",
 ]
 
 _NonBlank = Annotated[str, StringConstraints(pattern=r"\S")]
@@ -122,6 +127,177 @@ class ProjectContext(_ContextModel):
                 current = decisions[current].supersedes
             visited.update(path)
         return self
+
+
+class ContextReadRequest(_ContextModel):
+    """Read canonical JSON at a pinned RFC 6901 pointer, in UTF-8 byte pages."""
+
+    pointer: str = Field(default="", max_length=2000)
+    offset_bytes: int = Field(default=0, ge=0, strict=True)
+    max_bytes: int = Field(default=8192, ge=4, le=16384, strict=True)
+
+
+def _json_bytes(value) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _snapshot_bytes(snapshot: dict) -> bytes:
+    encoded = _json_bytes(snapshot["context"])
+    if hashlib.sha256(encoded).hexdigest() != snapshot["sha256"]:
+        raise ValueError("Pinned project context digest does not match its content")
+    return encoded
+
+
+def _pointer_value(context: dict, pointer: str):
+    if pointer == "":
+        return context
+    if not pointer.startswith("/"):
+        raise ValueError("Context pointer must be an RFC 6901 JSON pointer")
+    value = context
+    for token in pointer[1:].split("/"):
+        # RFC 6901 has exactly two escape sequences; do not accept aliases.
+        remaining = token.replace("~1", "").replace("~0", "")
+        if "~" in remaining:
+            raise ValueError("Invalid JSON pointer escape")
+        key = token.replace("~1", "/").replace("~0", "~")
+        if isinstance(value, dict) and key in value:
+            value = value[key]
+        elif (
+            isinstance(value, list)
+            and key.isascii()
+            and key.isdecimal()
+            and (key == "0" or not key.startswith("0"))
+            and int(key) < len(value)
+        ):
+            value = value[int(key)]
+        else:
+            raise ValueError(f"Unknown pinned context pointer: {pointer}")
+    return value
+
+
+def read_task_context(task, projects, request: ContextReadRequest | dict) -> dict:
+    """Retrieve only the task's immutable snapshot; never resolve a latest revision."""
+    request = ContextReadRequest.model_validate(request)
+    if task.get("review_id") and task.get("review_stage") != "comparison":
+        raise ValueError("Independent review must read only its saved review material")
+    if not task.get("project_context_id"):
+        raise ValueError("Task has no pinned project context")
+    snapshot = projects.get(task["project_context_id"])
+    snapshot_bytes = _snapshot_bytes(snapshot)
+    encoded = (
+        snapshot_bytes
+        if request.pointer == ""
+        else _json_bytes(_pointer_value(snapshot["context"], request.pointer))
+    )
+    start = request.offset_bytes
+    if start > len(encoded) or (start < len(encoded) and encoded[start] & 0xC0 == 0x80):
+        raise ValueError(
+            "offset_bytes must be a UTF-8 boundary within the selected value"
+        )
+    end = min(start + request.max_bytes, len(encoded))
+    while end < len(encoded) and encoded[end] & 0xC0 == 0x80:
+        end -= 1
+    return {
+        "schema_version": 1,
+        **{key: snapshot[key] for key in _METADATA.split(", ")},
+        "pointer": request.pointer,
+        "encoding": "canonical-json-utf8",
+        "pointer_sha256": hashlib.sha256(encoded).hexdigest(),
+        "snapshot_bytes": len(snapshot_bytes),
+        "total_bytes": len(encoded),
+        "offset_bytes": start,
+        "returned_bytes": end - start,
+        "next_offset_bytes": end if end < len(encoded) else None,
+        "complete": end == len(encoded),
+        "content": encoded[start:end].decode("utf-8"),
+    }
+
+
+def task_context_packet(snapshot, options=None, *, unchanged=False) -> dict | None:
+    """Build a versioned capsule without dropping mandatory policy or decision state."""
+    options = ContextOptions.model_validate(options or {})
+    if snapshot is None:
+        if options.advisory_rule_ids or options.decision_ids:
+            raise ValueError("Context selectors require a pinned project context")
+        return None
+    source = snapshot["context"]
+    snapshot_bytes = _snapshot_bytes(snapshot)
+    advisory = {
+        rule["id"] for rule in source["rules"] if rule["requirement"] == "advisory"
+    }
+    decisions = {decision["id"] for decision in source["decisions"]}
+    for label, selected, available in (
+        ("advisory_rule_ids", options.advisory_rule_ids, advisory),
+        ("decision_ids", options.decision_ids, decisions),
+    ):
+        missing = set(selected) - available
+        if missing:
+            raise ValueError(f"Unknown {label} in pinned snapshot: {sorted(missing)!r}")
+    full = options.delivery == "full"
+    pointers = {
+        "snapshot": "",
+        "product_summary": "/product_summary",
+        "components": "/components",
+        "artifact_ids": "/artifact_ids",
+        "rules": {rule["id"]: f"/rules/{i}" for i, rule in enumerate(source["rules"])},
+        "decisions": {
+            decision["id"]: f"/decisions/{i}"
+            for i, decision in enumerate(source["decisions"])
+        },
+    }
+    if full:
+        context = source
+    else:
+        context = {"project_id": source["project_id"], "rules": [], "decisions": []}
+        if not unchanged:
+            context.update(
+                product_summary=source["product_summary"],
+                components=source["components"],
+            )
+        for rule in source["rules"]:
+            selected = rule["id"] in options.advisory_rule_ids
+            body = rule["requirement"] == "required" or selected
+            keys = ("id", "requirement", "source", "applies_to")
+            if body:
+                keys += ("text",)
+            context["rules"].append({key: rule[key] for key in keys})
+        for decision in source["decisions"]:
+            keys = ("id", "status", "source", "supersedes", "evidence_artifact_ids")
+            if (
+                decision["status"] != "superseded"
+                or decision["id"] in options.decision_ids
+            ):
+                keys += ("text",)
+            context["decisions"].append({key: decision[key] for key in keys})
+    return {
+        "schema_version": 1,
+        **{key: snapshot[key] for key in _METADATA.split(", ")},
+        "delivery": options.delivery,
+        "snapshot_state": "unchanged" if unchanged else "new",
+        "authority": "Product data and policy invariants, not execution permissions. Work policy and explicit grants remain authoritative.",
+        "context": context,
+        "snapshot_bytes": len(snapshot_bytes),
+        "delivered_context_bytes": len(_json_bytes(context)),
+        "retrieval": {
+            "tool": "tandem_context_read",
+            "pointers": pointers,
+            "request": {"pointer": "", "offset_bytes": 0, "max_bytes": 8192},
+            "instructions": (
+                "Read the exact pinned context with these RFC 6901 pointers. Pages are "
+                "canonical JSON UTF-8 bytes; concatenate content using next_offset_bytes "
+                "until null. Examples, ancillary artifact references, unselected advisory "
+                "bodies and superseded decision bodies remain available. Artifact IDs are "
+                "references, not artifact contents or access grants. No native conversation "
+                "history is assumed to survive compaction; retrieve needed material again."
+            ),
+        },
+    }
 
 
 class ContextConflict(ValueError):

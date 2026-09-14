@@ -527,7 +527,7 @@ class WorkItemsTests(unittest.TestCase):
         self.assertEqual(accepted["review_acceptance"], full["steps"][0]["acceptance"])
 
     def test_large_summary_has_explicit_continuation(self):
-        from omp_tandem.work_access import perform_work
+        from omp_tandem.work_access import WorkToolRequest, perform_work
         from omp_tandem.work_items import WorkPresentation
 
         full = six_step_fixture(self, count=40)
@@ -540,9 +540,25 @@ class WorkItemsTests(unittest.TestCase):
         continuation = next(
             item for item in summary["continuation"] if item["section"] == "steps"
         )
+        self.assertEqual(continuation["remaining_count"], 30)
+        request = WorkToolRequest.model_validate(continuation["arguments"])
+        content, cursor = [], None
+        while True:
+            page = perform_work(
+                self.store,
+                request.request,
+                actor="omp",
+                presentation=request.model_copy(update={"cursor": cursor}),
+            )
+            content.append(page["content"])
+            next_cursor = page["next_cursor"]
+            if next_cursor is None:
+                break
+            self.assertNotEqual(next_cursor, cursor)
+            cursor = next_cursor
+        recovered = json.loads("".join(content))
         self.assertEqual(
-            {step["id"] for step in summary["steps"]}
-            | set(continuation["remaining_ids"]),
+            {step["id"] for step in recovered},
             {step["id"] for step in full["steps"]},
         )
 
@@ -1462,9 +1478,27 @@ class WorkItemsTests(unittest.TestCase):
         self.store.perform(commands[-1], actor="omp")
         for command in commands:
             actor = "omp" if command["action"] == "claim" else "claude"
-            legacy = WorkCommand.model_validate(command).model_dump()
-            for step in (legacy.get("plan") or {}).get("steps", []):
-                step.pop("review_context_paths", None)
+            # Construct the historical wire shape independently of today's model defaults.
+            legacy = dict.fromkeys(
+                (
+                    "action",
+                    "work_id",
+                    "step_id",
+                    "expected_revision",
+                    "operation_id",
+                    "plan",
+                    "note",
+                    "blocker_id",
+                    "condition",
+                    "resolution",
+                    "submission_id",
+                    "commit",
+                )
+            )
+            legacy["evidence"] = []
+            legacy.update(copy.deepcopy(command))
+            if legacy["plan"] is not None:
+                legacy["plan"].setdefault("context", "")
             digest = hashlib.sha256(
                 json.dumps(
                     {"command": legacy, "attempt_id": None},
@@ -1480,7 +1514,14 @@ class WorkItemsTests(unittest.TestCase):
                 ).fetchone()["response"]
                 response = json.loads(saved)
                 for step in response["plan"]["steps"]:
-                    step.pop("review_context_paths", None)
+                    for field in (
+                        "review_context_paths",
+                        "requirements",
+                        "review_requirements",
+                        "verification",
+                        "review_verification",
+                    ):
+                        step.pop(field, None)
                 saved = json.dumps(response)
                 db.execute(
                     "UPDATE work_operations SET fingerprint=?,response=? WHERE actor=? AND operation_id=?",
@@ -3997,30 +4038,44 @@ class IndependentReviewTests(WorkItemsTests):
             )
 
     def test_native_artifact_reader_is_withheld_until_comparison(self):
+        from contextlib import closing
         from types import SimpleNamespace
 
         from omp_tandem.native_worker import NativeWorker
         from omp_tandem.runtime_models import ArtifactReadRequest
+        from omp_tandem.task_store import TaskStore
 
         self.agreed()
         self.authorize()
         self.submit(self.reserve())
         review = self.reserve(actor="claude", kind="review")
+        task_id, conversation_id = str(uuid4()), str(uuid4())
+        tasks = TaskStore(self.scope, None)
+        lease = tasks.lock(conversation_id)
+        self.addCleanup(lease.close)
+        now = time.time()
+        with closing(tasks.connect()) as db:
+            db.execute(
+                "INSERT INTO tasks(task_id,conversation_id,created,updated,cwd,mode,model,prompt,status,deadline) "
+                "VALUES (?,?,?,?,?,'think','unused','Read pinned review','running',?)",
+                (task_id, conversation_id, now, now, str(self.root), now + 60),
+            )
         self.store.started(
-            review["attempt_id"], native_task_id="native-review", workspace="/tmp"
+            review["attempt_id"], native_task_id=task_id, workspace="/tmp"
         )
         worker = NativeWorker.__new__(NativeWorker)
         worker.work_items = self.store
+        worker.tasks = tasks
         worker.artifacts = SimpleNamespace(read=lambda **_: {"content": self.SENTINEL})
         request = ArtifactReadRequest(artifact_id=str(uuid4()))
         with self.assertRaises(ValueError):
-            worker._read_artifact("native-review", request)
+            worker._read_artifact(task_id, request)
         self.report(review)
         with self.assertRaises(ValueError):
-            worker._read_artifact("native-review", request)
+            worker._read_artifact(task_id, request)
         self.change("compare", actor="claude", token=review["token"], step_id="backend")
         self.assertEqual(
-            worker._read_artifact("native-review", request)["content"], self.SENTINEL
+            worker._read_artifact(task_id, request)["content"], self.SENTINEL
         )
 
 

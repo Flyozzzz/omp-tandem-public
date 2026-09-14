@@ -162,19 +162,206 @@ def _usable(python: Path) -> bool:
         return False
 
 
-def _ready_python(directory: Path, key: str) -> Path | None:
+def _digest_generation(generation: Path) -> str:
+    """Seal installed bytes, not mutable bytecode caches created on import."""
+    digest = hashlib.sha256()
+    for path in sorted(generation.rglob("*")):
+        if "__pycache__" in path.parts or path.suffix in (".pyc", ".pyo"):
+            continue
+        name = path.relative_to(generation).as_posix().encode()
+        if path.is_symlink():
+            target = path.resolve()
+            interpreter_link = (
+                path.parent == generation / "bin"
+                and path.name.startswith("python")
+                and target.is_file()
+            )
+            if not target.is_relative_to(generation) and not interpreter_link:
+                raise ValueError(
+                    "Prepared runtime links must not escape the generation"
+                )
+            content = os.readlink(path).encode()
+            values = (b"link", name, content)
+        elif path.is_file():
+            values = (b"file", name)
+        else:
+            continue
+        for value in values:
+            digest.update(len(value).to_bytes(8, "big"))
+            digest.update(value)
+        if not path.is_symlink() or not target.is_relative_to(generation):
+            digest.update(path.stat().st_size.to_bytes(8, "big"))
+            with path.open("rb") as stream:
+                while block := stream.read(1024 * 1024):
+                    digest.update(block)
+    return digest.hexdigest()
+
+
+def _valid_key(value) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _verified_python(cache: Path, marker: dict) -> Path | None:
     try:
-        marker = json.loads((directory / "ready.json").read_text())
-        generation = marker["generation"]
-        if marker["key"] != key or not isinstance(generation, str):
+        key, name = marker["key"], marker["generation"]
+        if not _valid_key(key) or not isinstance(name, str):
             return None
-        # Marker values are never accepted as arbitrary executable paths.
-        if not generation.startswith("env-") or Path(generation).name != generation:
+        if not name.startswith("env-") or Path(name).name != name:
             return None
-        python = directory / generation / "bin" / "python"
+        directory = cache / key
+        generation = directory / name
+        if directory.is_symlink() or generation.is_symlink():
+            return None
+        if not generation.is_dir() or not _valid_key(marker.get("content_digest")):
+            return None
+        if _digest_generation(generation) != marker["content_digest"]:
+            return None
+        python = generation / "bin" / "python"
         return python if _usable(python) else None
     except (OSError, ValueError, KeyError, TypeError):
         return None
+
+
+def _ready_python(directory: Path, key: str) -> Path | None:
+    try:
+        path = directory / "ready.json"
+        if path.is_symlink():
+            return None
+        marker = json.loads(path.read_text())
+        if not isinstance(marker, dict) or marker.get("key") != key:
+            return None
+        return _verified_python(directory.parent, marker)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _atomic_json(path: Path, value: dict) -> None:
+    fd, name = tempfile.mkstemp(prefix=".selection-", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(value, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _selection_path(root: Path) -> Path:
+    installation = hashlib.sha256(str(root.resolve()).encode()).hexdigest()
+    return _cache_root(root.resolve()) / f"selection-{installation}.json"
+
+
+def _read_selection(path: Path) -> dict | None:
+    if path.is_symlink():
+        raise BootstrapError(
+            "Unsafe runtime pin; inspect --runtime-info before explicitly refreshing."
+        )
+    if not path.exists():
+        return None
+    try:
+        marker = json.loads(path.read_text())
+        if (
+            not isinstance(marker, dict)
+            or _verified_python(path.parent, marker) is None
+        ):
+            raise ValueError("unverified generation")
+        return marker
+    except (OSError, ValueError, TypeError) as exc:
+        raise BootstrapError(
+            "Runtime pin is stale or unsafe; stop and inspect --runtime-info. "
+            "Use --runtime-refresh only to explicitly select the current package."
+        ) from exc
+
+
+def _selected_runtime(
+    root: Path, *, candidate: bool = False
+) -> tuple[Path, dict | None]:
+    if not candidate:
+        path = _selection_path(root)
+        marker = _read_selection(path)
+        if marker is not None:
+            return path.parent / marker["key"] / marker[
+                "generation"
+            ] / "bin" / "python", marker
+    return prepare_runtime(root), None
+
+
+def select_runtime(root: Path, *, candidate: bool = False) -> Path:
+    """Unpinned installs follow updates; explicit pins never silently fall forward."""
+    return _selected_runtime(root, candidate=candidate)[0]
+
+
+def pin_runtime(root: Path, key: str | None = None) -> dict:
+    """Atomically select a verified prepared identity for future launches only."""
+    import fcntl
+
+    path = _selection_path(root)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(
+        path.with_suffix(".lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600
+    )
+    with os.fdopen(descriptor, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if key is None:
+            python = prepare_runtime(root)
+            key = python.parents[2].name
+        elif not _valid_key(key):
+            raise BootstrapError(
+                "A runtime pin must be a prepared 64-character content key, not an executable path."
+            )
+        directory = path.parent / key
+        if _ready_python(directory, key) is None:
+            raise BootstrapError(
+                "Prepared identity is missing, stale or unsafe; no pin was changed."
+            )
+        marker = json.loads((directory / "ready.json").read_text())
+        _atomic_json(path, marker)
+        return marker
+
+
+def unpin_runtime(root: Path) -> None:
+    import fcntl
+
+    path = _selection_path(root)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(
+        path.with_suffix(".lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600
+    )
+    with os.fdopen(descriptor, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        path.unlink(missing_ok=True)
+
+
+def runtime_selection(root: Path) -> dict:
+    """Inspect selection without preparing, changing state, or contacting providers."""
+    path = _selection_path(root)
+    try:
+        pinned = _read_selection(path)
+        status = "pinned" if pinned else "following_install"
+        error = None
+    except BootstrapError as exc:
+        pinned, status, error = None, "blocked", str(exc)
+    key = _content_key(root.resolve())
+    ready = _ready_python(path.parent / key, key)
+    return {
+        "status": status,
+        "selection_file": str(path),
+        "pinned": pinned,
+        "candidate": {
+            "key": key,
+            "prepared": ready is not None,
+            "python": str(ready) if ready else None,
+        },
+        "error": error,
+        "running_processes": "unchanged; selection applies only to future launches",
+        "authentication": "not_checked",
+    }
 
 
 def prepare_runtime(root: Path) -> Path:
@@ -203,7 +390,14 @@ def prepare_runtime(root: Path) -> Path:
         cache.mkdir(mode=0o700, parents=True, exist_ok=True)
         directory = cache / key
         directory.mkdir(mode=0o700, exist_ok=True)
-        with (directory / "prepare.lock").open("a") as lock:
+        if directory.is_symlink():
+            raise BootstrapError(
+                "Prepared runtime directory must not be a symbolic link."
+            )
+        descriptor = os.open(
+            directory / "prepare.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600
+        )
+        with os.fdopen(descriptor, "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             ready = _ready_python(directory, key)
             if ready is not None:
@@ -246,7 +440,14 @@ def prepare_runtime(root: Path) -> Path:
                 fd, marker_name = tempfile.mkstemp(prefix=".ready-", dir=directory)
                 marker_path = Path(marker_name)
                 with os.fdopen(fd, "w") as marker:
-                    json.dump({"key": key, "generation": generation.name}, marker)
+                    json.dump(
+                        {
+                            "key": key,
+                            "generation": generation.name,
+                            "content_digest": _digest_generation(generation),
+                        },
+                        marker,
+                    )
                     marker.flush()
                     os.fsync(marker.fileno())
                 marker_path.replace(directory / "ready.json")
@@ -269,20 +470,53 @@ def main(root: Path, argv: list[str] | None = None) -> int:
         print(json.dumps(report))
         return 2 if report["missing"] else 0
     try:
-        python = prepare_runtime(root)
+        if arguments == ["--runtime-info"]:
+            report = runtime_selection(root)
+            print(json.dumps(report))
+            return 1 if report["status"] == "blocked" else 0
+        if arguments == ["--runtime-unpin"]:
+            unpin_runtime(root)
+            print(json.dumps(runtime_selection(root)))
+            return 0
+        if arguments == ["--runtime-refresh"] or arguments[:1] == ["--runtime-pin"]:
+            if arguments[0] == "--runtime-pin" and len(arguments) != 2:
+                raise BootstrapError("Usage: --runtime-pin PREPARED_CONTENT_KEY")
+            marker = pin_runtime(root, arguments[1] if len(arguments) == 2 else None)
+            print(
+                json.dumps(
+                    {"status": "pinned", **marker, "running_processes": "unchanged"}
+                )
+            )
+            return 0
+        candidate = "--candidate" in arguments
+        python, pinned = _selected_runtime(
+            root, candidate=candidate or arguments == ["--prepare"]
+        )
         if arguments == ["--prepare"]:
             print(
                 json.dumps(
                     {
                         "status": "prepared",
                         "python": str(python),
+                        "key": python.parents[2].name,
                         "authentication": "not_checked",
                     }
                 )
             )
             return 0
-        # execv retains cwd and the complete provider environment. Isolated mode
-        # prevents a caller's local omp_tandem.py/PYTHONPATH from replacing us.
+        # Selection provenance is a startup observation, never a refresh signal.
+        os.environ["OMP_TANDEM_RUNTIME_SELECTION"] = json.dumps(
+            {
+                "mode": "candidate" if candidate else "installed",
+                "key": python.parents[2].name,
+                "generation": python.parents[1].name,
+                "selection_file": str(_selection_path(root)),
+                "pinned": pinned,
+                "candidate_key": _content_key(root.resolve()),
+            }
+        )
+        # execv retains cwd, stdio and the provider environment. Candidate state is
+        # selected inside the installed CLI, before any database can be opened.
         os.execv(str(python), [str(python), "-I", "-m", "omp_tandem", *arguments])
     except (BootstrapError, OSError) as exc:
         print(f"omp-tandem: {exc}", file=sys.stderr)

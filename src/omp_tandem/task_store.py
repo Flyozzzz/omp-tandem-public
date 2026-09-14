@@ -4,11 +4,13 @@ import fcntl
 import json
 import sqlite3
 import time
-from contextlib import closing
+from contextlib import closing, suppress
 from pathlib import Path
 from uuid import UUID
 
 from .channel import ChannelDelivery
+from .models import parse_outcome
+from .runtime_guard import guard_database
 from .runtime_models import ACTIVE_SQL
 from .task_contracts import owned_paths, work_policy
 from .workspace import ProjectScope
@@ -27,6 +29,7 @@ def initialize_database(scope: ProjectScope) -> Path:
         raise ValueError("Project database must not alias another workspace")
     with closing(_connect(path)) as db:
         db.execute("BEGIN IMMEDIATE")
+        guard_database(db)
         tables = {
             row[0]
             for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -106,6 +109,11 @@ def initialize_database(scope: ProjectScope) -> Path:
             "ended_at": "REAL",
             "duration_seconds": "REAL",
             "accounting_json": "TEXT",
+            "continuation": "TEXT",
+            "previous_task_id": "TEXT",
+            "previous_conversation_id": "TEXT",
+            "handoff_json": "TEXT",
+            "context_unchanged": "INTEGER NOT NULL DEFAULT 0",
         }.items():
             if name not in columns:
                 db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
@@ -266,24 +274,109 @@ class TaskStore:
             raise ValueError("Unknown task_id; use tandem_list")
         return dict(row)
 
+    def admission_history(self, conversation_id):
+        """Read terminal and active provenance without recovery or question expiry."""
+        with closing(self.connect()) as db:
+            return [
+                dict(row)
+                for row in db.execute(
+                    "SELECT * FROM tasks WHERE conversation_id=? ORDER BY created",
+                    (conversation_id,),
+                )
+            ]
+
+    @staticmethod
+    def _validate_comparison(db, record):
+        if record.get("review_stage") != "comparison":
+            return
+        independent = db.execute(
+            "SELECT task_id, status, report_json FROM tasks "
+            "WHERE conversation_id=? AND review_id=? AND review_stage='independent' "
+            "ORDER BY created DESC LIMIT 1",
+            (record["conversation_id"], record["review_id"]),
+        ).fetchone()
+        context_required = db.execute(
+            "SELECT 1 FROM questions q JOIN tasks t ON t.task_id=q.task_id "
+            "WHERE t.conversation_id=? AND t.review_id=? AND q.state='context_required' LIMIT 1",
+            (record["conversation_id"], record["review_id"]),
+        ).fetchone()
+        report = None
+        if independent and independent["report_json"]:
+            with suppress(ValueError):
+                report = parse_outcome(independent["report_json"])
+        if (
+            independent is None
+            or independent["status"] != "completed"
+            or report is None
+            or report.outcome != "success"
+            or context_required
+        ):
+            raise ValueError(
+                "Comparison requires a complete successful independent assessment "
+                "of this snapshot in this conversation without unresolved clarification; "
+                "missing context requires a new snapshot"
+            )
+
+    def check_admission(self, record, owned, db=None):
+        """Shared read-only check, repeated inside the insertion transaction."""
+        if db is None:
+            with closing(self.connect()) as connection:
+                return self.check_admission(record, owned, connection)
+        self._validate_comparison(db, record)
+        if db.execute(
+            f"SELECT 1 FROM tasks WHERE conversation_id=? AND status IN {ACTIVE_SQL}",
+            (record["conversation_id"],),
+        ).fetchone():
+            raise ValueError("Conversation already has an active turn")
+        source = record.get("previous_conversation_id")
+        if source:
+            latest = db.execute(
+                "SELECT task_id FROM tasks WHERE conversation_id=? ORDER BY created DESC LIMIT 1",
+                (source,),
+            ).fetchone()
+            if latest is None or latest["task_id"] != record.get("previous_task_id"):
+                raise ValueError(
+                    "Source conversation changed during admission; inspect its current result"
+                )
+            if db.execute(
+                f"SELECT 1 FROM tasks WHERE conversation_id=? AND status IN {ACTIVE_SQL}",
+                (source,),
+            ).fetchone():
+                raise ValueError("Source conversation has active or unrecovered work")
+            has_attempts = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_attempts'"
+            ).fetchone()
+            if (
+                has_attempts
+                and db.execute(
+                    "SELECT 1 FROM work_attempts WHERE state IN ('reserved','running','recovery_required') "
+                    "AND (native_task_id IN (SELECT task_id FROM tasks WHERE conversation_id=?) "
+                    "OR json_extract(attempt,'$.binding.task_id') IN (SELECT task_id FROM tasks WHERE conversation_id=?) "
+                    "OR json_extract(attempt,'$.binding.conversation_id')=?)",
+                    (source, source, source),
+                ).fetchone()
+            ):
+                raise ValueError(
+                    "Source conversation has active claims or recovery-required work; use report-only reconciliation"
+                )
+        if record["mode"] == "work" and owned:
+            for other in db.execute(
+                f"SELECT cwd, contract_json, policy_json FROM tasks WHERE mode='work' AND status IN {ACTIVE_SQL}"
+            ):
+                overlap = owned & owned_paths(other["cwd"], work_policy(other))
+                if overlap:
+                    raise ValueError(
+                        f"Files already assigned to active work: {sorted(map(str, overlap))}"
+                    )
+
     def insert(self, record, owned):
         """Check overlapping work and admit the task in one transaction."""
-        mode = record["mode"]
+        # Source leases are held by TaskRuntime for both fresh and resume.
         with closing(self.connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             if record.get("review_run_id"):
                 self.validate_review_reservation(record, db)
-            active = db.execute(
-                f"SELECT cwd, mode, contract_json, policy_json FROM tasks WHERE status IN {ACTIVE_SQL}"
-            ).fetchall()
-            if mode == "work" and owned:
-                for other in active:
-                    if other["mode"] == "work":
-                        overlap = owned & owned_paths(other["cwd"], work_policy(other))
-                        if overlap:
-                            raise ValueError(
-                                f"Files already assigned to active work: {sorted(map(str, overlap))}"
-                            )
+            self.check_admission(record, owned, db)
             columns = ", ".join(record)
             placeholders = ", ".join("?" for _ in record)
             db.execute(

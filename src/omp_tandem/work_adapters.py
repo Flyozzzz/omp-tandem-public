@@ -19,8 +19,8 @@ from uuid import UUID, uuid4
 
 from .models import parse_outcome
 from .reviews import ReviewRequest
+from .verification import verification_requirements
 from .work_items import (
-    _withhold,
     model_selection,
     review_inputs,
     review_scope,
@@ -95,27 +95,88 @@ class WorkHandle:
     signal_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
+def _provenance(record):
+    if record is None:
+        return None
+    return {
+        key: record[key]
+        for key in (
+            "step_id",
+            "submission_id",
+            "attempt_id",
+            "plan_revision",
+            "base_commit",
+            "commit",
+            "changed_files",
+            "artifact_ids",
+        )
+        if key in record
+    }
+
+
+def _declaration(attempt, step, name, default=None):
+    key = "review_" + name if attempt["kind"] == "review" else name
+    return attempt.get(name, step.get(key, default))
+
+
 def _prompt(attempt, plan, workspace):
     # No bearer credentials, provider settings, or user conversation identity.
+    step = next(step for step in plan["steps"] if step["id"] == attempt["step_id"])
+    verification = _declaration(attempt, step, "verification")
     saved = {
         "attempt_id": attempt["attempt_id"],
         "work_id": attempt["work_id"],
         "step_id": attempt["step_id"],
         "kind": attempt["kind"],
         "plan_revision": attempt["plan_revision"],
-        "plan": plan,
+        "plan": {
+            "title": plan["title"],
+            "goal": plan["goal"],
+            "constraints": plan["constraints"],
+            "acceptance": plan["acceptance"],
+            "assigned_step": {
+                key: step[key]
+                for key in (
+                    "id",
+                    "title",
+                    "goal",
+                    "owner",
+                    "reviewer",
+                    "owned_files",
+                    "review_context_paths",
+                    "depends_on",
+                    "acceptance",
+                )
+                if key in step
+            },
+            "overview": [
+                {"id": item["id"], "title": item["title"][:160]}
+                for item in plan["steps"][:20]
+            ],
+            "overview_total": len(plan["steps"]),
+            "overview_truncated": len(plan["steps"]) > 20,
+            "context_excerpt": plan.get("context", "")[:2000],
+            "context_truncated": len(plan.get("context", "")) > 2000,
+            "full_plan": {
+                "tool": "tandem_work",
+                "action": "get",
+                "section": "plan",
+                "work_id": attempt["work_id"],
+                "plan_revision": attempt["plan_revision"],
+            },
+        },
         "workspace": workspace,
-        "dependencies": attempt.get("dependencies", []),
-        "submission": attempt.get("submission"),
+        "dependencies": [_provenance(item) for item in attempt.get("dependencies", [])],
+        "submission": _provenance(attempt.get("submission")),
+        "requirements": _declaration(attempt, step, "requirements", {}),
+        "verification": verification_requirements(verification)
+        if verification is not None
+        else None,
     }
     independent = (
         attempt["kind"] == "review" and attempt.get("protocol") == "independent_first"
     )
     if independent:
-        # Raw provenance only: the author's answer/evidence stay withheld until
-        # the reviewer records an independent report and opens comparison.
-        saved["submission"] = _withhold(saved["submission"])
-        saved["dependencies"] = [_withhold(item) for item in saved["dependencies"]]
         saved["review_id"] = attempt.get("review_id")
         saved["review_protocol"] = "independent_first"
     return (
@@ -134,6 +195,10 @@ def _prompt(attempt, plan, workspace):
         "A prose verdict does not accept anything. A reviewer must not edit files. "
         "Only run shell checks if allow_shell is granted below; shell access is arbitrary code "
         "execution, NOT a sandbox, and may modify files. Record every check and its outcome. "
+        "The selected verification ladder is mandatory for success. Commands and time estimates "
+        "are declarations only, not execution grants; never auto-run or waive checks. "
+        "For OMP success identify each required check_id, with a passing current check_run "
+        "referenced by run_id; keep prior failed runs as structured history. "
         "If blocked, record the blocker with tandem_work. Never re-run an uncertain prior attempt. "
         "Heartbeat periodically through tandem_work. Finish with the requested structured outcome "
         "(OMP: tandem_finish); include concrete evidence, not confident prose.\n"
@@ -372,7 +437,6 @@ class OmpWorkAdapter(_Adapter):
         handle, attempt, prompt = self._prepare(attempt, plan, workspace, token_file)
         if handle.result is not None:
             return handle
-        step = next(step for step in plan["steps"] if step["id"] == attempt["step_id"])
         try:
             independent = (
                 attempt["kind"] == "review"
@@ -389,17 +453,7 @@ class OmpWorkAdapter(_Adapter):
                 review_stage="independent" if independent else None,
                 timeout_seconds=max(1, min(7200, int(handle.deadline - time.time()))),
                 execution={"model": attempt["omp_model"]},
-                contract={
-                    "goal": step["goal"],
-                    "context": prompt,
-                    "scope": {
-                        "owned_files": step["owned_files"]
-                        if attempt["kind"] == "implement"
-                        else []
-                    },
-                    "constraints": plan["constraints"],
-                    "acceptance": step["acceptance"],
-                },
+                prompt=prompt,
                 granted_roots=(Path(workspace["path"]),),
                 work_attempt_id=handle.attempt_id,
             )

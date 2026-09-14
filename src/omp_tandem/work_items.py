@@ -18,14 +18,16 @@ import sqlite3
 import sys
 import threading
 import time
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal, Self
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from .models import TaskRequirements, VerificationPlan
 from .task_store import initialize_database
+from .verification import verification_requirements
 from .workspace import ProjectScope
 
 _NonBlank = Annotated[str, StringConstraints(pattern=r"\S", max_length=16000)]
@@ -183,6 +185,8 @@ def review_inputs(attempt: dict, plan: dict) -> dict:
             [
                 f"Plan goal: {plan['goal']}",
                 f"Step {step['id']}: {step['goal']}",
+                "Global constraints:",
+                *(f"- {item}" for item in plan.get("constraints", [])),
                 "Global acceptance:",
                 *(f"- {item}" for item in plan["acceptance"]),
             ]
@@ -390,11 +394,17 @@ class WorkStep(_Model):
         description="Prerequisite step IDs. One final integration step must depend, directly or transitively, on every other step, including investigation and verification steps.",
     )
     acceptance: list[_NonBlank] = Field(min_length=1, max_length=100)
+    requirements: TaskRequirements = Field(default_factory=TaskRequirements)
+    verification: VerificationPlan | None = None
+    review_requirements: TaskRequirements = Field(default_factory=TaskRequirements)
+    review_verification: VerificationPlan | None = None
 
     @model_validator(mode="after")
     def validate_step(self) -> Self:
         if self.owner == self.reviewer:
             raise ValueError("Step owner and reviewer must be distinct principals")
+        if self.review_requirements.requires_write:
+            raise ValueError("Review requirements cannot require writes")
         if len(set(self.depends_on)) != len(self.depends_on):
             raise ValueError("Duplicate dependency")
         if len(set(self.owned_files)) != len(self.owned_files):
@@ -573,11 +583,18 @@ def _json(value):
 
 
 def _operation_fingerprint(command, bound, *, version=2):
-    """V2 omits only the new empty read-context default; V1 receipts keep their hash."""
+    """Preserve exact historical receipts when new declarations remain empty."""
     payload = command.model_dump()
+    empty_requirements = TaskRequirements().model_dump()
     for step in (payload.get("plan") or {}).get("steps", []):
         if step.get("review_context_paths") == []:
             step.pop("review_context_paths")
+        for key in ("requirements", "review_requirements"):
+            if step.get(key) == empty_requirements:
+                step.pop(key)
+        for key in ("verification", "review_verification"):
+            if step.get(key) is None:
+                step.pop(key)
     digest = hashlib.sha256(
         _json(
             {"command": payload, "attempt_id": bound["attempt_id"] if bound else None}
@@ -719,6 +736,11 @@ class WorkPresentation(_Model):
     limit: int = Field(default=50, ge=1, le=200)
     cursor: str | None = None
     include_snapshots: bool = False
+    section: str | None = Field(default=None, pattern=r"^[a-z_]+$", max_length=64)
+
+
+def _section_arguments(work_id, section):
+    return {"request": {"action": "get", "work_id": work_id}, "section": section}
 
 
 def present_work(
@@ -733,11 +755,14 @@ def present_work(
                 for item in items[:limit]
             ]
         }
+        for key in ("next_cursor", "as_of_event", "error"):
+            if key in payload:
+                result[key] = payload[key]
         if len(items) > limit:
             result["continuation"] = {
                 "section": "items",
-                "remaining_work_ids": [item["work_id"] for item in items[limit:]],
-                "action": "get",
+                "remaining_count": len(items) - limit,
+                "request": {"action": "list", "limit": limit},
             }
     elif "plan" not in payload or view == "full":
         result = {key: value for key, value in payload.items() if key != "markdown"}
@@ -904,44 +929,19 @@ def present_work(
                 result.setdefault("continuation", []).append(
                     {
                         "section": "blockers",
-                        "remaining_ids": [
-                            item["blocker_id"] for item in unresolved[limit:]
-                        ],
-                        "view": "full",
+                        "remaining_count": len(unresolved) - limit,
+                        "arguments": _section_arguments(payload["work_id"], "blockers"),
                     }
                 )
             if len(result["steps"]) > limit:
                 result.setdefault("continuation", []).append(
                     {
                         "section": "steps",
-                        "remaining_ids": [
-                            item["id"] for item in result["steps"][limit:]
-                        ],
-                        "view": "step",
-                        "required_fields": ["step_id"],
+                        "remaining_count": len(result["steps"]) - limit,
+                        "arguments": _section_arguments(payload["work_id"], "steps"),
                     }
                 )
                 result["steps"] = result["steps"][:limit]
-            if len(_json(result).encode()) > 16384:
-                # Keep identifiers and explicit section pointers when material must
-                # be read separately. Never cut a reason or acceptance string.
-                result["blockers"] = [
-                    {
-                        "blocker_id": item["blocker_id"],
-                        "origin": item["origin"],
-                        "detail": {"view": "full"},
-                    }
-                    for item in unresolved
-                ]
-                result["continuation"] = [
-                    *result.get("continuation", []),
-                    {
-                        "section": "summary",
-                        "reason": "size_limit",
-                        "view": "full",
-                        "limit_bytes": 16384,
-                    },
-                ]
         if payload.get("claim"):
             result["claim"] = {
                 key: value
@@ -959,6 +959,29 @@ def present_work(
             }
     if "runtime_identity" in payload:
         result["runtime_identity"] = payload["runtime_identity"]
+    if view == "summary" and "plan" in payload:
+        # Each replaced section remains completely readable, including long text,
+        # through a bounded, freshly authorized page. Never truncate a requirement.
+        for key in sorted(
+            result, key=lambda key: len(json.dumps(result[key])), reverse=True
+        ):
+            if len(json.dumps(result).encode("utf-8")) <= 12000:
+                break
+            if key in {
+                "work_id",
+                "revision",
+                "plan_revision",
+                "status",
+                "claim",
+                "visibility",
+            }:
+                continue
+            value = result[key]
+            result[key] = {
+                "paged": True,
+                "count": len(value) if isinstance(value, (list, dict)) else None,
+                "arguments": _section_arguments(payload["work_id"], key),
+            }
     if format == "markdown":
         # Render exactly the selected material, without a second JSON copy.
         return {
@@ -1087,9 +1110,13 @@ class WorkStore:
     def _maintenance(self):
         # Observers never wait for a writer just to mark an already fenced lease.
         with self._read_connection() as db:
-            due = any(
-                attempt["state"] in _ACTIVE and attempt["deadline"] <= time.time()
-                for attempt in self._attempts(db)
+            due = (
+                db.execute(
+                    "SELECT 1 FROM work_attempts WHERE state IN ('reserved','running') "
+                    "AND json_extract(attempt,'$.deadline')<=? LIMIT 1",
+                    (time.time(),),
+                ).fetchone()
+                is not None
             )
         if not due:
             return
@@ -1159,11 +1186,18 @@ class WorkStore:
             raise ValueError("Unknown work attempt")
         return json.loads(row["attempt"])
 
-    def _attempts(self, db, work_id=None):
+    def _attempts(self, db, work_id=None, *, states=None):
+        conditions, parameters = [], []
+        if work_id:
+            conditions.append("work_id=?")
+            parameters.append(work_id)
+        if states:
+            conditions.append("state IN (" + ",".join("?" for _ in states) + ")")
+            parameters.extend(states)
         rows = db.execute(
             "SELECT attempt FROM work_attempts"
-            + (" WHERE work_id=?" if work_id else ""),
-            (work_id,) if work_id else (),
+            + (" WHERE " + " AND ".join(conditions) if conditions else ""),
+            parameters,
         )
         return [json.loads(row["attempt"]) for row in rows]
 
@@ -1236,11 +1270,23 @@ class WorkStore:
             except ValueError as error:
                 view["authorization"]["model_selection_error"] = str(error)
             view["authorization"]["preview"] = grant_preview(view["authorization"])
+        identifiers = [step["attempt"] for step in view["steps"] if step["attempt"]]
+        attempts = (
+            {
+                row["attempt_id"]: json.loads(row["attempt"])
+                for row in db.execute(
+                    "SELECT attempt_id,attempt FROM work_attempts WHERE attempt_id IN ("
+                    + ",".join("?" for _ in identifiers)
+                    + ")",
+                    identifiers,
+                )
+            }
+            if identifiers
+            else {}
+        )
         for step in view["steps"]:
             step["attempt"] = (
-                _public_attempt(self._attempt(db, step["attempt"]))
-                if step["attempt"]
-                else None
+                _public_attempt(attempts[step["attempt"]]) if step["attempt"] else None
             )
             if step["attempt"] and step["attempt"].get("kind") == "review":
                 # Truthful protocol label: attempts created before independent-first
@@ -1824,9 +1870,14 @@ class WorkStore:
 
     def _redact(self, db, value):
         encoded = _json(value)
-        for attempt in self._attempts(db):
-            for key in ("token", "token_hash"):
-                encoded = encoded.replace(attempt[key], "[REDACTED]")
+        # Cross-card secrets must still be removed, but their attempt bodies need
+        # not be decoded (reports and historical bindings can be very large).
+        for row in db.execute(
+            "SELECT json_extract(attempt,'$.token'),token_hash FROM work_attempts"
+        ):
+            for secret in row:
+                if secret:
+                    encoded = encoded.replace(secret, "[REDACTED]")
         return json.loads(encoded)
 
     @staticmethod
@@ -2029,6 +2080,188 @@ class WorkStore:
                 )
         return current
 
+    def list_page(
+        self,
+        *,
+        actor,
+        limit=50,
+        cursor=None,
+        attempt_token=None,
+        claims=None,
+        origin=None,
+        view="summary",
+    ):
+        """Public keyset page. Domain list callers deliberately retain the full list."""
+        if actor not in {"claude", "omp", "operator"}:
+            raise ValueError("Invalid work principal")
+        if attempt_token:
+            raise ValueError("Bound worker cannot enumerate unrelated work")
+        if not 1 <= limit <= 200:
+            raise ValueError("Invalid page limit")
+        self._maintenance()
+        with self._read_connection() as db:
+            head = db.execute(
+                "SELECT COALESCE(MAX(rowid),0) FROM work_events"
+            ).fetchone()[0]
+            binding = {
+                "actor": actor,
+                "visibility": "full",
+                "bound_attempt": None,
+                "as_of_event": head,
+                "section": "items",
+                "view": view,
+            }
+            binding["reader_context"] = hashlib.sha256(
+                _json(
+                    {
+                        "claims": sorted(
+                            (list(key), value) for key, value in (claims or {}).items()
+                        ),
+                        "origin": origin,
+                    }
+                ).encode()
+            ).hexdigest()
+            after = ""
+            if cursor:
+                try:
+                    page = json.loads(cursor)
+                    if page["binding"] != binding or not isinstance(page["after"], str):
+                        raise ValueError("Cursor binding differs")
+                    after = page["after"]
+                except (ValueError, KeyError, TypeError):
+                    return {
+                        "items": [],
+                        "error": {"code": "cursor_stale"},
+                        "next_cursor": None,
+                    }
+            rows = db.execute(
+                "SELECT work_id FROM work_cards WHERE work_id>? ORDER BY work_id LIMIT ?",
+                (after, limit + 1),
+            ).fetchall()
+            items = []
+            page_bytes = 2
+            for row in rows[:limit]:
+                stored = self._load(db, row["work_id"])
+                card = self._view(db, stored)
+                card["next_actions"] = self.next_actions(
+                    card,
+                    actor=actor,
+                    claims=claims,
+                    origin=origin,
+                    _db=db,
+                    _card=stored,
+                )
+                item = present_work(card, actor=actor, view=view, limit=limit)
+                item_bytes = (
+                    len(json.dumps(item).encode("utf-8")) if view == "summary" else 0
+                )
+                separator_bytes = 2 if items else 0
+                if (
+                    view == "summary"
+                    and items
+                    and page_bytes + separator_bytes + item_bytes > 14000
+                ):
+                    break
+                items.append(item)
+                page_bytes += separator_bytes + item_bytes
+            more = len(rows) > len(items)
+            return {
+                "items": items,
+                "as_of_event": head,
+                "next_cursor": _json(
+                    {"binding": binding, "after": rows[len(items) - 1]["work_id"]}
+                )
+                if more and items
+                else None,
+            }
+
+    def section_page(self, current, *, actor, section, cursor=None, attempt_token=None):
+        """JSON-text chunks of one complete projected section, not arbitrary reads.
+
+        Concatenate content in cursor order, then JSON-decode. The offset counts
+        characters; each chunk is at most 2000 characters (including Unicode).
+        """
+        with self._read_connection() as db:
+            bound = (
+                self._authenticate(db, attempt_token, actor) if attempt_token else None
+            )
+            current = redact_author(current, bound)
+            revision = db.execute(
+                "SELECT revision FROM work_cards WHERE work_id=?", (current["work_id"],)
+            ).fetchone()[0]
+            stage = bound.get("review_stage") if bound else None
+            binding = {
+                "work_id": current["work_id"],
+                "revision": current["revision"],
+                "actor": actor,
+                "visibility": current.get("visibility", "full"),
+                "bound_attempt": bound["attempt_id"] if bound else None,
+                "stage": stage,
+                "section": section,
+            }
+            after = 0
+            try:
+                if revision != current["revision"]:
+                    raise ValueError("Revision changed")
+                if cursor:
+                    page = json.loads(cursor)
+                    if (
+                        page["binding"] != binding
+                        or type(page["after"]) is not int
+                        or page["after"] < 0
+                    ):
+                        raise ValueError("Cursor binding differs")
+                    after = page["after"]
+            except (ValueError, KeyError, TypeError):
+                return {
+                    "error": {"code": "cursor_stale"},
+                    "work_id": current["work_id"],
+                }
+            if section == "blockers":
+                value = [
+                    *current["blockers"],
+                    *(
+                        blocker
+                        for step in current["steps"]
+                        for blocker in step["blockers"]
+                    ),
+                ]
+            elif section == "title":
+                value = current["plan"]["title"]
+            elif section in current and section not in {"claim", "markdown"}:
+                value = current[section]
+            else:
+                summary = present_work(current, actor=actor)
+                if section not in summary or (
+                    isinstance(summary[section], dict) and summary[section].get("paged")
+                ):
+                    raise ValueError("Unknown work section")
+                value = summary[section]
+            text = _json(value)
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            if cursor and page.get("digest") != digest:
+                return {
+                    "error": {"code": "cursor_stale"},
+                    "work_id": current["work_id"],
+                }
+            if after > len(text):
+                raise ValueError("Invalid section offset")
+            end = min(len(text), after + 2000)
+            return {
+                "work_id": current["work_id"],
+                "revision": revision,
+                "section": section,
+                "encoding": "json",
+                "offset": after,
+                "content": text[after:end],
+                "total_characters": len(text),
+                "next_cursor": _json(
+                    {"binding": binding, "after": end, "digest": digest}
+                )
+                if end < len(text)
+                else None,
+            }
+
     def history_page(
         self,
         current,
@@ -2041,12 +2274,14 @@ class WorkStore:
         attempt_token=None,
     ):
         """Page events only after the caller obtained an authorized projected card."""
+        bound = self.authenticate(attempt_token) if attempt_token else None
         binding = {
             "work_id": current["work_id"],
             "as_of_revision": current["revision"],
             "actor": actor,
             "visibility": current.get("visibility", "full"),
             "bound_attempt": current.get("bound_attempt"),
+            "stage": bound.get("review_stage") if bound else None,
             "include_snapshots": include_snapshots,
             "section": "history",
         }
@@ -2065,6 +2300,11 @@ class WorkStore:
             bound = (
                 self._authenticate(db, attempt_token, actor) if attempt_token else None
             )
+            if (bound.get("review_stage") if bound else None) != binding["stage"]:
+                return {
+                    "error": {"code": "cursor_stale"},
+                    "work_id": current["work_id"],
+                }
             revision = db.execute(
                 "SELECT revision FROM work_cards WHERE work_id=?", (current["work_id"],)
             ).fetchone()[0]
@@ -2077,10 +2317,15 @@ class WorkStore:
                     "current": present_work(current, actor=actor),
                 }
             rows = db.execute(
-                "SELECT event FROM work_events WHERE work_id=? AND revision>? AND revision<=? ORDER BY revision LIMIT ?",
+                (
+                    "SELECT event"
+                    if include_snapshots
+                    else "SELECT json_remove(event,'$.snapshot')"
+                )
+                + " FROM work_events WHERE work_id=? AND revision>? AND revision<=? ORDER BY revision LIMIT ?",
                 (current["work_id"], after, revision, limit + 1),
             ).fetchall()
-        events = [json.loads(row[0]) for row in rows[:limit]]
+            events = self._redact(db, [json.loads(row[0]) for row in rows[:limit]])
         result = {
             "work_id": current["work_id"],
             "revision": revision,
@@ -2941,7 +3186,9 @@ class WorkStore:
         return None
 
     def _ready(self, db, card):
-        attempts = self._attempts(db, card["work_id"])
+        attempts = self._attempts(
+            db, card["work_id"], states=(*_ACTIVE, "recovery_required")
+        )
         return [
             {
                 "work_id": card["work_id"],
@@ -2979,14 +3226,24 @@ class WorkStore:
         return None
 
     def next_actions(
-        self, current, *, actor, attempt_token=None, claims=None, origin=None
+        self,
+        current,
+        *,
+        actor,
+        attempt_token=None,
+        claims=None,
+        origin=None,
+        _db=None,
+        _card=None,
     ):
         """Hints share the reservation/stage gates; they confer no authority."""
         if "plan" not in current or actor not in {"claude", "omp"}:
             return []
-        with self._read_connection() as db:
-            card = self._load(db, current["work_id"])
-            attempts = self._attempts(db, card["work_id"])
+        with nullcontext(_db) if _db is not None else self._read_connection() as db:
+            card = _card if _card is not None else self._load(db, current["work_id"])
+            attempts = self._attempts(
+                db, card["work_id"], states=(*_ACTIVE, "recovery_required")
+            )
             bound = None
             if attempt_token:
                 bound = self._credential(db, attempt_token, actor)
@@ -3123,7 +3380,7 @@ class WorkStore:
                     }:
                         continue
                     add(action, step, kind, credential, reason or phase_reason)
-            return actions
+            return self._redact(db, actions)
 
     def ready(self, work_id: str | None = None) -> list[dict]:
         self._maintenance()
@@ -3152,7 +3409,7 @@ class WorkStore:
             for dependency in parent["depends_on"]:
                 visit(dependency)
             if parent["submission"]:
-                ordered.append(parent["submission"])
+                ordered.append({**parent["submission"], "step_id": step_id})
 
         for dependency in step["depends_on"]:
             visit(dependency)
@@ -3192,6 +3449,39 @@ class WorkStore:
         if not autonomous:
             source_commit = observation["head"]
         grant = card["authorization"]
+        spec = next(item for item in card["plan"]["steps"] if item["id"] == step_id)
+        prefix = "review_" if kind == "review" else ""
+        requirements = TaskRequirements.model_validate(
+            spec.get(prefix + "requirements") or {}
+        )
+        selected_plan = spec.get(prefix + "verification")
+        verification = verification_requirements(selected_plan or VerificationPlan())
+        if kind == "review" and requirements.requires_write:
+            raise ValueError(
+                "Declared write requirement is incompatible with review role"
+            )
+        needs_shell = requirements.requires_shell or verification["requires_shell"]
+        if needs_shell and (
+            not autonomous or kind == "review" or not shell_permission(grant or {})
+        ):
+            raise ValueError(
+                "Declared shell requirement is not granted for this attempt"
+            )
+        if requirements.requires_write and (
+            not autonomous or not (grant or {}).get("allow_work")
+        ):
+            raise ValueError(
+                "Declared write requirement is not granted for this attempt"
+            )
+        if (
+            autonomous
+            and grant
+            and verification["estimated_seconds"]
+            > max(0, grant["deadline"] - time.time())
+        ):
+            raise ValueError(
+                "Selected verification does not fit the remaining authorization time"
+            )
         envelope = 0.0
         selection = {}
         if autonomous:
@@ -3256,6 +3546,8 @@ class WorkStore:
             "kind": kind,
             "owner_id": owner_id,
             "plan_revision": card["plan_revision"],
+            "requirements": requirements.model_dump(),
+            "verification": selected_plan,
             "autonomous": autonomous,
             "authorization_id": grant["authorization_id"] if autonomous else None,
             "source_commit": grant["source_commit"] if autonomous else source_commit,

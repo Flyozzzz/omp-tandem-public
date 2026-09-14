@@ -10,10 +10,11 @@ from .execution import conversation_usage, failure_fact, task_usage
 from .models import CheckRun, assess_checks
 from .project_context import ProjectContextStore
 from .runtime_identity import runtime_identity
-from .runtime_models import ACTIVE, TaskSummary
+from .runtime_models import ACTIVE
 from .task_contracts import current_task, work_policy
 from .task_interaction import CHECK_RUN_ARTIFACT
 from .task_store import TaskStore
+from .verification import assess_verification
 
 
 def read_artifact_text(artifacts, artifact_id):
@@ -136,14 +137,13 @@ class TaskResults:
             else:
                 result["next_action"] = "wait"
         artifact_ids = json.loads(task["result_artifacts"])
+        all_artifacts = self.artifacts.for_task(task_id)
         if artifact_ids:
             result["artifacts"] = [
                 self.artifacts.info(identifier) for identifier in artifact_ids
             ]
         preliminary = [
-            item
-            for item in self.artifacts.for_task(task_id)
-            if item["artifact_id"] not in artifact_ids
+            item for item in all_artifacts if item["artifact_id"] not in artifact_ids
         ]
         if preliminary:
             result["provisional_artifacts"] = (
@@ -153,11 +153,24 @@ class TaskResults:
             result["provisional_artifacts_truncated"] = (
                 not details and len(preliminary) > 10
             )
-        runs, unreadable = self._check_runs(task_id)
+        runs, unreadable = self._check_runs(task_id, all_artifacts)
         result["check_runs"] = assess_checks(runs)
         result["check_runs"]["unreadable_records"] = unreadable
+        contract = (
+            json.loads(task["contract_json"]) if task.get("contract_json") else {}
+        )
+        verification = (
+            attempt.get("verification")
+            if attempt is not None
+            else contract.get("verification")
+        )
+        current_checks = result["check_runs"]
+        if verification is not None:
+            current_checks = assess_verification(verification, runs)
+            current_checks["unreadable_records"] = unreadable
+            result["verification"] = current_checks
         result["facts"] = self._facts(
-            task_id, task, status, report, result["check_runs"], attempt
+            task_id, task, status, report, current_checks, attempt
         )
         if task["project_context_id"]:
             result["project_context"] = self.projects.info(task["project_context_id"])
@@ -220,7 +233,7 @@ class TaskResults:
                 )["context"]
         return result
 
-    def _check_runs(self, task_id):
+    def _check_runs(self, task_id, artifacts=None):
         """Server-recorded check runs for this task, oldest first.
 
         Only artifacts under the reserved server name count; a participant
@@ -229,7 +242,9 @@ class TaskResults:
         breaking the whole view.
         """
         runs, unreadable = [], []
-        for item in reversed(self.artifacts.for_task(task_id)):
+        for item in reversed(
+            artifacts if artifacts is not None else self.artifacts.for_task(task_id)
+        ):
             if item["name"] != CHECK_RUN_ARTIFACT:
                 continue
             try:
@@ -253,11 +268,22 @@ class TaskResults:
         with closing(self.tasks.connect()) as db:
             try:
                 row = db.execute(
-                    "SELECT a.attempt,c.card FROM work_attempts a JOIN work_cards c ON c.work_id=a.work_id WHERE a.native_task_id=?",
+                    "SELECT json_object('attempt_id',a.attempt_id,'kind',json_extract(a.attempt,'$.kind'),"
+                    "'autonomous',json_extract(a.attempt,'$.autonomous'),'authorization_id',json_extract(a.attempt,'$.authorization_id'),"
+                    "'state',a.state,'protocol',coalesce(json_extract(a.attempt,'$.protocol'),'legacy_disclosure'),'review_stage',json_extract(a.attempt,'$.review_stage'),"
+                    "'review_id',json_extract(a.attempt,'$.review_id'),'verdict',json_extract(a.attempt,'$.verdict'),"
+                    "'verification',json_extract(a.attempt,'$.verification')) AS attempt,"
+                    "json_object('authorization',json_extract(c.card,'$.authorization'),'plan_revision',json_extract(c.card,'$.plan_revision'),"
+                    "'status',json_extract(c.card,'$.status')) AS card FROM work_attempts a JOIN work_cards c ON c.work_id=a.work_id WHERE a.native_task_id=?",
                     (task_id,),
                 ).fetchone()
                 origin_rows = db.execute(
-                    "SELECT a.attempt,c.card FROM work_attempts a JOIN work_cards c ON c.work_id=a.work_id WHERE json_extract(a.attempt,'$.binding.task_id')=?",
+                    "SELECT json_object('attempt_id',attempt_id,'work_id',work_id,'step_id',json_extract(attempt,'$.step_id'),"
+                    "'kind',json_extract(attempt,'$.kind'),'state',state,'review_stage',json_extract(attempt,'$.review_stage'),"
+                    "'settled',json_extract(attempt,'$.binding.origin_settled'),"
+                    "'successors',coalesce(json_array_length(attempt,'$.binding.successors'),0),"
+                    "'recoveries',coalesce(json_array_length(attempt,'$.binding.recoveries'),0)) AS attempt "
+                    "FROM work_attempts WHERE json_extract(attempt,'$.binding.task_id')=?",
                     (task_id,),
                 ).fetchall()
             except sqlite3.OperationalError:
@@ -269,7 +295,6 @@ class TaskResults:
         originated = []
         for origin_row in origin_rows:
             bound = json.loads(origin_row["attempt"])
-            binding = bound.get("binding") or {}
             originated.append(
                 {
                     "attempt_id": bound["attempt_id"],
@@ -278,9 +303,9 @@ class TaskResults:
                     "kind": bound["kind"],
                     "state": bound["state"],
                     "stage": bound.get("review_stage"),
-                    "settled": binding.get("origin_settled"),
-                    "successors": len(binding.get("successors") or []),
-                    "recoveries": len(binding.get("recoveries") or []),
+                    "settled": bound["settled"],
+                    "successors": bound["successors"],
+                    "recoveries": bound["recoveries"],
                 }
             )
         grant = card["authorization"] if card else None
@@ -389,11 +414,48 @@ class TaskResults:
         }
 
     def recent(self, limit=20):
-        ids = self.tasks.recent_ids(limit)
-        keys = TaskSummary.__annotations__
+        """Summary-only SQL projection; do not materialize reports or artifact bodies."""
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("Recent limit must be between 1 and 200")
+        self.tasks.recover()
+        with closing(self.tasks.connect()) as db:
+            rows = db.execute(
+                "SELECT task_id,conversation_id,status,"
+                "CASE WHEN status='completed' THEN json_extract(report_json,'$.outcome') END AS outcome,"
+                "CASE WHEN status='completed' THEN substr(json_extract(report_json,'$.summary'),1,600) END AS summary,"
+                "report_json IS NOT NULL AS has_report,"
+                "EXISTS(SELECT 1 FROM questions q WHERE q.task_id=tasks.task_id "
+                "AND q.state='pending' AND q.deadline>?) AS pending_question "
+                "FROM tasks ORDER BY created DESC,task_id DESC LIMIT ?",
+                (time.time(), limit),
+            ).fetchall()
+        rows = [dict(row) for row in rows]
+        for row in rows:
+            if row["status"] == "waiting_input":
+                # Reuse the lifecycle owner's expiry transition, only for turns
+                # actually waiting; ordinary summaries never load whole tasks.
+                row["status"] = self.tasks.get(row["task_id"], refresh=True)["status"]
         return [
-            {key: value for key, value in self.view(identifier).items() if key in keys}
-            for identifier in ids
+            {
+                "task_id": row["task_id"],
+                "conversation_id": row["conversation_id"],
+                "status": row["status"],
+                "outcome": row["outcome"],
+                "summary": row["summary"]
+                or (
+                    "Historical unstructured response; outcome was not assessed."
+                    if row["status"] == "completed" and not row["has_report"]
+                    else ""
+                ),
+                "next_action": "reply"
+                if row["status"] == "waiting_input" and row["pending_question"]
+                else "wait"
+                if row["status"] in ACTIVE
+                else "review_result"
+                if row["status"] == "completed"
+                else "inspect_error",
+            }
+            for row in rows
         ]
 
     def wait_snapshot(self, task_ids):

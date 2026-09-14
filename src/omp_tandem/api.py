@@ -14,8 +14,8 @@ from .bridge import Bridge
 from .channel import ChannelFastMCP
 from .execution import ExecutionOptions, profile_catalog
 from .findings import FindingChange, FindingDraft
-from .models import ArtifactInfo, TaskContract, TurnContract
-from .project_context import ProjectContext
+from .models import ArtifactInfo, ConversationHandoff, TaskContract, TurnContract
+from .project_context import ContextReadRequest, ProjectContext, read_task_context
 from .prompts import coordinator_instructions
 from .reviews import PublicationBusy, ReviewRequest, publication_lock
 from .runtime_identity import register_schemas, runtime_identity
@@ -85,6 +85,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
         limit: Annotated[int, Field(ge=1, le=200)] = 50,
         cursor: str | None = None,
         include_snapshots: bool = False,
+        section: str | None = None,
     ) -> dict:
         """Maintain one durable shared task and its role-bound checklist.
 
@@ -95,6 +96,8 @@ def build_server(configuration: Bridge | RuntimeOptions):
         expected_revision. Use a new operation_id for a new or corrected request;
         reuse an ID only for an exact retry. list/get/history need no operation_id.
         Plan agreement, worker submission and independent acceptance are separate.
+        Progress defaults to a bounded summary. Follow returned section/cursor
+        pointers for omitted material; choose plan/step/full only when needed.
         Waiting observes committed changes, not permission to start an agent.
         Autonomous grants and uncertain-attempt reconciliation are operator CLI actions.
         """
@@ -107,15 +110,14 @@ def build_server(configuration: Bridge | RuntimeOptions):
             limit=limit,
             cursor=cursor,
             include_snapshots=include_snapshots,
+            section=section,
         )
         if wait_seconds and request.action == "get" and request.work_id:
             state = await asyncio.to_thread(bridge.work_observation, request)
             deadline = time.monotonic() + wait_seconds
             while time.monotonic() < deadline:
                 await asyncio.sleep(min(0.2, max(0, deadline - time.monotonic())))
-                observed = await asyncio.to_thread(
-                    bridge.work_items.progress, request.work_id
-                )
+                observed = await asyncio.to_thread(bridge.work_observation, request)
                 if observed != state:
                     break
         result = await asyncio.to_thread(bridge.work, request, presentation=options)
@@ -194,6 +196,34 @@ def build_server(configuration: Bridge | RuntimeOptions):
         )
 
     @mcp.tool()
+    async def tandem_context_read(
+        task_id: str,
+        ctx: Context,
+        pointer: str = "",
+        offset_bytes: Annotated[int, Field(ge=0)] = 0,
+        max_bytes: Annotated[int, Field(ge=4, le=16384)] = 8192,
+    ) -> dict:
+        """Page omitted product data from this task's immutable pinned snapshot.
+
+        Follow capsule pointers rather than repeatedly loading the whole product.
+        This does not select another context, read files, or grant execution rights.
+        Independent review uses its pinned review reader instead.
+        """
+        bridge = await runtime.get(ctx)
+        task = await asyncio.to_thread(bridge.tasks.get, task_id, refresh=False)
+        if bridge.interaction._independent(task_id, task):
+            raise ValueError(
+                "Independent review reads declared context through tandem_review_read; "
+                "generic product-context expansion is withheld"
+            )
+        request = ContextReadRequest(
+            pointer=pointer, offset_bytes=offset_bytes, max_bytes=max_bytes
+        )
+        return await asyncio.to_thread(
+            read_task_context, task, bridge.projects, request
+        )
+
+    @mcp.tool()
     async def tandem_start(
         cwd: str,
         ctx: Context,
@@ -206,15 +236,20 @@ def build_server(configuration: Bridge | RuntimeOptions):
         execution: ExecutionOptions | None = None,
         review_id: str | None = None,
         review_stage: Literal["independent", "comparison"] | None = None,
+        preflight: bool = False,
     ) -> dict:
         """Start a task with exactly one of prompt or structured contract. Returns immediately.
 
         Base constraints/owned files stay fixed; each follow-up has a new goal and criteria.
         project_context_id pins product rules/decisions. Only the coordinator sets question timeout.
         Think: collaboration; analyze: read/search; work: edits/shell, NOT sandboxed.
+        Use preflight=true to inspect admission without launching a worker. Structured
+        requirements declare exact entry/boundary paths and shell/write needs;
+        verification declares the agreed check ladder, never permission to execute it.
         """
         bridge = await runtime.get(ctx)
-        await bridge.channel.bind(ctx)
+        if not preflight:
+            await bridge.channel.bind(ctx)
         result = await asyncio.to_thread(
             bridge.start,
             prompt,
@@ -228,7 +263,10 @@ def build_server(configuration: Bridge | RuntimeOptions):
             execution=execution,
             review_id=review_id,
             review_stage=review_stage,
+            dry_run=preflight,
         )
+        if preflight:
+            return {**result, "runtime_identity": runtime_identity()}
         return bridge.channel.decorate(result)
 
     @mcp.tool()
@@ -243,15 +281,22 @@ def build_server(configuration: Bridge | RuntimeOptions):
         execution: ExecutionOptions | None = None,
         review_id: str | None = None,
         review_stage: Literal["independent", "comparison"] | None = None,
+        continuation: Literal["resume", "fresh"] = "resume",
+        handoff: ConversationHandoff | None = None,
+        preflight: bool = False,
     ) -> dict:
         """Start a NEW current goal after completion; supply exactly one of prompt or turn contract.
 
         History/base policy/mode/cwd persist, but old goals/acceptance do not. The product snapshot
         stays pinned unless explicitly changed to another revision of the same project.
         Question timeout is inherited unless explicitly set here. For waiting_input use tandem_reply.
+        continuation=fresh requires an explicit handoff and starts a new context without
+        replaying native history or transferring claims/grants. The source remains intact.
+        Use preflight=true to inspect the same admission without a model or worker.
         """
         bridge = await runtime.get(ctx)
-        await bridge.channel.bind(ctx)
+        if not preflight:
+            await bridge.channel.bind(ctx)
         result = await asyncio.to_thread(
             bridge.start,
             prompt,
@@ -264,7 +309,12 @@ def build_server(configuration: Bridge | RuntimeOptions):
             execution=execution,
             review_id=review_id,
             review_stage=review_stage,
+            continuation=continuation,
+            handoff=handoff,
+            dry_run=preflight,
         )
+        if preflight:
+            return {**result, "runtime_identity": runtime_identity()}
         return bridge.channel.decorate(result)
 
     @mcp.tool()

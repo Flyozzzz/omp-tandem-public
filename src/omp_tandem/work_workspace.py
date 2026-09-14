@@ -79,8 +79,8 @@ class WorkWorkspace:
             fcntl.flock(lock, fcntl.LOCK_EX)
             yield
 
+    @staticmethod
     def _git(
-        self,
         cwd: Path,
         *args: str,
         data: bytes | None = None,
@@ -176,8 +176,11 @@ class WorkWorkspace:
             return output.read()
 
     def _repository(self) -> None:
-        root = self.scope.root
-        top = self._git(root, "rev-parse", "--show-toplevel").decode().strip()
+        self._validate_repository(self.scope.root)
+
+    @staticmethod
+    def _validate_repository(root: Path) -> None:
+        top = WorkWorkspace._git(root, "rev-parse", "--show-toplevel").decode().strip()
         if Path(top).resolve() != root:
             raise ValueError(
                 f"Pinned project root {root} differs from detected Git repository {top}. "
@@ -186,7 +189,7 @@ class WorkWorkspace:
             )
         # Checkout/status may execute configured clean/smudge filters. Refuse them,
         # rather than treating worktree isolation as a sandbox for repository code.
-        filters = self._git(
+        filters = WorkWorkspace._git(
             root, "config", "--get-regexp", r"^filter\.", allow_failure=True
         )
         if filters:
@@ -213,21 +216,31 @@ class WorkWorkspace:
             for field in ("owned_files", "review_context_paths")
             for path in step.get(field, [])
         }
-        root = self.scope.root
+        observation = observe_declared_paths(
+            self.scope.root, paths, action=action, required=required
+        )
+        observation["scope_id"] = self.scope.key
+        return observation
+
+    @staticmethod
+    def _observe_declared_paths(root, paths, *, action, required):
         observation = {
             "project_root": str(root),
-            "scope_id": self.scope.key,
             "git_toplevel": None,
             "head": None,
             "status": "unverified",
             "provenance": {"action": action, "observed_at": time.time()},
         }
         try:
-            top = self._git(root, "rev-parse", "--show-toplevel").decode().strip()
+            top = (
+                WorkWorkspace._git(root, "rev-parse", "--show-toplevel")
+                .decode()
+                .strip()
+            )
             observation["git_toplevel"] = str(Path(top).resolve())
-            self._repository()
+            WorkWorkspace._validate_repository(root)
             observation["head"] = (
-                self._git(root, "rev-parse", "--verify", "HEAD^{commit}")
+                WorkWorkspace._git(root, "rev-parse", "--verify", "HEAD^{commit}")
                 .decode()
                 .strip()
             )
@@ -241,7 +254,7 @@ class WorkWorkspace:
             return observation
         for relative in sorted(paths):
             # Gitlinks belong to the parent; their contents belong to the child.
-            entries = self._git(root, "ls-tree", "-z", "HEAD", "--", relative)
+            entries = WorkWorkspace._git(root, "ls-tree", "-z", "HEAD", "--", relative)
             exact_gitlink = entries.startswith(b"160000 commit ")
             current = root
             parts = relative.split("/")
@@ -255,7 +268,7 @@ class WorkWorkspace:
                 if index == len(parts) - 1 and exact_gitlink:
                     break
                 prefix = "/".join(parts[: index + 1])
-                entry = self._git(root, "ls-tree", "-z", "HEAD", "--", prefix)
+                entry = WorkWorkspace._git(root, "ls-tree", "-z", "HEAD", "--", prefix)
                 marker = current / ".git"
                 if entry.startswith(b"160000 commit ") or (
                     current.is_dir() and (marker.exists() or marker.is_symlink())
@@ -1113,3 +1126,11 @@ class WorkWorkspace:
             "relation": relation,
             "observed_at": time.time(),
         }
+
+
+def observe_declared_paths(root: Path, paths, *, action: str, required=True) -> dict:
+    """Observe only an allowed Git root and declared ancestors, without state writes."""
+    root = Path(root).resolve()
+    return WorkWorkspace._observe_declared_paths(
+        root, {_path(path) for path in paths}, action=action, required=required
+    )

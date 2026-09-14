@@ -40,17 +40,18 @@ jobs:
         run: uv sync --frozen --group dev
       - name: Run isolated tests
         run: uv run --frozen pytest -q
+      - name: Build wheel
+        run: uv build --wheel
       - name: Verify real pinned OMP with localhost model
         timeout-minutes: 10
         run: >-
           uv run --frozen python scripts/verify_omp.py
           --cache-dir "${{ runner.temp }}/omp-compatibility-cache"
           --report "${{ runner.temp }}/omp-compatibility-${{ matrix.os }}.json"
+          --installed-wheel dist/*.whl
       - name: Check lint
         run: uv run --frozen ruff check .
       - name: Check formatting
         run: uv run --frozen ruff format --check .
-      - name: Build wheel
-        run: uv build --wheel
       - name: Check distribution manifest
         run: uv run --frozen python scripts/package.py --check

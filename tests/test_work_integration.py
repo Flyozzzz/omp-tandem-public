@@ -173,9 +173,19 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("markdown", summary)
         self.assertEqual([step["id"] for step in summary["steps"]], ["change"])
         worker = self.omp_bridge.runtime.worker
+        task_id, conversation_id = str(uuid4()), str(uuid4())
+        lease = self.omp_bridge.tasks.lock(conversation_id)
+        self.addCleanup(lease.close)
+        now = time.time()
+        with closing(self.omp_bridge.tasks.connect()) as db:
+            db.execute(
+                "INSERT INTO tasks(task_id,conversation_id,created,updated,cwd,mode,model,prompt,status,deadline) "
+                "VALUES (?,?,?,?,?,'think','unused','Observe shared progress','running',?)",
+                (task_id, conversation_id, now, now, str(self.root), now + 60),
+            )
         tool = next(
             item
-            for item in worker.worker_tools({"task_id": "wait-fixture"})
+            for item in worker.worker_tools({"task_id": task_id})
             if item.name == "tandem_work"
         )
         request = tool.parse_params(

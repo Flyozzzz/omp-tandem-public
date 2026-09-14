@@ -79,6 +79,7 @@ class WorkAdapterTests(unittest.TestCase):
             "steps": [
                 {
                     "id": "change",
+                    "title": "Change",
                     "goal": "Saved behavior",
                     "owner": "claude",
                     "reviewer": "omp",

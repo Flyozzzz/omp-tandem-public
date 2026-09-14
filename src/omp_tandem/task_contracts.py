@@ -3,9 +3,16 @@
 import json
 from pathlib import Path
 
-from .models import WorkPolicy
-from .project_context import ProjectContextStore
+from .models import (
+    ContextOptions,
+    ConversationHandoff,
+    TaskRequirements,
+    VerificationPlan,
+    WorkPolicy,
+)
+from .project_context import ProjectContextStore, task_context_packet
 from .reviews import ReviewStore
+from .verification import verification_requirements
 from .workspace import ProjectScope
 
 
@@ -35,13 +42,37 @@ def work_policy(task):
 
 def current_task(task):
     contract = json.loads(task["contract_json"]) if task["contract_json"] else {}
+    verification = (
+        VerificationPlan.model_validate(contract["verification"])
+        if contract.get("verification") is not None
+        else None
+    )
     return {
         "goal": contract.get("goal", task["prompt"]),
         "context": contract.get("context", ""),
         "constraints": contract.get("constraints", []),
         "acceptance": contract.get("acceptance", []),
         "artifact_ids": contract.get("artifact_ids", []),
+        "context_options": ContextOptions.model_validate(
+            contract.get("context_options", {})
+        ).model_dump(mode="json"),
+        "requirements": TaskRequirements.model_validate(
+            contract.get("requirements", {})
+        ).model_dump(mode="json"),
+        "verification": (
+            {"stage": verification.stage, **verification_requirements(verification)}
+            if verification is not None
+            else None
+        ),
     }
+
+
+def require_review_context_capture(review_id, review_stage, project_context_id):
+    if review_id and review_stage != "comparison" and project_context_id:
+        raise ValueError(
+            "Independent snapshot review cannot bind product context; recapture all "
+            "required requirements, policy and context in ReviewStore before dispatch"
+        )
 
 
 class TaskMessages:
@@ -53,6 +84,11 @@ class TaskMessages:
         self.reviews = reviews
 
     def build(self, task, snapshot=None):
+        require_review_context_capture(
+            task.get("review_id"),
+            task.get("review_stage"),
+            task.get("project_context_id") or snapshot,
+        )
         policy = work_policy(task)
         current = current_task(task)
         inherited = set(policy.constraints)
@@ -61,11 +97,25 @@ class TaskMessages:
         ]
         if snapshot is None and task["project_context_id"]:
             snapshot = self.projects.get(task["project_context_id"])
-        project = None
-        if snapshot is not None:
-            project = {
-                key: snapshot[key]
-                for key in ("context_id", "project_id", "revision", "sha256", "context")
+        if snapshot is not None and snapshot["context_id"] != task.get(
+            "project_context_id"
+        ):
+            raise ValueError("Worker context must match the task's pinned snapshot")
+        project = task_context_packet(
+            snapshot,
+            current["context_options"],
+            unchanged=bool(task.get("context_unchanged"))
+            and not task.get("handoff_json"),
+        )
+        handoff = None
+        if task.get("handoff_json"):
+            handoff = {
+                "attribution": "Operator-supplied summary for an explicitly fresh conversation; not verified evidence or execution authority.",
+                "previous_task_id": task.get("previous_task_id"),
+                "previous_conversation_id": task.get("previous_conversation_id"),
+                "data": ConversationHandoff.model_validate_json(
+                    task["handoff_json"]
+                ).model_dump(mode="json"),
             }
         review = None
         if task.get("review_id"):
@@ -97,6 +147,7 @@ class TaskMessages:
                 "task": current,
                 "project_context": project,
                 "review": review,
+                "handoff": handoff,
                 "replaces_project_context_id": task["previous_project_context_id"],
             },
             ensure_ascii=False,

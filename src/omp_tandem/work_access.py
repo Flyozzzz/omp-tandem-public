@@ -8,7 +8,13 @@ from pathlib import Path
 from pydantic import ConfigDict, Field
 
 from .runtime_identity import runtime_identity
-from .work_items import WorkCommand, WorkConflict, WorkPresentation, present_work
+from .work_items import (
+    WorkCommand,
+    WorkConflict,
+    WorkPresentation,
+    independent_stage,
+    present_work,
+)
 from .work_workspace import WorkWorkspace
 
 
@@ -66,6 +72,8 @@ def perform_work(
 ):
     command = WorkCommand.model_validate(request)
     options = presentation or WorkPresentation()
+    if options.section and command.action != "get":
+        raise ValueError("section requires action=get")
     key = (command.work_id, command.step_id)
     token = attempt_token or (
         claims.get(key)
@@ -111,15 +119,53 @@ def perform_work(
             # Only a retired inferred credential falls back to an unbound read;
             # a refusal of the bound read itself must not fail open.
             token = None
-    domain_command = (
-        command.model_copy(update={"action": "get"})
-        if command.action == "history"
-        else command
-    )
-    try:
-        result = store.perform(
-            domain_command, actor=actor, attempt_token=token, origin=origin
+    if command.action == "list":
+        result = store.list_page(
+            actor=actor,
+            limit=options.limit,
+            cursor=options.cursor,
+            attempt_token=token,
+            claims=claims,
+            origin=origin,
+            view=options.view,
         )
+        return present_work(
+            result,
+            actor=actor,
+            view=options.view,
+            format=options.format,
+            limit=options.limit,
+        )
+    if command.action == "history":
+        if actor not in {"claude", "omp", "operator"}:
+            raise ValueError("Invalid work principal")
+        work_id = command.work_id or (bound or {}).get("work_id")
+        current = {
+            "work_id": work_id,
+            **store.progress(
+                work_id, actor=actor, attempt_token=token, step_id=command.step_id
+            ),
+            "visibility": "independent_stage" if independent_stage(bound) else "full",
+            "bound_attempt": {
+                key: bound[key] for key in ("attempt_id", "work_id", "step_id", "kind")
+            }
+            if bound
+            else None,
+        }
+        result = store.history_page(
+            current,
+            actor=actor,
+            limit=options.limit,
+            cursor=options.cursor,
+            include_snapshots=options.include_snapshots,
+            after=command.expected_revision or 0,
+            attempt_token=token,
+        )
+        return present_work(
+            result, actor=actor, view=options.view, format=options.format
+        )
+    try:
+        result = store.perform(command, actor=actor, attempt_token=token, origin=origin)
     except WorkConflict as error:
         if error.current is None:
             raise
@@ -161,17 +207,15 @@ def perform_work(
             field: bound[field]
             for field in ("attempt_id", "work_id", "step_id", "kind")
         }
-    if command.action == "history":
-        result = store.history_page(
+    if options.section:
+        return store.section_page(
             result,
             actor=actor,
-            limit=options.limit,
+            section=options.section,
             cursor=options.cursor,
-            include_snapshots=options.include_snapshots,
-            after=command.expected_revision or 0,
             attempt_token=token,
         )
-    elif options.cursor:
+    if options.cursor:
         return {
             "error": {"code": "cursor_stale"},
             "current": present_work(result, actor=actor),

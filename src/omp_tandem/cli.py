@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import shutil
+import sys
+import tempfile
 from pathlib import Path
 
 from . import migration
@@ -16,6 +18,21 @@ from .workspace import resolve_scope
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=INSTRUCTIONS)
+    parser.add_argument(
+        "--runtime-info",
+        action="store_true",
+        help="Print loaded runtime provenance without starting MCP or opening state",
+    )
+    parser.add_argument(
+        "--candidate",
+        action="store_true",
+        help="Use a fresh private candidate state directory; never import live history",
+    )
+    parser.add_argument(
+        "--candidate-smoke",
+        action="store_true",
+        help="With --candidate: initialize isolated stores, print local diagnostics and exit without provider calls",
+    )
     parser.add_argument(
         "--state-dir",
         type=Path,
@@ -94,6 +111,35 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
     os.umask(0o077)
+    if args.runtime_info:
+        from .runtime_identity import runtime_identity
+
+        print(json.dumps(runtime_identity()))
+        return
+    if args.candidate_smoke and not args.candidate:
+        parser.error("--candidate-smoke requires --candidate")
+    if args.candidate:
+        supplied = list(sys.argv[1:] if argv is None else argv)
+        if any(
+            value == "--state-dir" or value.startswith("--state-dir=")
+            for value in supplied
+        ):
+            parser.error(
+                "--candidate allocates fresh isolated state; --state-dir is not allowed"
+            )
+        if (
+            args.migrate_only
+            or args.legacy_cwd
+            or args.legacy_context
+            or args.work_token_file
+        ):
+            parser.error(
+                "--candidate cannot import history or inherit managed work authority"
+            )
+        args.state_dir = Path(tempfile.mkdtemp(prefix="omp-tandem-candidate-"))
+        args.no_legacy_import = True
+        args.disable_channel = True
+        args.no_webhook = True
     if not 0 <= args.webhook_port <= 65535:
         parser.error("--webhook-port must be 0..65535")
     if (args.legacy_cwd or args.legacy_context) and not args.migrate_only:
@@ -127,6 +173,28 @@ def main(argv=None):
         work_participant=args.work_participant,
         work_token_file=args.work_token_file,
     )
+    if args.candidate_smoke:
+        bridge = Bridge(
+            options.state_dir,
+            options.executable,
+            options.model,
+            project_root=options.project_root,
+            channel_enabled=False,
+            webhook_enabled=False,
+            migrate_legacy=False,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "candidate_initialized",
+                    "state_base": str(options.state_dir),
+                    "state_directory": str(bridge.scope.directory),
+                    "diagnostics": bridge.diagnostics.inspect(),
+                    "provider_calls": "not_run",
+                }
+            )
+        )
+        return
     if args.migrate_only:
         bridge = Bridge(
             options.state_dir,

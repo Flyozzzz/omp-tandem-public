@@ -32,6 +32,7 @@ OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Co
 - [钩子与技能](#hooks-and-skills)
 - [与协作者共同工作](#working-with-a-peer)
 - [共享任务与自主执行](#shared-work)
+- [精简上下文、启动前检查与新会话](#context-efficient-work)
 - [任务与执行模式](#tasks-and-execution-modes)
 - [执行配置与用量](#execution-and-accounting)
 - [不可变快照审查](#snapshot-reviews)
@@ -762,6 +763,100 @@ python -m omp_tandem.work_daemon --project-root /absolute/project \
 
 **安全边界：** worktree 与文件归属检查帮助隔离和核对输出，**不是操作系统沙箱**。拥有 shell／操作系统权限的进程仍可能访问其他文件或产生外部副作用，宿主的沙箱不会自动覆盖外部 Claude／OMP。共享数据也不会授予执行权；计划中的提示文字不是授权。提供商可能收到任务上下文，费用与运行时间不由“本地存储”保证为零。
 
+<a id="context-efficient-work"></a>
+## 精简上下文、启动前检查与新会话
+
+### 在调度前声明需求
+
+`tandem_start` 和 `tandem_continue` 支持 `preflight=true`：执行相同的准入准备，但不创建任务、worker、模型请求或容量预留。真正 start 会在持有租约时重新检查；preview 不是权限或已预留槽位。请将教学路径替换为实际存在的文件：
+
+```json
+{
+  "cwd": "/absolute/project",
+  "mode": "work",
+  "preflight": true,
+  "timeout_seconds": 180,
+  "contract": {
+    "goal": "修改之前验证服务边界",
+    "requirements": {
+      "requires_shell": true,
+      "entry_paths": ["src/service.py"],
+      "boundary_paths": ["tests/test_service.py"]
+    },
+    "verification": {
+      "stage": "targeted",
+      "preparation_seconds": 30,
+      "checks": [{
+        "id": "service-boundary",
+        "criterion": "服务边界满足约定的案例",
+        "phase": "targeted",
+        "command": "python -m pytest tests/test_service.py",
+        "estimated_seconds": 45
+      }]
+    }
+  }
+}
+```
+
+路径必须属于准入的 Git 根目录；不会悄悄跨越嵌套仓库、worktree 或符号链接。`requires_shell`/`requires_write` 声明需求而非授予权限；analyze/think 不会因此得到 shell。非空检查命令也声明 shell 需求。`live_path_evidence` 引用已有 artifact IDs，仍是**有归属的证据，不是生产入口已执行的证明**。未声明的路径不会从自然语言中猜测。
+
+验证阶梯累积：`candidate` 包含 targeted，`integration` 包含全部三阶段。准备时间加已知估计不得超过总 deadline；缺失估计仍为未知。Preflight 不执行命令。显式阶梯的 success 报告必须包含每个选中的 `check_id`、对应 `run_id` 和当前通过的 `check_runs`；原先失败的记录保留。reviewer 轮次成功不等于共享 submission 获得验收。
+
+已知当前候选输入时，检查可声明现有 CheckScope 的 `scope`：实际 `kind`（`tree`、`commit`、`archive` 或 `content`）与 `digest`。其他字节的执行保留在审计历史，但不属于当前证据。未声明 scope 时，不同输入的模糊失败仍未解决。所有当前 criterion/role 组都必须通过；一个 pass 不能隐藏另一角色的当前失败。`result.verification` 和 `facts.checks` 评估声明的当前输入，`check_runs` 保留完整历史。最多 50 项声明检查、200 条 run 记录；超限拒绝，不静默裁剪。
+
+共享步骤的 `requirements`/`verification` 针对实现，`review_requirements`/`review_verification` 独立针对审查者。reviewer 写入需求无效。必需 shell-check 不会绕过 snapshot-only 模式或缺失授权；未完成检查应为 blocked/partial，不能静默豁免。
+
+### 固定胶囊，而非每轮重复完整快照
+
+`contract.context_options.delivery` 默认 `capsule`；`full` 显式包含所选快照全部内容。胶囊保留 required rule 的完整文本、来源、适用性，以及当前 accepted/rejected/deferred 决策文本和来源。`advisory_rule_ids`/`decision_ids` 可显式选择建议规则及 superseded 决策正文；未知 ID 在准入时被拒绝。
+
+首次、变更及 fresh 上下文包含产品概览。继续同一快照时只保留不可变 ID/SHA 与必需不变量，不重复概览和示例。这**不假设 native compaction 保留了旧消息**。使用 `tandem_context_read` 按返回的 RFC 6901 `pointer`、`offset_bytes`、`next_offset_bytes` 读取遗漏内容。每页 4–16384 UTF-8 字节；拼接 `content` 后解析规范 JSON。reader 只能读取当前任务固定的快照，不接受任意最新版本或文件；协调者 MCP 形式还需 `task_id`。独立审查使用其声明的 review-reader。
+
+受管尝试收到本步骤、完整必需全局限制/验收、准确依赖来源和带完整计划指针的有限概览；不重复其他步骤正文或作者报告。上下文字节减少不代表提供商费用按同比例减少。
+
+不要把独立 `review_id` 与额外 `project_context_id` 组合：准入和消息构造均拒绝这一额外输入通道。所需要求/policy/context 应进入 review bundle。Comparison 必须已有该准确快照的完整成功结构化评估，且没有 recapture 要求；此条件在 conversation lease 内及插入事务中重新检查。
+
+### 显式开始新会话
+
+普通 `tandem_continue` 保持 `continuation="resume"`。新的独立交付物使用有限、带来源的 handoff：
+
+```json
+{
+  "conversation_id": "REPLACE_WITH_SOURCE_CONVERSATION_UUID",
+  "continuation": "fresh",
+  "handoff": {
+    "reason": "新的有限交付物",
+    "summary": "此前边界已在固定提交上检查。",
+    "remaining_goals": ["审查下一个服务入口"],
+    "invalidated_assumptions": ["旧 FSM 不是当前运行入口"],
+    "evidence_artifact_ids": []
+  },
+  "contract": {"goal": "检查下一处服务边界"}
+}
+```
+
+旧历史不变。新 conversation/session 不使用 `--resume`，保存源任务 IDs 与 handoff 来源。mode、cwd、持久 policy 和已解析 model/thinking 不扩大；新目标不继承旧验收。显式 execution 覆盖仍需显式给出。外来 handoff artifacts、active/recovery claims、managed binding、源 review binding、不确定的旧执行及 provider-policy stop 都拒绝此路径。不会复制 token、grant 或 verdict。使用既有 operator/report-only reconcile 处理不确定执行；fresh 不是重试拒绝任务或伪造独立审查的方法。
+
+### 修正复审与有界材料
+
+新的 `ReviewRequest.corrective` 包含 `previous_review_id`、准确 `previous_code_fingerprint`、`open_findings: [{"finding_id": "...", "expected_revision": N}]`。ID 必须属于当前 scope 和先前快照；不会静默接受已变更的问题版本。新的不可变 manifest 列出新增/删除/改变的输入，并标记 `prior_exposed`。即使所选源码未变，也需要新评估；旧 verdict 不转移，作者材料仍遵守披露阶段。
+
+通过分页 manifest 读取 `corrective.finding_details`：固定所声明版本的原始标题、描述、位置、复现条件和证据，不复制作者修复理由或历史。只有绑定该 exact corrective snapshot 且显式引用 finding 的任务能跨会话更新/验证；review-run 还要匹配自己的 reserved stage slot。外来、未声明或过期修改仍被拒绝。
+
+宽泛 candidate-suite 之前先检查 delta、未关闭 finding 和相邻入口/replay/stage 边界。这是显式约定的验证顺序，不是省略必需检查的权限。
+
+Work summary/list 的增长区段采用分页，不再返回无限的剩余 ID 数组。`section` 和 `cursor` 与 `request` 同级；区段响应包含规范 JSON 文本片段 `content` 和 `next_cursor`，拼接后再解析。`section="blockers"` 包含卡片和步骤阻塞。修订、reader/stage 或区段内容变化都会使 cursor 过期。显式 `view=full|plan` 与 Markdown report 保留完整内容，是有意更大的请求。
+
+分页引用提供可直接调用的 `arguments`，其中 `request` 与 `section` 位于正确的同级。将其作为工具参数并在下一页加入返回 cursor；不要把展示字段放入 `request`。
+
+### 工作 runtime 与候选版本分离
+
+Launcher 已使用 non-editable generations。开发 Tandem 自身时先运行 `python -I server.py --prepare`（返回 `key`、`python`），再通过 `--runtime-pin KEY` 显式固定已验证 generation。`--runtime-info` 查看选择；`--runtime-refresh` 为**未来**启动准备并固定当前 source；`--runtime-unpin` 恢复通常的跟随更新行为。过期/不安全 pin 被拒绝，不会静默切换；现有进程/generation 不被替换。
+
+`python -I server.py --candidate --candidate-smoke --project-root /absolute/fixture` 在新的私有 state 中检查当前候选代码并输出本地诊断，不调用提供商。Candidate 拒绝继承 managed authority 或显式 live-state，禁用 legacy import/channel/webhook，返回保留的临时 state 路径。结束后只删除该 fixture 目录。真实 provider 检查需另行明确授权。
+
+新 runtime 在迁移前检查数据库 schema；不能反向约束忽略 guard 的旧二进制。明确升级前停止/检查旧客户端并备份 state。不能因为源码 checkout 相同，就把候选程序指向用户工作数据库。
+
 <a id="tasks-and-execution-modes"></a>
 ## 任务与执行模式
 
@@ -1213,7 +1308,7 @@ Staged 模式的 `selected`、文件模式、变更类型及 diff 均来自索�
 
 发布快照不会更新正在运行的任务。后续轮次会继承完全相同的快照，除非显式改为同一产品的另一修订版。切换产品需要新建对话。
 
-OMP 会收到所选快照的全部内容，并可以提出修改建议，但不会获得用于发布快照的宿主工具。报告可通过 `rule_references` 引用已知规则，通过 `decision_references` 引用决策。未知 ID 会被拒绝；即使引用有效，也仍不代表结论已获证实。
+OMP 默认收到固定胶囊，包含完整必需不变量和读取其余数据的 reader；`context_options.delivery="full"` 显式包含完整快照。它可以提议修改，但没有发布快照的宿主工具。报告使用 `rule_references`/`decision_references` 引用已知规则与决策；未知 ID 被拒绝，有效引用也不证明结论。参见[精简上下文](#context-efficient-work)。
 
 <a id="project-isolation"></a>
 ## 项目隔离
@@ -1282,8 +1377,8 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 |---|---|---|
 | `tandem_scope` | 无 | 检查不可变的项目边界和启动迁移结果 |
 | `tandem_work` | `request: WorkCommand`、`wait_seconds=0..25` | [共享计划、CAS 更新、领取、提交与独立验收](#shared-work)；自主授权及不确定执行恢复仅限操作者 CLI |
-| `tandem_start` | `cwd`、`prompt` 或 `contract`、`mode`、超时参数、`execution`、`review_id`、`review_stage`、`project_context_id` | 新建任务和对话 |
-| `tandem_continue` | `conversation_id`、`prompt` 或 `contract`、超时参数、`execution`、`review_id`、`review_stage`、`project_context_id` | 基于已有历史开启新轮次 |
+| `tandem_start` | `cwd`、`prompt` 或 `contract`、`mode`、超时、execution/review/context、`preflight` | 检查准入或显式启动任务 |
+| `tandem_continue` | `conversation_id`、`prompt` 或 `contract`、超时、execution/context、`continuation`、`handoff`、`preflight` | 继续历史或显式新建有限上下文 |
 | `tandem_result` | `task_id`、`wait_seconds`、`details` | 读取回答、结果判定、问题、产物和诊断信息 |
 | `tandem_wait` | `task_ids`、`wait_seconds` | 等待任意选定结果／问题 |
 | `tandem_list` | `limit` | 列出本命名空间中的近期任务，不包含大段正文 |
@@ -1292,6 +1387,7 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 | `tandem_publish_artifact` | `conversation_id`、`name`、`content`、`media_type` | 发布不可变的材料版本 |
 | `tandem_read_artifact` | `artifact_id`、`offset`、`limit` | 分页读取材料 |
 | `tandem_project_context` | `action=publish/get/list`、快照／ID、`expected_revision`、`limit` | 管理有来源的产品快照 |
+| `tandem_context_read` | `task_id`、`pointer`、`offset_bytes`、`max_bytes` | 仅分页读取任务固定的产品快照；独立审查使用自己的 reader |
 | `tandem_export_context` | `context_id`、`target_project_root` | 向特定接收方提供快照 |
 | `tandem_import_context` | `transfer_id`、`expected_revision` | 接收定向发送的快照 |
 | `tandem_channel` | `action=status/probe/ack/pending/recover`、相关 ID／令牌、`include_previous`、`limit` | 管理可选投递机制 |

@@ -26,6 +26,8 @@ __all__ = [
     "BlockedOutcome",
     "CheckRun",
     "CheckScope",
+    "ContextOptions",
+    "ConversationHandoff",
     "PartialOutcome",
     "PassedCheck",
     "RuleReference",
@@ -33,8 +35,11 @@ __all__ = [
     "TaskCheck",
     "TaskContract",
     "TaskOutcome",
+    "TaskRequirements",
     "TaskScope",
     "TurnContract",
+    "VerificationCheck",
+    "VerificationPlan",
     "WorkPolicy",
     "assess_checks",
     "decode_outcome",
@@ -87,6 +92,81 @@ class TaskScope(_ContractModel):
     owned_files: list[_OwnedFile] = Field(default_factory=list, max_length=100)
 
 
+class ContextOptions(_ContractModel):
+    """Presentation of pinned product data, never a reduction of required policy."""
+
+    delivery: Literal["capsule", "full"] = "capsule"
+    advisory_rule_ids: list[Annotated[_NonBlank, StringConstraints(max_length=100)]] = (
+        Field(default_factory=list, max_length=50)
+    )
+    decision_ids: list[Annotated[_NonBlank, StringConstraints(max_length=100)]] = Field(
+        default_factory=list, max_length=100
+    )
+
+
+class TaskRequirements(_ContractModel):
+    """Declared execution needs; a live-path claim remains attributed evidence."""
+
+    requires_shell: bool = False
+    requires_write: bool = False
+    entry_paths: list[_OwnedFile] = Field(default_factory=list, max_length=100)
+    boundary_paths: list[_OwnedFile] = Field(default_factory=list, max_length=100)
+    live_path_evidence: list[_ArtifactId] = Field(default_factory=list, max_length=32)
+
+
+class CheckScope(_ContractModel):
+    """Which bytes a run observed. Equal digests of the same kind are the same bytes."""
+
+    kind: Literal["tree", "commit", "archive", "content"]
+    digest: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{7,128}$")]
+    boundaries: list[_NonBlank2000] = Field(
+        default_factory=list,
+        max_length=20,
+        description="What the run did not exercise (external services, other platforms, unselected files).",
+    )
+
+
+class VerificationCheck(_ContractModel):
+    id: Annotated[_NonBlank, StringConstraints(max_length=100)]
+    criterion: _NonBlank2000
+    phase: Literal["targeted", "candidate", "integration"] = "targeted"
+    command: str | None = Field(default=None, max_length=2000)
+    requires_shell: bool = False
+    estimated_seconds: int | None = Field(default=None, ge=1, le=7200)
+    scope: CheckScope | None = Field(
+        default=None,
+        description="Explicit current input identity. History from other bytes remains recorded but is not a current result; omitted scope keeps ambiguous failures unresolved.",
+    )
+
+
+class VerificationPlan(_ContractModel):
+    """Explicit check ladder; later phases include earlier required checks."""
+
+    stage: Literal["targeted", "candidate", "integration"] = "targeted"
+    checks: list[VerificationCheck] = Field(default_factory=list, max_length=50)
+    preparation_seconds: int = Field(default=0, ge=0, le=7200)
+
+    @model_validator(mode="after")
+    def unique_checks(self) -> Self:
+        if len({check.id for check in self.checks}) != len(self.checks):
+            raise ValueError("Verification check IDs must be unique")
+        return self
+
+
+class ConversationHandoff(_ContractModel):
+    """Explicit data for a fresh conversation; no execution capability is transferred."""
+
+    reason: _NonBlank2000
+    summary: Annotated[_NonBlank, StringConstraints(max_length=8000)]
+    evidence_artifact_ids: list[_ArtifactId] = Field(
+        default_factory=list, max_length=32
+    )
+    remaining_goals: list[_NonBlank2000] = Field(default_factory=list, max_length=20)
+    invalidated_assumptions: list[_NonBlank2000] = Field(
+        default_factory=list, max_length=20
+    )
+
+
 class TaskContract(_ContractModel):
     goal: _NonBlank = Field(max_length=8000)
     context: str = Field(default="", max_length=60000)
@@ -94,6 +174,9 @@ class TaskContract(_ContractModel):
     constraints: list[_NonBlank2000] = Field(default_factory=list, max_length=50)
     acceptance: list[_NonBlank2000] = Field(default_factory=list, max_length=50)
     artifact_ids: list[_ArtifactId] = Field(default_factory=list, max_length=32)
+    context_options: ContextOptions = Field(default_factory=ContextOptions)
+    requirements: TaskRequirements = Field(default_factory=TaskRequirements)
+    verification: VerificationPlan | None = None
 
 
 class WorkPolicy(_ContractModel):
@@ -111,6 +194,9 @@ class TurnContract(_ContractModel):
     constraints: list[_NonBlank2000] = Field(default_factory=list, max_length=50)
     acceptance: list[_NonBlank2000] = Field(default_factory=list, max_length=50)
     artifact_ids: list[_ArtifactId] = Field(default_factory=list, max_length=32)
+    context_options: ContextOptions = Field(default_factory=ContextOptions)
+    requirements: TaskRequirements = Field(default_factory=TaskRequirements)
+    verification: VerificationPlan | None = None
 
 
 class RuleReference(_ContractModel):
@@ -130,24 +216,13 @@ class TaskCheck(_ContractModel):
         default=None,
         description="Optional check run this claim refers to; the run record carries the bytes, environment and provenance.",
     )
+    check_id: Annotated[_NonBlank, StringConstraints(max_length=100)] | None = None
 
 
 class PassedCheck(TaskCheck):
     """Only shape a success report may carry: every current check passed."""
 
     result: Literal["passed"]
-
-
-class CheckScope(_ContractModel):
-    """Which bytes a run observed. Equal digests of the same kind are the same bytes."""
-
-    kind: Literal["tree", "commit", "archive", "content"]
-    digest: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{7,128}$")]
-    boundaries: list[_NonBlank2000] = Field(
-        default_factory=list,
-        max_length=20,
-        description="What the run did not exercise (external services, other platforms, unselected files).",
-    )
 
 
 _Role = Literal["author", "reviewer", "integrator", "operator"]
@@ -222,8 +297,8 @@ class _OutcomeBase(_ContractModel):
     finding_updates: list[FindingUpdate] = Field(default_factory=list, max_length=100)
     check_runs: list[CheckRun] = Field(
         default_factory=list,
-        max_length=50,
-        description="Executed check runs to record append-only alongside this report. Participant reports are recorded as participant_reported.",
+        max_length=200,
+        description="Up to 200 executed check runs recorded append-only alongside this report, including failed attempts and retries. Participant reports are recorded as participant_reported.",
     )
 
     @model_validator(mode="after")

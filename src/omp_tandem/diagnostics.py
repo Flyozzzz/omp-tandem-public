@@ -57,6 +57,7 @@ class Diagnostics:
                 **scope,
                 "expected_project": expected,
                 "matches_expected": matches,
+                "state_directory": str(bridge.scope.directory),
             },
             "runtime": {
                 "executable": executable,

@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -13,7 +15,31 @@ from importlib import metadata
 from pathlib import Path
 
 from .models import outcome_schema
+from .runtime_guard import state_compatibility
 from .work_items import WorkCommand
+
+
+def _launch_selection() -> dict:
+    try:
+        value = json.loads(os.environ.get("OMP_TANDEM_RUNTIME_SELECTION", "{}"))
+    except (ValueError, TypeError):
+        value = {}
+    if not isinstance(value, dict):
+        value = {}
+    # Launcher metadata explains selection, never establishes verified build
+    # identity or grants authority. Installed RECORD verification remains separate.
+    return {
+        "source": "launcher_environment_observation" if value else "direct_process",
+        "mode": value.get(
+            "mode", "candidate" if "--candidate" in sys.argv else "direct"
+        ),
+        "loaded_prepared_key": value.get("key"),
+        "loaded_generation": value.get("generation"),
+        "selection_file": value.get("selection_file"),
+        "pinned_at_launch": value.get("pinned"),
+        "candidate_key_at_launch": value.get("candidate_key"),
+        "refresh_effect": "future launches only; this process keeps its startup identity",
+    }
 
 
 def schema_digest(schema: dict) -> str:
@@ -143,6 +169,7 @@ class RuntimeIdentity:
     loaded_module_path: str
     captured_at: float
     source_checkout_json: str
+    launch_selection_json: str = "{}"
     work_protocol: str = "work-v2-presentation"
     review_protocol: str = "independent-first-v1"
 
@@ -164,11 +191,14 @@ class RuntimeIdentity:
             loaded_module_path=str(module_path),
             captured_at=time.time(),
             source_checkout_json=json.dumps(_checkout_at_start(module_path)),
+            launch_selection_json=json.dumps(_launch_selection()),
         )
 
     def view(self):
         result = asdict(self)
         result["source_checkout"] = json.loads(result.pop("source_checkout_json"))
+        result["runtime_selection"] = json.loads(result.pop("launch_selection_json"))
+        result["state_compatibility"] = state_compatibility()
         result["identity_source"] = "process_start_importlib.metadata"
         result["exact_build_source"] = (
             "verified_distribution_record"

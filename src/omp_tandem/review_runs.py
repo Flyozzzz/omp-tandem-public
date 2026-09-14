@@ -174,6 +174,7 @@ class ReviewRuns:
                             "request_key conflicts with a different normalized review request"
                         )
                     return self.view(existing["run_id"])
+                self.reviews.validate_corrective(request)
                 if self.driver is not None and not self.driver.is_alive():
                     raise ValueError(
                         "Review controller stopped; reconnect instead of replaying accepted work"
@@ -339,9 +340,18 @@ class ReviewRuns:
                 if identifiers
                 else []
             )
+        review_info = self.reviews.info(run["review_id"]) if run["review_id"] else None
         return {
             "run_id": run["run_id"],
             "review_id": run["review_id"],
+            "exposure": (
+                "prior_exposed"
+                if review_info and review_info.get("corrective")
+                else "independent"
+                if review_info
+                else None
+            ),
+            "corrective": review_info.get("corrective") if review_info else None,
             "task_id": run[run["phase"] + "_task_id"]
             if run["phase"] in ("independent", "comparison")
             else None,
@@ -656,7 +666,7 @@ class ReviewRuns:
                 self._stop(
                     current, "failed", "Snapshot publication lost its run mapping"
                 )
-            elif not snapshot["change_count"]:
+            elif not snapshot["change_count"] and not snapshot.get("corrective"):
                 self._update(run_id, status="no_changes")
             else:
                 self._update(run_id, phase="independent")
@@ -706,6 +716,13 @@ class ReviewRuns:
             try:
                 result = self.start_task(
                     prompt=(
+                        "Corrective review: prior-exposed, not blind. Read the manifest's immutable "
+                        "corrective delta and captured original finding details at their declared revisions. Reassess the NEW exact "
+                        "snapshot fully; no previous verdict applies and prior author rationale is withheld. "
+                        if payload["request"].get("corrective")
+                        else ""
+                    )
+                    + (
                         "Independently assess the pinned review snapshot against its saved requirements and criteria. "
                         "Read only saved review material. Do not request or infer the author proposal. "
                         "If necessary context is absent, ask explicitly for an expanded capture or report blocked; "

@@ -70,6 +70,41 @@ class ReviewCheck(BaseModel):
     code_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
+class OpenFindingReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    finding_id: str
+    expected_revision: int = Field(ge=1, strict=True)
+
+    @field_validator("finding_id")
+    @classmethod
+    def canonical_finding_id(cls, value):
+        return _canonical_id(value, "finding_id")
+
+
+class CorrectiveReviewContext(BaseModel):
+    """Explicit prior exposure, never permission to reuse a prior verdict."""
+
+    model_config = ConfigDict(extra="forbid")
+    previous_review_id: str
+    previous_code_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    open_findings: list[OpenFindingReference] = Field(
+        default_factory=list, max_length=100
+    )
+
+    @field_validator("previous_review_id")
+    @classmethod
+    def canonical_review_id(cls, value):
+        return _canonical_id(value, "previous_review_id")
+
+    @model_validator(mode="after")
+    def unique_findings(self):
+        if len({item.finding_id for item in self.open_findings}) != len(
+            self.open_findings
+        ):
+            raise ValueError("Duplicate corrective finding reference")
+        return self
+
+
 class ReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     requirements: str = Field(min_length=1, max_length=200000)
@@ -95,6 +130,7 @@ class ReviewRequest(BaseModel):
     author_proposal: str = Field(default="", max_length=200000)
     author_rationale: str = Field(default="", max_length=200000)
     external_boundaries: list[str] = Field(default_factory=list, max_length=100)
+    corrective: CorrectiveReviewContext | None = None
 
     @field_validator("criteria", "external_boundaries")
     @classmethod
@@ -719,6 +755,112 @@ class ReviewStore:
                 return
             raise ValueError("Capture owner lease was lost")
 
+    def _corrective_context(self, db, corrective, manifest=None):
+        row = db.execute(
+            "SELECT manifest FROM reviews WHERE review_id=? AND scope_id=?",
+            (corrective.previous_review_id, self.scope.key),
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                "Corrective review references an unknown or foreign snapshot"
+            )
+        previous = json.loads(row["manifest"])
+        if previous["code_fingerprint"] != corrective.previous_code_fingerprint:
+            raise ValueError(
+                "Corrective review references a stale snapshot fingerprint"
+            )
+        captured_findings = []
+        for reference in corrective.open_findings:
+            finding = db.execute(
+                "SELECT * FROM findings WHERE finding_id=?",
+                (reference.finding_id,),
+            ).fetchone()
+            if (
+                finding is None
+                or finding["review_id"] != corrective.previous_review_id
+                or finding["revision"] != reference.expected_revision
+                or finding["validity"] == "rejected"
+                or finding["resolution"] == "verified_fixed"
+            ):
+                raise ValueError(
+                    "Corrective review requires current open findings bound to the prior snapshot"
+                )
+            if manifest is not None:
+                draft = json.loads(finding["draft_json"])
+                captured_findings.append(
+                    {
+                        **reference.model_dump(),
+                        "provenance": {
+                            "source": "finding_record_at_declared_revision",
+                            "details_source": "original_finding_draft",
+                            "review_id": finding["review_id"],
+                            "origin_review_id": finding["origin_review_id"],
+                            "revision": finding["revision"],
+                            "evidence_status": "recorded_not_reproduced",
+                        },
+                        "title": draft["title"],
+                        "description": draft["description"],
+                        "location": {
+                            **draft["location"],
+                            "review_id": finding["origin_review_id"],
+                        },
+                        "reproduction_conditions": draft["reproduction_conditions"],
+                        "evidence": draft["evidence"],
+                        "validity": finding["validity"],
+                        "resolution": finding["resolution"],
+                    }
+                )
+        if manifest is None:
+            return None
+        before = {item["path"]: item for item in previous["files"]}
+        after = {item["path"]: item for item in manifest["files"]}
+        delta = {"added": [], "changed": [], "removed": []}
+        for path in sorted(before.keys() | after.keys()):
+            old, new = before.get(path), after.get(path)
+            if old == new:
+                continue
+            old_exists = old is not None and old["selected"]["exists"]
+            new_exists = new is not None and new["selected"]["exists"]
+            kind = (
+                "added"
+                if old is None or (not old_exists and new_exists)
+                else "removed"
+                if new is None or (old_exists and not new_exists)
+                else "changed"
+            )
+            delta[kind].append({"path": path, "before": old, "after": new})
+        return {
+            **corrective.model_dump(),
+            "finding_details": captured_findings,
+            "exposure": "prior_exposed",
+            "applicability": {
+                "review_id": manifest["review_id"],
+                "code_fingerprint": manifest["code_fingerprint"],
+                "scope": "new_snapshot_only",
+            },
+            "previous_verdict_reused": False,
+            "delta": delta,
+            "source": {"before": previous["source"], "after": manifest["source"]},
+            "git": {"before": previous["git"], "after": manifest["git"]},
+            "requirements_changed": previous["requirements"]
+            != manifest["requirements"],
+            "criteria_changed": previous["criteria"] != manifest["criteria"],
+            "context_paths": {
+                "added": sorted(
+                    set(manifest["context_paths"]) - set(previous["context_paths"])
+                ),
+                "removed": sorted(
+                    set(previous["context_paths"]) - set(manifest["context_paths"])
+                ),
+            },
+        }
+
+    def validate_corrective(self, request):
+        if request.corrective is not None:
+            with closing(self._connect()) as db:
+                db.execute("BEGIN")
+                self._corrective_context(db, request.corrective)
+
     def create(
         self, request: ReviewRequest, *, reservation: CaptureReservation | None = None
     ) -> dict:
@@ -752,6 +894,16 @@ class ReviewStore:
             db.execute("BEGIN IMMEDIATE")
             if reservation is not None:
                 self._check_reservation(db, reservation, normalized)
+            if request.corrective is not None:
+                manifest["corrective"] = self._corrective_context(
+                    db, request.corrective, manifest
+                )
+            if (
+                len(_json(manifest).encode("utf-8"))
+                + sum(len(content) for _, _, content in contents)
+                > _MAX_TOTAL
+            ):
+                raise ValueError("Review content exceeds 16 MiB")
             db.execute(
                 "INSERT INTO reviews VALUES (?, ?, ?, ?)",
                 (review_id, self.scope.key, created, _json(manifest)),
@@ -817,6 +969,16 @@ class ReviewStore:
             "check_count": len(manifest["checks"]),
             "selection": manifest["selection"],
             "git": manifest["git"],
+            "exposure": "prior_exposed"
+            if manifest.get("corrective")
+            else "independent",
+            "corrective": {
+                key: value
+                for key, value in manifest["corrective"].items()
+                if key != "finding_details"
+            }
+            if manifest.get("corrective")
+            else None,
             "whole_environment_immutable": False,
             "reader_sections": [
                 "manifest",

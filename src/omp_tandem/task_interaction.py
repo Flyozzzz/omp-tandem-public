@@ -16,6 +16,7 @@ from .runtime_models import (
     QuestionRequest,
 )
 from .task_store import TaskStore
+from .verification import enforce_verification
 from .work_items import independent_stage
 
 # Server-recorded records live under the reserved prefix that PublishRequest
@@ -93,13 +94,23 @@ class TaskInteraction:
         with closing(self.tasks.connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             task = db.execute(
-                "SELECT status, cancel_requested, report_json, project_context_id, conversation_id FROM tasks WHERE task_id=?",
+                "SELECT status, cancel_requested, report_json, contract_json, project_context_id, conversation_id FROM tasks WHERE task_id=?",
                 (task_id,),
             ).fetchone()
             if task is None or task["cancel_requested"] or task["status"] != "running":
                 raise ValueError(
                     "Task is not running or still has an unanswered question"
                 )
+            contract = (
+                json.loads(task["contract_json"]) if task["contract_json"] else {}
+            )
+            attempt = self.work_items.native_attempt(task_id)
+            verification = (
+                attempt.get("verification")
+                if attempt is not None
+                else contract.get("verification")
+            )
+            enforce_verification(verification, report)
             if (
                 report.outcome not in ("blocked", "partial")
                 and db.execute(

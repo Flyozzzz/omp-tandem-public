@@ -2,12 +2,12 @@
 
 The pinned combination is **official OMP 18.1.13** with the Python RPC SDK
 at **`daf07999c2fee9b22edc7bf8fea1fb6272e0df5e`**. The checked-in
-[local verification report](compatibility-result.json) passed for the **local 3.7.1 proposal**
-on **Darwin 25.5.0 arm64 / Python 3.13.5**, on 2026-09-13: 18 checks passed in
-27.826 seconds, `phase="complete"`, `probes="passed"`, `failure_class=null`.
+[local verification report](compatibility-result.json) passed for the **3.8.0 package**
+on **Darwin 25.5.0 arm64 / Python 3.13.5**, on 2026-09-14: 18 checks passed in
+30.313 seconds, `phase="complete"`, `probes="passed"`, `failure_class=null`.
 Its `tandem`, `provenance` and installed-flow `runtime_identity` fields identify
 the exercised bytes and environments. This is evidence for that exact combination,
-not a published release, a supported-version range or proof of every provider. The report also contains the
+not a publication receipt, a supported-version range or proof of every provider. The report also contains the
 stage-G0 helper (native `task` subagent) probes described in
 [helper-compatibility.md](helper-compatibility.md); their capability gates are
 recorded separately from check success and `delegation.available` is `false`.
@@ -20,19 +20,19 @@ The observed binary was `/opt/homebrew/Cellar/omp/18.1.13/bin/omp`, reporting
 | Observation | Exact value |
 |---|---|
 | Official Darwin arm64 OMP SHA-256 | `a4c5c9cc5b8222184d0d7429b0bb6ac2a92bbe45dd11bf68e4b1360050791909` |
-| Tested wheel | `omp_tandem-3.7.1-py3-none-any.whl` |
-| Wheel SHA-256 | `52f30901679b171bc593c98c2b8c377bb8d757ba3ca5249fd0d0c26b812e1208` |
-| Installed runtime | `package_version=3.7.1`, `distribution_origin=installed_wheel` |
-| Installed exact build | `sha256:2d834e9ed5dc259a5766fd7945e0f49f111121e8d07d988c95cab80e099a7d25` |
+| Tested wheel | `omp_tandem-3.8.0-py3-none-any.whl` |
+| Wheel SHA-256 | `33c1fc04ab6f6da773e429b9564a2482a426ca35e556faf89f59ac9d6e776d92` |
+| Installed runtime | `package_version=3.8.0`, `distribution_origin=installed_wheel` |
+| Installed exact build | `sha256:b45509072190bf6cfd5c533faa257955147807bb1a3e7e30f93453650c0bb196` |
 | Exact-build source | `verified_distribution_record` |
 | Runtime protocols | `work-v2-presentation`, `independent-first-v1` |
-| Verifier SHA-256 | `4fbc4737c54b3535e1c72dc3e22d1f5fd89c0d17d80fdeb6621940ac4d962d4b` |
-| Frozen lock SHA-256 | `ae2c91374c5097270fe2e2ae87d2d8d25d303ba9e8185ae98926057af7eabb43` |
+| Verifier SHA-256 | `78fac52a5262324ec4cffb7ec63c31d9171c4715b06c95e17690d9dd66ca2b9e` |
+| Frozen lock SHA-256 | `7cea468c1786356145e894c014d3822117e09e4aa8f136bac1db923241cd8f2b` |
 
-The isolated installed-wheel shared-flow check passed in 8.820 seconds. Its
+The isolated installed-wheel shared-flow check passed in 11.385 seconds. Its
 recorded distribution path is a removed disposable environment, not the current
 client's runtime or a plugin installation. Both source and installed versions
-were 3.7.1. Registered schema identities and observed wire census remain separate
+were 3.8.0. Registered schema identities and observed wire census remain separate
 evidence; `runtime_identity.schema_digests.compatibility="not_assessed"` is not
 rewritten to a universal compatibility claim.
 
@@ -48,6 +48,23 @@ Its owned-file marker guides continuation, with exactly one fixture effect recor
 across both attempts and the interrupted cost left unknown. This covers the
 Claude-child/shared-supervisor boundary, not generic exactly-once effects,
 OMP-native teardown or live-provider replan. See the [scenario command](guide.md#plan-transitions).
+
+The installed 3.8 context flow additionally exercises real OMP RPC and MCP:
+an analyze task declaring shell is refused before dispatch; a valid work
+preflight creates no task/model request; omitted examples are read from the
+exact pinned context; unchanged continuation keeps mandatory rules and
+decisions without repeating its overview; explicit fresh starts without
+replaying old native history. The recorded fixture packets were 10,568 bytes
+initially and 2,824 bytes on continuation. These are task-packet byte counts,
+not the entire provider context, a quality benchmark or invoice savings.
+
+The separate launcher smoke prepared a real non-editable generation in a
+disposable package/cache, pinned it, changed only that candidate source, and
+observed the old generation still selected. Candidate smoke initialized separate
+private state without provider calls or changing the sentinel live-state
+directory. Explicit refresh selected the new generation; the old interpreter
+still reported its unchanged exact build. No user pin, credentials or active
+session was modified.
 
 ## Reproduce without provider credentials
 

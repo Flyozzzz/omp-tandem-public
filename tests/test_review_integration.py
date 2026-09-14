@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from contextlib import closing
 
 from fastmcp.exceptions import ToolError
 
@@ -162,3 +163,105 @@ class ReviewIntegrationTests(RpcHarness):
         refreshed = await self.result(first["task_id"])
         self.assertEqual(refreshed["review"]["applicability"]["status"], "stale")
         self.assertEqual(json.loads(refreshed["answer"])["saved"], "index version\n")
+
+    async def test_corrective_snapshot_requires_fresh_assessment_without_author_access(
+        self,
+    ):
+        first = await self.start("snapshot-reader", review_id=self.review["review_id"])
+        await self.result(first["task_id"])
+        (self.root / "sample.txt").write_text("corrected version\n")
+        corrected = await self.call(
+            "tandem_review",
+            action="create",
+            request={
+                "requirements": "Reassess the corrected sample",
+                "paths": ["sample.txt"],
+                "author_rationale": "Private correction rationale",
+                "corrective": {
+                    "previous_review_id": self.review["review_id"],
+                    "previous_code_fingerprint": self.review["code_fingerprint"],
+                    "open_findings": [],
+                },
+            },
+        )
+        self.assertEqual(corrected["exposure"], "prior_exposed")
+        self.assertEqual(
+            corrected["corrective"]["applicability"]["review_id"],
+            corrected["review_id"],
+        )
+        with self.assertRaises(ToolError):
+            await self.call(
+                "tandem_continue",
+                conversation_id=first["conversation_id"],
+                prompt="snapshot-reader",
+                review_id=corrected["review_id"],
+                review_stage="comparison",
+            )
+        second = await self.start("snapshot-reader", review_id=corrected["review_id"])
+        result = await self.result(second["task_id"])
+        self.assertEqual(
+            json.loads(result["answer"]),
+            {"saved": "corrected version\n", "author_visible": False},
+        )
+
+
+VERIFICATION_PEER = PEER.replace(
+    "        if scenario == 'missing-report':",
+    """        if scenario == 'verification-omission':
+            finish({'outcome': 'success', 'summary': 'Unverified', 'answer': 'Missing required verification'})
+        elif scenario == 'missing-report':""",
+).replace(
+    "        if scenario in ('not-run-outcome', 'blocked-without-reason'):",
+    """        if scenario == 'verification-omission':
+            if not command.get('isError'):
+                end('Omission incorrectly accepted')
+            else:
+                runs = [
+                    {'check_id': 'boundary', 'run_id': '11111111-1111-4111-8111-111111111111', 'criterion': 'Boundary preserved', 'role': 'reviewer', 'scope': {'kind': 'content', 'digest': 'a' * 64}, 'result': 'failed'},
+                    {'check_id': 'boundary', 'run_id': '22222222-2222-4222-8222-222222222222', 'criterion': 'Boundary preserved', 'role': 'reviewer', 'scope': {'kind': 'content', 'digest': 'b' * 64}, 'result': 'passed'},
+                ]
+                scenario = 'verification-corrected'
+                finish({'outcome': 'success', 'summary': 'Verified', 'answer': 'Omission refused; current checklist accepted',
+                        'checks': [{'name': 'Boundary preserved', 'check_id': 'boundary', 'result': 'passed', 'run_id': runs[-1]['run_id']}],
+                        'check_runs': runs})
+        elif scenario in ('not-run-outcome', 'blocked-without-reason'):""",
+)
+
+
+class VerificationIntegrationTests(RpcHarness):
+    async def test_current_contract_refuses_omission_and_records_failed_history(self):
+        (self.root / "peer.py").write_text(VERIFICATION_PEER)
+        started = await self.start(
+            contract={
+                "goal": "verification-omission",
+                "verification": {
+                    "checks": [
+                        {
+                            "id": "boundary",
+                            "criterion": "Boundary preserved",
+                            "estimated_seconds": 1,
+                            "scope": {"kind": "content", "digest": "b" * 64},
+                        }
+                    ],
+                },
+            },
+            prompt=None,
+        )
+        result = await self.result(started["task_id"])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(
+            result["answer"], "Omission refused; current checklist accepted"
+        )
+        self.assertEqual(result["verification"]["status"], "passed")
+        self.assertEqual(result["facts"]["checks"]["status"], "passed")
+        self.assertEqual(result["check_runs"]["status"], "failed")
+        with closing(self.bridge.tasks.connect()) as db:
+            saved = json.loads(
+                db.execute(
+                    "SELECT report_json FROM tasks WHERE task_id=?",
+                    (started["task_id"],),
+                ).fetchone()["report_json"]
+            )
+        self.assertEqual(
+            [run["result"] for run in saved["check_runs"]], ["failed", "passed"]
+        )

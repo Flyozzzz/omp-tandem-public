@@ -185,12 +185,33 @@ class Bridge:
         reserved_task_id=None,
         review_run_id=None,
         work_attempt_id=None,
+        continuation="resume",
+        handoff=None,
+        dry_run=False,
     ):
         previous = (
             self.tasks.latest(conversation_id) if conversation_id is not None else None
         )
         if previous is not None:
+            with closing(self.tasks.connect()) as db:
+                run_binding = db.execute(
+                    "SELECT review_run_id FROM tasks WHERE conversation_id=? "
+                    "AND review_run_id IS NOT NULL LIMIT 1",
+                    (conversation_id,),
+                ).fetchone()
+            if run_binding and (
+                review_run_id != run_binding["review_run_id"]
+                or reserved_task_id is None
+            ):
+                raise ValueError(
+                    "Review run continuation requires its private stage reservation"
+                )
             effective_mode = previous["mode"]
+            if continuation == "fresh" and previous.get("review_id"):
+                raise ValueError(
+                    "Snapshot reviews use a new explicit review/corrective capture, "
+                    "not a generic conversation handoff"
+                )
             effective_review = (
                 review_id if review_id is not None else previous.get("review_id")
             )
@@ -214,20 +235,10 @@ class Bridge:
             effective_stage = effective_stage or "independent"
             if effective_stage not in ("independent", "comparison"):
                 raise ValueError("review_stage must be independent or comparison")
-            if effective_stage == "comparison":
-                with closing(self.tasks.connect()) as db:
-                    independent = db.execute(
-                        "SELECT 1 FROM tasks WHERE conversation_id=? AND review_id=? "
-                        "AND review_stage='independent' AND status='completed' LIMIT 1",
-                        (conversation_id, effective_review),
-                    ).fetchone()
-                if independent is None:
-                    raise ValueError(
-                        "Read a completed independent assessment of this snapshot in this conversation before revealing the author proposal"
-                    )
         elif effective_stage is not None:
             raise ValueError("review_stage requires a review_id")
-        return self.runtime.start(
+        dispatch = self.runtime.preflight if dry_run else self.runtime.start
+        return dispatch(
             prompt,
             cwd,
             mode,
@@ -243,6 +254,8 @@ class Bridge:
             reserved_task_id=reserved_task_id,
             review_run_id=review_run_id,
             work_attempt_id=work_attempt_id,
+            continuation=continuation,
+            handoff=handoff,
         )
 
     def view(self, task_id, details=False, *, refresh=True):

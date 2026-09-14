@@ -31,6 +31,7 @@ This repository starts from a reviewed snapshot of earlier private development; 
 - [Working with a peer](#working-with-a-peer)
 - [One read-only review scenario](#one-read-only-review-scenario)
 - [Shared tasks and autonomous execution](#shared-tasks)
+- [Context-efficient work, preflight and fresh conversations](#context-efficient-work)
 - [Tasks and execution modes](#tasks-and-execution-modes)
 - [Immutable review bundles](#immutable-review-bundles)
 - [Live diagnostics](#live-diagnostics)
@@ -685,6 +686,100 @@ python -m omp_tandem.work_daemon --project-root /absolute/project \
 
 This is operator-only, requires a completed task with a current final acceptance, and fast-forwards only a clean tracked/nonignored checkout whose HEAD still matches. It rejects ignored-file collisions, conflicts and unexpected changes; there is no forced reset, autostash or implicit merge into user work. Worktrees isolate edits, **not arbitrary filesystem/network effects** from authorized shell. Check outputs can create ignored artifacts in their isolated workspace, but those artifacts are not silently promoted into the source result.
 
+<a id="context-efficient-work"></a>
+## Context-efficient work, preflight and fresh conversations
+
+### Declare the work before dispatch
+
+`tandem_start` and `tandem_continue` accept `preflight=true`. This runs the same admission preparation without a task, worker, model request or capacity reservation. Actual start checks again under its leases; a preview is not permission or a reserved slot. For example, replace these teaching paths with existing files:
+
+```json
+{
+  "cwd": "/absolute/project",
+  "mode": "work",
+  "preflight": true,
+  "timeout_seconds": 180,
+  "contract": {
+    "goal": "Verify the service boundary before changing it",
+    "requirements": {
+      "requires_shell": true,
+      "entry_paths": ["src/service.py"],
+      "boundary_paths": ["tests/test_service.py"]
+    },
+    "verification": {
+      "stage": "targeted",
+      "preparation_seconds": 30,
+      "checks": [{
+        "id": "service-boundary",
+        "criterion": "The observed service boundary satisfies the agreed cases",
+        "phase": "targeted",
+        "command": "python -m pytest tests/test_service.py",
+        "estimated_seconds": 45
+      }]
+    }
+  }
+}
+```
+
+Paths must belong to the admitted Git root; nested repository/worktree/symlink boundaries are not silently crossed. `requires_shell`/`requires_write` are requirements, not grants: analyze/think cannot gain shell by requesting it. A nonempty check command also declares a shell need. `live_path_evidence` holds existing artifact IDs and remains **attributed evidence, not proof that a file is a live production route**. Undeclared paths are not guessed from prose.
+
+The check ladder is cumulative: `candidate` includes targeted checks, `integration` includes all three phases. Declared preparation plus known estimates cannot exceed the whole task deadline; missing estimates remain unknown. Commands are not executed by preflight. A successful final report for an explicit ladder needs every selected `check_id`, its `run_id`, and a current passing entry in `check_runs`; history keeps earlier failures. A passed review task still does not accept a shared submission.
+
+For a known current candidate, a check may declare `scope: {"kind":"tree|commit|archive|content","digest":"..."}` using the existing CheckScope type (choose one actual kind). Other-byte runs stay in the audit history but are not current evidence. Without an explicit scope, ambiguous different-input failures remain unresolved. All current criterion/role groups must pass; a claimed pass cannot hide another role's current failure. `result.verification` and `facts.checks` assess the declared current inputs, while `check_runs` retains the unscoped history. Reports permit at most 200 run records for up to 50 declared checks; overflow is refused, never silently trimmed.
+
+Shared steps have separate `requirements`/`verification` for implementation and `review_requirements`/`review_verification` for the reviewer. Review write requirements are invalid. A required shell check does not bypass snapshot-only review or an absent grant; unresolved checks must remain blocked/partial, not silently waived.
+
+### Pinned capsules instead of repeated complete snapshots
+
+`contract.context_options.delivery` defaults to `capsule`; `full` explicitly includes all selected product data. Capsules always retain complete required rule text/source/applicability and current accepted/rejected/deferred decision text/provenance. Advisory bodies and superseded decision bodies can be explicitly selected with `advisory_rule_ids`/`decision_ids`; invalid IDs refuse admission.
+
+First, changed and fresh contexts include the overview. An unchanged continued snapshot sends its immutable ID/SHA and required invariants without repeating the overview or examples. This **does not assume native compaction retained older messages**: use `tandem_context_read` for omitted data, following the returned RFC 6901 `pointer`, `offset_bytes` and `next_offset_bytes`. The reader accepts 4–16384 UTF-8 bytes per page; concatenate `content` pages and JSON-decode the canonical JSON. It reads only the current task's pinned snapshot, never a caller-selected latest revision or a file. The coordinator version additionally takes `task_id`. Independent review uses its declared review reader instead.
+
+Managed attempts receive the assigned step, complete mandatory global constraints/acceptance, exact dependency provenance and a bounded overview with full-plan pointers. They do not receive all other step bodies or repeated author reports. This reduces context bytes, not necessarily provider cost by the same ratio.
+
+Do not combine an independent `review_id` with a separate `project_context_id`: admission and the message sink refuse this extra input channel. Capture the needed requirements/policy/context in the review bundle instead. Comparison requires a complete successful structured assessment of that exact snapshot without a recapture requirement, rechecked under the conversation lease and insertion transaction.
+
+### Start a fresh context explicitly
+
+Normal `tandem_continue` keeps `continuation="resume"`. At a new deliverable, request a fresh conversation with a bounded, source-backed handoff:
+
+```json
+{
+  "conversation_id": "REPLACE_WITH_SOURCE_CONVERSATION_UUID",
+  "continuation": "fresh",
+  "handoff": {
+    "reason": "A new bounded deliverable",
+    "summary": "The previous boundary was checked against its saved commit.",
+    "remaining_goals": ["Review the next service entry point"],
+    "invalidated_assumptions": ["The retired FSM is not the live route"],
+    "evidence_artifact_ids": []
+  },
+  "contract": {"goal": "Inspect the next service boundary"}
+}
+```
+
+The old conversation remains intact. A new conversation and session are created without `--resume`; source task IDs and handoff provenance are recorded. Mode, cwd, persistent policy and resolved model/thinking remain constrained; new goals do not inherit old acceptance. Explicit execution overrides remain explicit. Foreign handoff artifacts, active/recovery claims, managed bindings, source review bindings, uncertain prior work and provider-policy stops refuse this path. It does not clone tokens, grants or verdicts. Use existing operator/report-only reconciliation for unresolved execution; generic fresh is not a way to retry refused work or fabricate independent review.
+
+### Corrective review and bounded material
+
+A new `ReviewRequest` may declare `corrective` with `previous_review_id`, its exact `previous_code_fingerprint`, and `open_findings: [{"finding_id": "...", "expected_revision": N}]`. IDs must belong to this scope and the referenced previous snapshot; changed finding revisions are not silently accepted. The new immutable manifest contains added/removed/changed input paths and labels the work `prior_exposed`. A new assessment is still required, even when selected source bytes are unchanged. No old verdict transfers to new bytes, and author material still obeys its reveal stage.
+
+Read `corrective.finding_details` through the paged manifest: it pins original title, description, location, reproduction and evidence at the declared revision, not author fix-rationale/history. Only a task bound to this exact corrective snapshot and declared finding may update/verify it across conversations; a review-run task also needs its exact reserved stage slot. Unrelated, undeclared or stale mutations remain refused.
+
+Use the delta, open findings and neighboring entry/replay/stage boundaries before a broad candidate suite. This is an explicitly agreed verification order, not permission to omit required checks.
+
+Work summary/list output now pages growing sections instead of returning unbounded remaining-ID arrays. Follow `section` and `cursor` alongside `request`; section responses are canonical JSON text chunks in `content`, with `next_cursor`. Concatenate then decode. All card/step blockers are available through `section="blockers"`. A stale revision, reader identity, stage or changed section content invalidates its cursor. Explicit `view=full|plan` and Markdown reports remain complete, intentionally larger requests.
+
+Paged references expose ready-to-call `arguments` with `request` and `section` at the correct sibling levels. Pass that object as tool arguments, adding the returned cursor for the next page; do not put presentation fields inside `request`.
+
+### Keep the working runtime separate from the candidate
+
+The launcher already prepares non-editable generations. For self-host development, inspect `python -I server.py --prepare` (returns `key` and `python`), then explicitly select that verified generation with `--runtime-pin KEY`. `--runtime-info` inspects selection; `--runtime-refresh` prepares and pins current source for **future** launches; `--runtime-unpin` restores ordinary update-following. Unsafe/stale pins refuse instead of silently switching. Existing processes/generations are never replaced.
+
+Use `python -I server.py --candidate --candidate-smoke --project-root /absolute/fixture` to prepare current candidate code with a new private state directory and local diagnostics, without a provider task. Candidate mode refuses inherited managed authority/explicit live-state selection, disables legacy import/channel/webhook, and reports the retained temporary state path. Remove only that reported fixture directory when finished. A real provider check is a separate explicit decision.
+
+New runtimes check the stored schema before migration. This cannot retroactively constrain old binaries that ignore the guard: stop/inspect old clients and back up state before an intentional upgrade. Never test a candidate against the user's live database merely because the source checkout is the same project.
+
 ## Tasks and execution modes
 
 | Mode | OMP tools | Typical use |
@@ -879,7 +974,7 @@ Pass the returned `context_id` as `project_context_id` when starting work. Updat
 
 Publishing does not update running tasks. A follow-up inherits its exact snapshot unless explicitly changed to another revision of the same product. Changing products requires a new conversation.
 
-OMP receives the full selected snapshot and can propose changes, but does not receive a publication host tool. Reports can cite known rules through `rule_references` and decisions through `decision_references`. Unknown IDs are rejected; a valid reference still does not prove the conclusion.
+OMP receives a pinned capsule by default, with full required invariants and a reader for omitted details; `context_options.delivery="full"` explicitly includes the complete snapshot. It can propose changes but does not receive a publication host tool. Reports can cite known rules through `rule_references` and decisions through `decision_references`. Unknown IDs are rejected; a valid reference still does not prove the conclusion. See [context-efficient work](#context-efficient-work).
 
 ## Project isolation
 
@@ -943,8 +1038,8 @@ The compact review scenario is the default entry for changes review; `tandem_wor
 | Tool | Main inputs | Purpose |
 |---|---|---|
 | `tandem_scope` | None | Inspect project binding, migration and computation-profile defaults |
-| `tandem_start` | `cwd`, `prompt` or `contract`, `mode`, timeouts, `execution`, `review_id`, `review_stage`, `project_context_id` | New task and conversation |
-| `tandem_continue` | `conversation_id`, `prompt` or `contract`, timeouts, `execution`, review binding, `project_context_id` | New turn with existing history |
+| `tandem_start` | `cwd`, `prompt` or `contract`, `mode`, timeouts, `execution`, review/context binding, `preflight` | Inspect admission or explicitly start a task |
+| `tandem_continue` | `conversation_id`, `prompt` or `contract`, timeouts, execution/context binding, `continuation`, `handoff`, `preflight` | Resume history or explicitly start a fresh bounded context |
 | `tandem_result` | `task_id`, `wait_seconds`, `details` | Read answer, outcome, question, artifacts, and diagnostics |
 | `tandem_wait` | `task_ids`, `wait_seconds` | Wait for any selected result/question |
 | `tandem_list` | `limit` | Recent tasks in this namespace without large bodies |
@@ -953,6 +1048,7 @@ The compact review scenario is the default entry for changes review; `tandem_wor
 | `tandem_publish_artifact` | `conversation_id`, `name`, `content`, `media_type` | Publish an immutable material version |
 | `tandem_read_artifact` | `artifact_id`, `offset`, `limit` | Read material in pages |
 | `tandem_project_context` | `action=publish/get/list`, snapshot/IDs, `expected_revision`, `limit` | Manage sourced product snapshots |
+| `tandem_context_read` | `task_id`, `pointer`, `offset_bytes`, `max_bytes` | Page only this task's pinned product snapshot; independent review uses its own reader |
 | `tandem_export_context` | `context_id`, `target_project_root` | Offer a snapshot to a specific recipient |
 | `tandem_import_context` | `transfer_id`, `expected_revision` | Accept an addressed snapshot |
 | `tandem_channel` | `action=status/probe/ack/pending/recover`, relevant IDs/token, `include_previous`, `limit` | Manage optional delivery |
