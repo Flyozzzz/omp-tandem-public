@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Review capture reads the Git state of an explicit `review_directory` inside the launch project instead of always using the project root, so work that lives in a nested repository can be captured by `tandem_review` and the `tandem_review_run` scenario. The selector chooses Git context only: the launch-project boundary, the component-by-component symlink-free working-file reads and the project-relative saved paths are unchanged, and the captured directory is recorded in the manifest and reused when a snapshot is assessed later.
+- Selected paths that reach into a nested repository are refused and name the directory to pass, rather than silently reporting every nested file as newly added because the enclosing repository does not know that history. An unresolvable base now says the same thing.
+- Automatic selection at the project root skips a nested repository's directory entry instead of failing the whole capture with an unsafe-path error, and files the enclosing repository still tracks under such a subtree are refused with the same guidance rather than captured against the wrong history.
+- The nested-repository rule also applies when the project root is not itself a Git repository, where those files would otherwise be saved as plain additions with no history at all.
+- A capture that names a directory binds one no-follow descriptor for the whole capture, and the Git child changes into that descriptor rather than into a pathname. A directory replaced during the capture can no longer redirect later reads to another repository; the regression fails without this binding.
+- Snapshot assessment reuses the recorded directory for identity, index, staged bytes and the reviewed commit's existence, so an unchanged nested snapshot is no longer reported stale or unknown. Manifests captured before this change keep assessing against the project root.
+- Working-file reads of a bound capture start at the same opened directory as its Git reads, so one snapshot can no longer combine one directory's history with a replacement directory's live bytes.
+- The binding spans the whole capture operation rather than a single attempt, so a mutation retry cannot publish a repository that took the original directory's place.
+- A recorded directory that has since been removed or replaced makes applicability report unknown instead of raising out of the reader. Only acquiring the directory is handled that way, so an input/output failure later in the assessment still reports the staleness already observed alongside its unknown cause.
+
 ## 3.8.0 — 2026-09-14
 
 ### Changes

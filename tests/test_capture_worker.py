@@ -237,8 +237,8 @@ class CaptureWorkerTests(unittest.TestCase):
                     capture_id=self.reservation.review_id,
                 )
 
-                def capture(request, changed=changed):
-                    material = original_capture(request)
+                def capture(request, directory="", changed=changed):
+                    material = original_capture(request, directory)
                     self.update_run(**changed)
                     return material
 
@@ -252,8 +252,8 @@ class CaptureWorkerTests(unittest.TestCase):
     def test_owner_dying_during_capture_cannot_publish(self):
         original_capture = self.store._capture
 
-        def capture(request):
-            material = original_capture(request)
+        def capture(request, directory=""):
+            material = original_capture(request, directory)
             self.lease.close()
             return material
 

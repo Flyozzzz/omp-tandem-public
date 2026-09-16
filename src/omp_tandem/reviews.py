@@ -11,10 +11,11 @@ import os
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -120,6 +121,11 @@ class ReviewRequest(BaseModel):
         max_length=200,
         description="Required with source=commit: the exact committed snapshot to review against base.",
     )
+    review_directory: str = Field(
+        default="",
+        max_length=4096,
+        description="Directory inside the launch project whose Git state is reviewed, relative to the project root. Use it when the work lives in a nested repository or a subtree with its own history. Selected and context paths stay relative to the project root regardless. Empty means the project root itself.",
+    )
     paths: list[str] | None = Field(default=None, min_length=1, max_length=_MAX_FILES)
     context_paths: list[str] = Field(
         default_factory=list,
@@ -145,6 +151,13 @@ class ReviewRequest(BaseModel):
         if not value.strip():
             raise ValueError("requirements must be nonblank")
         return value
+
+    @field_validator("review_directory")
+    @classmethod
+    def contained_directory(cls, value: str) -> str:
+        # The selector chooses which Git context is read. It never widens the
+        # launch-project boundary, so it obeys the same rules as a review path.
+        return "" if not value or value == "." else _path(value.rstrip("/"))
 
     @model_validator(mode="after")
     def commit_source_requires_commit(self) -> ReviewRequest:
@@ -195,6 +208,22 @@ def _path(value: str) -> str:
     return value
 
 
+def _join(directory: str, path: str) -> str:
+    """Git speaks in capture-directory coordinates; saved paths stay project-relative."""
+    return f"{directory}/{path}" if directory else path
+
+
+def _split(directory: str) -> list[str]:
+    return directory.split("/") if directory else []
+
+
+def _inside(directory: str, path: str) -> str | None:
+    if not directory:
+        return path
+    prefix = directory + "/"
+    return path[len(prefix) :] if path.startswith(prefix) else None
+
+
 def _signature(value: os.stat_result) -> tuple:
     return (
         value.st_dev,
@@ -215,6 +244,12 @@ def _descriptor(data: bytes | None, mode: str | None) -> dict:
     }
 
 
+@contextmanager
+def _no_descriptor():
+    """A project-root capture keeps the existing pathname behaviour."""
+    yield None
+
+
 class ReviewStore:
     def __init__(self, db_path: Path, scope: ProjectScope, artifacts: ArtifactStore):
         self.db_path = db_path
@@ -222,6 +257,8 @@ class ReviewStore:
         # ArtifactStore requires task/context ownership. Reviews intentionally own bytes
         # separately rather than pretending a review is a product context.
         self.artifacts = artifacts
+        # Capture-scoped directory descriptors, never shared between threads.
+        self._bindings = threading.local()
         with publication_lock(scope), closing(self._connect()) as db, db:
             # Readers must remain available even while large snapshot inserts spill
             # SQLite's page cache. All snapshot tables and the run mapping still
@@ -243,8 +280,75 @@ class ReviewStore:
         db.row_factory = sqlite3.Row
         return db
 
+    @contextmanager
+    def _bind(self, directory: str):
+        """Hold one descriptor for the whole capture.
+
+        Reopening per command would let a directory swapped mid-capture supply a
+        different repository for later reads, so the binding is taken once.
+        """
+        if not directory:
+            yield
+            return
+        with self._descriptor(directory) as fd:
+            open_bindings = getattr(self._bindings, "open", None)
+            if open_bindings is None:
+                open_bindings = self._bindings.open = {}
+            open_bindings[directory] = fd
+            try:
+                yield
+            finally:
+                del open_bindings[directory]
+
+    @contextmanager
+    def _descriptor(self, directory: str):
+        """Open the capture directory itself, never following a symlinked component.
+
+        The descriptor, not the pathname, is what the Git child changes into. A
+        component swapped between validation and use therefore cannot redirect the
+        capture: the child keeps the directory this walk actually opened.
+        """
+        descriptors = []
+        try:
+            parent = os.open(
+                self.scope.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            )
+            descriptors.append(parent)
+            for part in _path(directory).split("/"):
+                parent = os.open(
+                    part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent
+                )
+                descriptors.append(parent)
+        except FileNotFoundError:
+            for fd in descriptors:
+                os.close(fd)
+            raise ValueError(
+                f"Review directory does not exist in this project: {directory}"
+            ) from None
+        except NotADirectoryError:
+            for fd in descriptors:
+                os.close(fd)
+            raise ValueError(
+                f"Review directory is not a directory: {directory}"
+            ) from None
+        except OSError as exc:
+            for fd in descriptors:
+                os.close(fd)
+            raise ValueError(
+                f"Unsafe or unreadable review directory {directory}: {exc.strerror}"
+            ) from None
+        try:
+            yield descriptors[-1]
+        finally:
+            for fd in reversed(descriptors):
+                os.close(fd)
+
     def _git(
-        self, *args: str, allow_failure: bool = False, maximum: int = _GIT_OUTPUT
+        self,
+        *args: str,
+        allow_failure: bool = False,
+        maximum: int = _GIT_OUTPUT,
+        directory: str = "",
     ) -> bytes | None:
         # Temporary output avoids allocating unbounded subprocess output in memory.
         environment = {
@@ -261,23 +365,46 @@ class ReviewStore:
             GIT_NO_REPLACE_OBJECTS="1",
             LC_ALL="C",
         )
-        with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+        command = [
+            "git",
+            "--no-pager",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "diff.external=",
+            "-c",
+            "core.attributesFile=/dev/null",
+            *args,
+        ]
+        bound = getattr(self._bindings, "open", {}).get(directory)
+        with (
+            tempfile.TemporaryFile() as output,
+            tempfile.TemporaryFile() as errors,
+            _no_descriptor()
+            if bound is not None or not directory
+            else self._descriptor(directory) as opened,
+        ):
+            anchor = bound if bound is not None else opened
+            # With a capture directory the child changes into the opened descriptor
+            # itself, so a swapped pathname cannot move the capture elsewhere.
+            if anchor is None:
+                launched, extra = command, {"cwd": self.scope.root}
+            else:
+                os.set_inheritable(anchor, True)
+                launched = [
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    f"import os,sys;os.fchdir({anchor});os.execvp(sys.argv[1],sys.argv[1:])",
+                    *command,
+                ]
+                extra = {"pass_fds": (anchor,)}
             try:
                 result = subprocess.run(
-                    [
-                        "git",
-                        "--no-pager",
-                        "-c",
-                        "core.hooksPath=/dev/null",
-                        "-c",
-                        "core.fsmonitor=false",
-                        "-c",
-                        "diff.external=",
-                        "-c",
-                        "core.attributesFile=/dev/null",
-                        *args,
-                    ],
-                    cwd=self.scope.root,
+                    launched,
+                    **extra,
                     env=environment,
                     stdin=subprocess.DEVNULL,
                     stdout=output,
@@ -306,15 +433,31 @@ class ReviewStore:
             output.seek(0)
             return output.read()
 
-    def _working(self, path: str) -> tuple[bytes | None, str | None, tuple | None]:
-        """Open every component without following links, including concurrent swaps."""
+    def _working(
+        self, path: str, directory: str = ""
+    ) -> tuple[bytes | None, str | None, tuple | None]:
+        """Open every component without following links, including concurrent swaps.
+
+        When a capture is bound to a directory, the walk starts at that opened
+        descriptor. Otherwise live bytes could come from a replacement directory
+        while the Git history came from the one this capture opened.
+        """
+        relative = _inside(directory, _path(path)) if directory else _path(path)
+        if relative is None:
+            raise ValueError(f"Selected path is outside the review directory: {path}")
+        bound = getattr(self._bindings, "open", {}).get(directory)
         descriptors = []
         try:
-            parent = os.open(
-                self.scope.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            parent = (
+                bound
+                if bound is not None
+                else os.open(
+                    self.scope.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                )
             )
-            descriptors.append(parent)
-            parts = _path(path).split("/")
+            if bound is None:
+                descriptors.append(parent)
+            parts = relative.split("/")
             for part in parts[:-1]:
                 parent = os.open(
                     part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent
@@ -348,26 +491,53 @@ class ReviewStore:
             for fd in reversed(descriptors):
                 os.close(fd)
 
-    def _identity(self, base: str) -> dict:
-        root = self._git("rev-parse", "--show-toplevel", allow_failure=True)
+    def _identity(self, base: str, directory: str = "") -> dict:
+        root = self._git(
+            "rev-parse", "--show-toplevel", allow_failure=True, directory=directory
+        )
         if root is None:
-            return {"kind": "files", "head": None, "base_commit": None, "prefix": ""}
-        prefix = self._git("rev-parse", "--show-prefix").decode("utf-8").strip("\n")
-        head = self._git("rev-parse", "--verify", "HEAD^{commit}", allow_failure=True)
+            return {
+                "kind": "files",
+                "head": None,
+                "base_commit": None,
+                "prefix": "",
+                "review_directory": directory,
+            }
+        prefix = (
+            self._git("rev-parse", "--show-prefix", directory=directory)
+            .decode("utf-8")
+            .strip("\n")
+        )
+        head = self._git(
+            "rev-parse",
+            "--verify",
+            "HEAD^{commit}",
+            allow_failure=True,
+            directory=directory,
+        )
         resolved = self._git(
             "rev-parse",
             "--verify",
             "--end-of-options",
             base + "^{commit}",
             allow_failure=True,
+            directory=directory,
         )
         if resolved is None and not (head is None and base == "HEAD"):
-            raise ValueError("Review base must resolve to an existing Git commit")
+            raise ValueError(
+                "Review base must resolve to an existing Git commit"
+                + (
+                    ""
+                    if directory
+                    else "; when the work lives in a nested repository, name it with review_directory"
+                )
+            )
         return {
             "kind": "git",
             "head": head.decode().strip() if head else None,
             "base_commit": resolved.decode().strip() if resolved else None,
             "prefix": prefix,
+            "review_directory": directory,
         }
 
     def _commit_identity(self, identity: dict, commit: str | None) -> dict:
@@ -378,19 +548,59 @@ class ReviewStore:
             "--end-of-options",
             str(commit) + "^{commit}",
             allow_failure=True,
+            directory=identity.get("review_directory", ""),
         )
         if resolved is None:
             raise ValueError("Review commit must resolve to an existing Git commit")
         return {**identity, "base_commit": resolved.decode().strip()}
 
-    def _index(self) -> dict:
+    def _repository(self, directory: str) -> bool:
+        """Does this directory carry its own repository, as a directory or a gitfile?"""
+        try:
+            with self._descriptor(directory) as fd:
+                os.stat(".git", dir_fd=fd, follow_symlinks=False)
+        except (ValueError, FileNotFoundError, OSError):
+            return False
+        return True
+
+    def _contained(self, paths, directory: str) -> None:
+        """Refuse selections whose Git history is not the one this capture reads."""
+        outside = [path for path in paths if _inside(directory, path) is None]
+        if outside:
+            raise ValueError(
+                f"Selected path is outside the review directory {directory!r}: {outside[0]}; "
+                "paths stay relative to the project root and must live under that directory"
+            )
+        # A subtree with its own repository has its own history. Reading it through the
+        # enclosing repository reports every file as new, so name it instead of guessing.
+        # This holds whether or not the capture directory is itself in Git.
+        seen, nested = {}, {}
+        for path in sorted(paths):
+            parts = path.split("/")[:-1]
+            for depth in range(len(_split(directory)), len(parts)):
+                candidate = "/".join(parts[: depth + 1])
+                if candidate in nested:
+                    raise ValueError(nested[candidate])
+                if candidate in seen:
+                    continue
+                seen[candidate] = True
+                if self._repository(candidate):
+                    nested[candidate] = (
+                        f"Selected path belongs to the nested Git repository {candidate!r}: {path}; "
+                        f"capture it with review_directory={candidate!r}"
+                    )
+                    raise ValueError(nested[candidate])
+
+    def _index(self, directory: str = "") -> dict:
         entries = {}
-        for row in self._git("ls-files", "--stage", "-z").split(b"\0"):
+        for row in self._git("ls-files", "--stage", "-z", directory=directory).split(
+            b"\0"
+        ):
             if not row:
                 continue
             meta, name = row.split(b"\t", 1)
             mode, oid, stage = meta.decode("ascii").split()
-            path = name.decode("utf-8")
+            path = _join(directory, name.decode("utf-8"))
             entries.setdefault(path, []).append((mode, oid, stage))
         return entries
 
@@ -398,6 +608,7 @@ class ReviewStore:
         if identity["base_commit"] is None:
             return {}
         prefix = identity["prefix"]
+        directory = identity.get("review_directory", "")
         rows = self._git(
             "ls-tree",
             "--full-tree",
@@ -406,6 +617,7 @@ class ReviewStore:
             identity["base_commit"],
             "--",
             prefix or ".",
+            directory=directory,
         )
         entries = {}
         for row in rows.split(b"\0"):
@@ -416,7 +628,7 @@ class ReviewStore:
             path = name.decode("utf-8")
             if prefix and not path.startswith(prefix):
                 continue
-            entries[path[len(prefix) :]] = (mode, oid, kind)
+            entries[_join(directory, path[len(prefix) :])] = (mode, oid, kind)
         return entries
 
     def _selection(
@@ -426,8 +638,11 @@ class ReviewStore:
             raise ValueError("Staged reviews require a Git repository")
         if request.source == "commit" and identity["kind"] != "git":
             raise ValueError("Commit reviews require a Git repository")
+        directory = identity.get("review_directory", "")
         if request.paths is not None:
-            return sorted({_path(path) for path in request.paths})
+            selected = sorted({_path(path) for path in request.paths})
+            self._contained(selected, directory)
+            return selected
         if identity["kind"] != "git":
             raise ValueError("Non-Git reviews require explicit file paths")
         if request.source == "commit":
@@ -455,16 +670,23 @@ class ReviewStore:
                 ("--others", "--exclude-standard"),
             ):
                 paths.update(
-                    path.decode("utf-8")
-                    for path in self._git("ls-files", *args, "-z").split(b"\0")
-                    if path
+                    _join(directory, path.decode("utf-8"))
+                    for path in self._git(
+                        "ls-files", *args, "-z", directory=directory
+                    ).split(b"\0")
+                    # A nested repository is listed as a directory entry. It is not
+                    # this repository's content, so it is skipped rather than fatal.
+                    if path and not path.endswith(b"/")
                 )
         selected = sorted({_path(path) for path in paths})
         if len(selected) > _MAX_FILES:
             raise ValueError("Review selects more than 256 files; specify paths")
+        # Tracked files under a subtree that later became its own repository are still
+        # listed by the enclosing repository, so the same rule applies to this branch.
+        self._contained(selected, directory)
         return selected
 
-    def _blob(self, entry) -> tuple[bytes | None, str | None]:
+    def _blob(self, entry, directory: str = "") -> tuple[bytes | None, str | None]:
         if entry is None:
             return None, None
         mode, oid, kind = entry
@@ -472,19 +694,23 @@ class ReviewStore:
             raise ValueError(
                 "Selected submodules or unmerged index entries require a separate review"
             )
-        size = int(self._git("cat-file", "-s", oid))
+        size = int(self._git("cat-file", "-s", oid, directory=directory))
         if size > _MAX_FILE:
             raise ValueError("Review Git blob exceeds 4 MiB")
-        return self._git("cat-file", "blob", oid, maximum=_MAX_FILE), mode
+        return (
+            self._git("cat-file", "blob", oid, maximum=_MAX_FILE, directory=directory),
+            mode,
+        )
 
     def _capture(
-        self, request: ReviewRequest
+        self, request: ReviewRequest, directory: str = ""
     ) -> tuple[dict, list[tuple[str, str, bytes]]]:
-        identity = self._identity(request.base)
-        index = self._index() if identity["kind"] == "git" else {}
+        identity = self._identity(request.base, directory)
+        index = self._index(directory) if identity["kind"] == "git" else {}
         tree = self._tree(identity) if identity["kind"] == "git" else {}
         selected_paths = self._selection(request, identity, index, tree)
         context_paths = {_path(path) for path in request.context_paths}
+        self._contained(sorted(context_paths), directory)
         paths = sorted(set(selected_paths) | context_paths)
         if len(paths) > _MAX_FILES:
             raise ValueError("Review selects more than 256 files including context")
@@ -498,17 +724,17 @@ class ReviewStore:
         )
         for path in paths:
             if request.source == "worktree":
-                selected, mode, signature = self._working(path)
+                selected, mode, signature = self._working(path, directory)
                 observed[path] = (selected, mode, signature)
-            base, base_mode = self._blob(tree.get(path))
+            base, base_mode = self._blob(tree.get(path), directory)
             stages = index.get(path, []) if request.source != "commit" else []
             if len(stages) > 1 or (stages and stages[0][2] != "0"):
                 raise ValueError(f"Unmerged index entry cannot be certified: {path}")
-            staged, staged_mode = self._blob(stages[0] if stages else None)
+            staged, staged_mode = self._blob(stages[0] if stages else None, directory)
             if request.source == "staged":
                 selected, mode = staged, staged_mode
             if request.source == "commit":
-                selected, mode = self._blob(commit_tree.get(path))
+                selected, mode = self._blob(commit_tree.get(path), directory)
             if path in context_paths and selected is None:
                 raise ValueError(
                     f"Required context is missing from the {request.source} source: {path}; "
@@ -586,9 +812,9 @@ class ReviewStore:
                     )
         # Both complete scans must agree, including identity and selection. No live
         # reads are needed later to reconstruct any section of this bundle.
-        current_index = self._index() if identity["kind"] == "git" else {}
+        current_index = self._index(directory) if identity["kind"] == "git" else {}
         if (
-            self._identity(request.base) != identity
+            self._identity(request.base, directory) != identity
             or self._selection(request, identity, current_index, tree) != selected_paths
         ):
             raise _Mutation("Git identity or selected paths changed during capture")
@@ -598,7 +824,7 @@ class ReviewStore:
             raise _Mutation("Selected Git index changed during capture")
         if request.source == "worktree":
             for path in paths:
-                if self._working(path) != observed[path]:
+                if self._working(path, directory) != observed[path]:
                     raise _Mutation(f"Selected file changed during capture: {path}")
         if request.source == "commit":
             identity = {
@@ -878,15 +1104,20 @@ class ReviewStore:
                     normalized[key] = sorted(set(normalized[key]))
             with closing(self._connect()) as db:
                 self._check_reservation(db, reservation, normalized)
-        for attempt in range(3):
-            try:
-                manifest, contents = self._capture(request)
-                break
-            except _Mutation:
-                if attempt == 2:
-                    raise ValueError(
-                        "Project changed during all three capture attempts; retry when selected files are stable"
-                    ) from None
+        # One directory binding covers every attempt: a retry must never publish a
+        # different repository that took the original directory's place.
+        with self._bind(request.review_directory):
+            for attempt in range(3):
+                try:
+                    manifest, contents = self._capture(
+                        request, request.review_directory
+                    )
+                    break
+                except _Mutation:
+                    if attempt == 2:
+                        raise ValueError(
+                            "Project changed during all three capture attempts; retry when selected files are stable"
+                        ) from None
         review_id = reservation.review_id if reservation else str(uuid4())
         created = time.time()
         manifest.update(review_id=review_id, created=created, scope_id=self.scope.key)
@@ -1091,23 +1322,46 @@ class ReviewStore:
     def assess(self, review_id: str) -> dict:
         manifest = self._manifest(review_id)
         source = manifest.get("source", "worktree")
+        # Older manifests predate the selector and were captured at the project root.
+        recorded = manifest["git"].get("review_directory", "")
+        binding = ExitStack()
+        try:
+            binding.enter_context(self._bind(recorded))
+        except (ValueError, OSError) as exc:
+            # The captured directory is gone or was replaced: that is unknown
+            # applicability for this snapshot, not a failure of the reader. Only
+            # acquisition is handled here, so observations made later are never lost.
+            return self._assess_bound(manifest, source, recorded, unavailable=str(exc))
+        with binding:
+            return self._assess_bound(manifest, source, recorded)
+
+    def _assess_bound(
+        self, manifest: dict, source: str, recorded: str, unavailable: str | None = None
+    ) -> dict:
         changed, unknown, index_changed = [], [], []
         identity, index = None, None
+        if unavailable is not None:
+            # No Git or live read is possible; report unknown rather than raising.
+            unknown.append(unavailable)
         try:
-            identity = self._identity(manifest["requested_base"])
+            if unavailable is not None:
+                raise ValueError(unavailable)
+            identity = self._identity(manifest["requested_base"], recorded)
             if identity["kind"] != manifest["git"]["kind"]:
                 unknown.append("Project Git availability changed")
             else:
-                index = self._index() if identity["kind"] == "git" else {}
+                index = self._index(recorded) if identity["kind"] == "git" else {}
         except (ValueError, OSError) as exc:
             unknown.append(str(exc))
         for row in manifest["files"]:
+            if unavailable is not None:
+                break
             path = row["path"]
             if source == "commit":
                 break  # committed bytes cannot drift; only the commit's existence matters
             try:
                 if source == "worktree":
-                    data, mode, _ = self._working(path)
+                    data, mode, _ = self._working(path, recorded)
                     if _descriptor(data, mode) != row["selected"]:
                         changed.append(path)
                 if index is not None:
@@ -1117,7 +1371,9 @@ class ReviewStore:
                         if source == "staged":
                             changed.append(path)
                     else:
-                        staged, staged_mode = self._blob(stages[0] if stages else None)
+                        staged, staged_mode = self._blob(
+                            stages[0] if stages else None, recorded
+                        )
                         if (
                             source == "staged"
                             and _descriptor(staged, staged_mode) != row["selected"]
@@ -1125,7 +1381,7 @@ class ReviewStore:
                             changed.append(path)
                         if _descriptor(staged, staged_mode) != row["staged"]:
                             index_changed.append(path)
-            except ValueError as exc:
+            except (ValueError, OSError) as exc:
                 unknown.append(f"{path}: {exc}")
         if source == "commit" and identity is not None:
             exists = self._git(
@@ -1133,6 +1389,7 @@ class ReviewStore:
                 "-e",
                 manifest["git"]["commit"] + "^{commit}",
                 allow_failure=True,
+                directory=recorded,
             )
             if exists is None:
                 unknown.append("Reviewed commit object is no longer reachable")

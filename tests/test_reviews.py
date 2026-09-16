@@ -155,9 +155,9 @@ class ReviewTests(unittest.TestCase):
         original = self.store._working
         calls = 0
 
-        def mutate_once(path):
+        def mutate_once(path, directory=""):
             nonlocal calls
-            result = original(path)
+            result = original(path, directory)
             calls += 1
             if calls == 1:
                 (self.root / "file.txt").write_text("second")
@@ -170,8 +170,8 @@ class ReviewTests(unittest.TestCase):
             "second",
         )
 
-        def mutate_always(path):
-            result = original(path)
+        def mutate_always(path, directory=""):
+            result = original(path, directory)
             (self.root / "file.txt").write_text(
                 (self.root / "file.txt").read_text() + "!"
             )
@@ -433,9 +433,9 @@ class ReviewTests(unittest.TestCase):
         original = self.store._index
         calls = 0
 
-        def mutate_once():
+        def mutate_once(directory=""):
             nonlocal calls
-            result = original()
+            result = original(directory)
             calls += 1
             if calls == 1:
                 (self.root / "tracked.txt").write_text("second")
@@ -461,9 +461,9 @@ class ReviewTests(unittest.TestCase):
         self.assertIn("+second", self.store.read(rid, "diff")["content"])
         self.assertNotIn("+first", self.store.read(rid, "diff")["content"])
 
-        def mutate_always():
+        def mutate_always(directory=""):
             nonlocal calls
-            result = original()
+            result = original(directory)
             calls += 1
             (self.root / "tracked.txt").write_text(f"changing {calls}")
             self.git("add", "tracked.txt")
