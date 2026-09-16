@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import PureWindowsPath
 from typing import Annotated, Literal, Self
@@ -22,6 +23,10 @@ from .findings import FindingDraft, FindingUpdate
 
 __all__ = [
     "OUTCOME_ADAPTER",
+    "AcceptanceItem",
+    "AcceptanceObligation",
+    "AcceptanceRef",
+    "AcceptanceSet",
     "ArtifactInfo",
     "BlockedOutcome",
     "CheckRun",
@@ -41,7 +46,9 @@ __all__ = [
     "VerificationCheck",
     "VerificationPlan",
     "WorkPolicy",
+    "acceptance_revision",
     "assess_checks",
+    "check_revision",
     "decode_outcome",
     "outcome_contract_error",
     "outcome_refusal_message",
@@ -82,8 +89,148 @@ _OwnedFile = Annotated[str, AfterValidator(_validate_owned_file)]
 _ArtifactId = Annotated[str, AfterValidator(_validate_artifact_id)]
 
 
+_AcceptanceId = Annotated[
+    str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,99}$")
+]
+_Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+_NonBlank16000 = Annotated[_NonBlank, StringConstraints(max_length=16000)]
+_EnvironmentKey = Annotated[str, StringConstraints(max_length=60, pattern=r"\S")]
+_EnvironmentValue = Annotated[str, StringConstraints(max_length=200)]
+
+# One acceptance set expands to at most this many evidence units. An oversized
+# declaration is refused rather than truncated: a silently shortened denominator
+# would report coverage of requirements nobody ever counted.
+MAX_EVIDENCE_UNITS = 1000
+
+
+def _digest(domain: str, value) -> str:
+    """Content identity of a declaration, tagged so two kinds never collide."""
+    payload = json.dumps(
+        {"domain": domain, "value": value},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def acceptance_revision(items) -> str:
+    """The revision is the content, so an edited criterion cannot keep its evidence."""
+    return _digest(
+        "acceptance-set-v1",
+        [
+            {
+                "id": item["id"],
+                "text": item["text"],
+                "obligations": [
+                    {
+                        "id": duty["id"],
+                        "text": duty["text"],
+                        "environment": duty.get("environment") or {},
+                    }
+                    for duty in item.get("obligations") or []
+                ],
+            }
+            for item in items
+        ],
+    )
+
+
+def check_revision(check) -> str:
+    """Identity of a check declaration including what it claims to exercise."""
+    if not isinstance(check, dict):
+        check = check.model_dump()
+    return _digest(
+        "verification-check-v1",
+        {
+            "id": check["id"],
+            "criterion": check["criterion"],
+            "phase": check.get("phase", "targeted"),
+            "command": check.get("command"),
+            "requires_shell": bool(check.get("requires_shell")),
+            "scope": check.get("scope"),
+            "acceptance_refs": sorted(
+                (
+                    ref if isinstance(ref, dict) else ref.model_dump()
+                    for ref in check.get("acceptance_refs") or []
+                ),
+                key=lambda ref: (
+                    ref["set_id"],
+                    ref["revision"],
+                    ref["criterion_id"],
+                    ref["obligation_id"] or "",
+                ),
+            ),
+        },
+    )
+
+
 class _ContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class AcceptanceObligation(_ContractModel):
+    """One clause of a criterion, with the exact environment it is owed in."""
+
+    id: _AcceptanceId
+    text: _NonBlank16000
+    environment: dict[_EnvironmentKey, _EnvironmentValue] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def bounded_environment(self) -> Self:
+        if len(self.environment) > 24:
+            raise ValueError("environment carries at most 24 entries")
+        return self
+
+
+class AcceptanceItem(_ContractModel):
+    id: _AcceptanceId
+    text: _NonBlank16000
+    obligations: list[AcceptanceObligation] = Field(
+        default_factory=list,
+        max_length=100,
+        description="Declared clauses. Naming none keeps the criterion one undecomposed unit; naming some means a mapping of the parent covers none of them.",
+    )
+
+    @model_validator(mode="after")
+    def unique_obligations(self) -> Self:
+        if len({duty.id for duty in self.obligations}) != len(self.obligations):
+            raise ValueError("Obligation IDs must be unique within a criterion")
+        return self
+
+
+class AcceptanceSet(_ContractModel):
+    """The declared denominator. Its revision is its content, not a version number."""
+
+    schema_version: Literal[1] = 1
+    set_id: _ArtifactId
+    revision: _Sha256
+    items: list[AcceptanceItem] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def content_identity(self) -> Self:
+        if len({item.id for item in self.items}) != len(self.items):
+            raise ValueError("Acceptance criterion IDs must be unique within a set")
+        units = sum(len(item.obligations) or 1 for item in self.items)
+        if units > MAX_EVIDENCE_UNITS:
+            raise ValueError(
+                f"Acceptance set expands to {units} evidence units; the limit is {MAX_EVIDENCE_UNITS}"
+            )
+        computed = acceptance_revision([item.model_dump() for item in self.items])
+        if self.revision != computed:
+            raise ValueError(
+                "Acceptance revision does not match its content; recompute it rather than editing it"
+            )
+        return self
+
+
+class AcceptanceRef(_ContractModel):
+    """Points at one criterion or one of its obligations, at an exact revision."""
+
+    set_id: _ArtifactId
+    revision: _Sha256
+    criterion_id: _AcceptanceId
+    obligation_id: _AcceptanceId | None = None
 
 
 class TaskScope(_ContractModel):
@@ -137,6 +284,21 @@ class VerificationCheck(_ContractModel):
         default=None,
         description="Explicit current input identity. History from other bytes remains recorded but is not a current result; omitted scope keeps ambiguous failures unresolved.",
     )
+    acceptance_refs: list[AcceptanceRef] = Field(
+        default_factory=list,
+        max_length=200,
+        description="Which declared criteria or obligations this check is intended to exercise. An assertion of intent, never of execution or sufficiency.",
+    )
+
+    @model_validator(mode="after")
+    def unique_refs(self) -> Self:
+        seen = [
+            (ref.set_id, ref.revision, ref.criterion_id, ref.obligation_id)
+            for ref in self.acceptance_refs
+        ]
+        if len(set(seen)) != len(seen):
+            raise ValueError("Duplicate acceptance reference on one check")
+        return self
 
 
 class VerificationPlan(_ContractModel):
@@ -145,6 +307,14 @@ class VerificationPlan(_ContractModel):
     stage: Literal["targeted", "candidate", "integration"] = "targeted"
     checks: list[VerificationCheck] = Field(default_factory=list, max_length=50)
     preparation_seconds: int = Field(default=0, ge=0, le=7200)
+    acceptance_coverage: Literal["report_only", "require_current_evidence"] = Field(
+        default="report_only",
+        description="report_only surfaces gaps and refuses nothing. require_current_evidence additionally refuses a success report while a declared evidence unit lacks applicable current passing evidence.",
+    )
+    coverage_scope: CheckScope | None = Field(
+        default=None,
+        description="The output bytes this coverage assessment is about. A declaration, not an observation of the filesystem.",
+    )
 
     @model_validator(mode="after")
     def unique_checks(self) -> Self:
@@ -177,6 +347,20 @@ class TaskContract(_ContractModel):
     context_options: ContextOptions = Field(default_factory=ContextOptions)
     requirements: TaskRequirements = Field(default_factory=TaskRequirements)
     verification: VerificationPlan | None = None
+    acceptance_set: AcceptanceSet | None = Field(
+        default=None,
+        description="Optional structured form of the same acceptance list: its texts must repeat acceptance exactly, so there is never a second source of truth.",
+    )
+
+    @model_validator(mode="after")
+    def acceptance_set_matches(self) -> Self:
+        if self.acceptance_set is not None and [
+            item.text for item in self.acceptance_set.items
+        ] != list(self.acceptance):
+            raise ValueError(
+                "acceptance_set items must repeat the acceptance list exactly, in order"
+            )
+        return self
 
 
 class WorkPolicy(_ContractModel):
@@ -197,6 +381,20 @@ class TurnContract(_ContractModel):
     context_options: ContextOptions = Field(default_factory=ContextOptions)
     requirements: TaskRequirements = Field(default_factory=TaskRequirements)
     verification: VerificationPlan | None = None
+    acceptance_set: AcceptanceSet | None = Field(
+        default=None,
+        description="Optional structured form of the same acceptance list: its texts must repeat acceptance exactly, so there is never a second source of truth.",
+    )
+
+    @model_validator(mode="after")
+    def acceptance_set_matches(self) -> Self:
+        if self.acceptance_set is not None and [
+            item.text for item in self.acceptance_set.items
+        ] != list(self.acceptance):
+            raise ValueError(
+                "acceptance_set items must repeat the acceptance list exactly, in order"
+            )
+        return self
 
 
 class RuleReference(_ContractModel):
@@ -255,6 +453,15 @@ class CheckRun(_ContractModel):
     result: Literal["passed", "failed", "not_run"]
     output_artifact_id: _ArtifactId | None = None
     provenance: _Provenance = "participant_reported"
+    check_revision: _Sha256 | None = Field(
+        default=None,
+        description="Identity of the check declaration this run observed. A later edit to that declaration leaves this run as history rather than current credit.",
+    )
+    acceptance_refs: list[AcceptanceRef] = Field(
+        default_factory=list,
+        max_length=200,
+        description="What this observation claims to exercise. Recorded with the run, never attached to it afterwards.",
+    )
     supersedes: _ArtifactId | None = Field(
         default=None,
         description="Earlier run_id this run replaces; honoured only for the same criterion, role, bytes, command and environment.",
@@ -273,6 +480,12 @@ class CheckRun(_ContractModel):
             raise ValueError("ended_at precedes started_at")
         if self.supersedes == self.run_id:
             raise ValueError("a run cannot supersede itself")
+        seen = [
+            (ref.set_id, ref.revision, ref.criterion_id, ref.obligation_id)
+            for ref in self.acceptance_refs
+        ]
+        if len(set(seen)) != len(seen):
+            raise ValueError("Duplicate acceptance reference on one run")
         return self
 
 
@@ -299,6 +512,10 @@ class _OutcomeBase(_ContractModel):
         default_factory=list,
         max_length=200,
         description="Up to 200 executed check runs recorded append-only alongside this report, including failed attempts and retries. Participant reports are recorded as participant_reported.",
+    )
+    verification_scope: CheckScope | None = Field(
+        default=None,
+        description="The output bytes this report's evidence is about, when they were not known at launch. A declaration by the reporter, not proof that these are the current bytes.",
     )
 
     @model_validator(mode="after")

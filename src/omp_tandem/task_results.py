@@ -5,9 +5,10 @@ import sqlite3
 import time
 from contextlib import closing
 
+from .acceptance import project
 from .artifacts import ArtifactStore
 from .execution import conversation_usage, failure_fact, task_usage
-from .models import CheckRun, assess_checks
+from .models import AcceptanceSet, CheckRun, VerificationPlan, assess_checks
 from .project_context import ProjectContextStore
 from .runtime_identity import runtime_identity
 from .runtime_models import ACTIVE
@@ -169,6 +170,27 @@ class TaskResults:
             current_checks = assess_verification(verification, runs)
             current_checks["unreadable_records"] = unreadable
             result["verification"] = current_checks
+        declared = contract.get("acceptance_set")
+        if attempt is not None:
+            # A work attempt owns its own plan and denominator; saying anything about
+            # coverage here would be a claim about a set this task never declared.
+            result["acceptance_coverage"] = {
+                "schema_version": 1,
+                "assessment": "unsupported_surface",
+                "reason": "work_binding_not_supported",
+                "subject": {"kind": "task", "task_id": task_id},
+                "admission": "not_enforced",
+                "semantic_sufficiency": "not_assessed",
+                "acceptance": "not_assessed",
+            }
+        else:
+            result["acceptance_coverage"] = project(
+                AcceptanceSet.model_validate(declared) if declared else None,
+                VerificationPlan.model_validate(verification) if verification else None,
+                runs,
+                task_id=task_id,
+                report_scope=(report or {}).get("verification_scope"),
+            )
         result["facts"] = self._facts(
             task_id, task, status, report, current_checks, attempt
         )

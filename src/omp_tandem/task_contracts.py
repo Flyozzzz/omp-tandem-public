@@ -59,8 +59,18 @@ def current_task(task):
         "requirements": TaskRequirements.model_validate(
             contract.get("requirements", {})
         ).model_dump(mode="json"),
+        "acceptance_set": contract.get("acceptance_set"),
         "verification": (
-            {"stage": verification.stage, **verification_requirements(verification)}
+            {
+                "stage": verification.stage,
+                # The worker is judged against these, so it has to be told them:
+                # the policy it must satisfy and the bytes the evidence is about.
+                "acceptance_coverage": verification.acceptance_coverage,
+                "coverage_scope": verification.coverage_scope.model_dump(mode="json")
+                if verification.coverage_scope
+                else None,
+                **verification_requirements(verification),
+            }
             if verification is not None
             else None
         ),

@@ -17,6 +17,8 @@ from fastmcp.exceptions import ToolError
 
 from omp_tandem.api import build_server
 from omp_tandem.bridge import Bridge
+from omp_tandem.models import acceptance_revision
+from omp_tandem.task_contracts import current_task
 from tests.helpers import RpcHarness
 
 
@@ -173,6 +175,95 @@ class CollaborationTests(RpcHarness):
                 "tandem_result", task_id=job["task_id"], wait_seconds=value
             )
             self.assertEqual(result["status"], "completed")
+
+    async def test_an_ordinary_result_says_coverage_was_never_declared(self):
+        job = await self.start("paragraph")
+        result = await self.result(job["task_id"])
+        coverage = result["acceptance_coverage"]
+        # Saying nothing would leave a reader unable to tell "not declared" from
+        # "declared and empty"; inventing rows would accuse a caller of nothing.
+        self.assertEqual(coverage["assessment"], "not_declared")
+        self.assertEqual(coverage["reason"], "acceptance_set_absent")
+        self.assertIsNone(coverage["denominator"])
+        self.assertNotIn("units", coverage)
+        self.assertEqual(coverage["semantic_sufficiency"], "not_assessed")
+        self.assertEqual(coverage["acceptance"], "not_assessed")
+
+    async def test_the_worker_is_told_what_it_will_be_judged_against(self):
+        items = [{"id": "AC-1", "text": "one thing", "obligations": []}]
+        revision = acceptance_revision(items)
+        contract = {
+            "goal": "do the thing",
+            "acceptance": ["one thing"],
+            "acceptance_set": {
+                "set_id": str(uuid4()),
+                "revision": revision,
+                "items": items,
+            },
+            "verification": {
+                "checks": [
+                    {
+                        "id": "only",
+                        "criterion": "one thing holds",
+                        "acceptance_refs": [
+                            {
+                                "set_id": "00000000-0000-4000-8000-000000000000",
+                                "revision": revision,
+                                "criterion_id": "AC-1",
+                                "obligation_id": None,
+                            }
+                        ],
+                    }
+                ],
+                "acceptance_coverage": "require_current_evidence",
+                "coverage_scope": {"kind": "commit", "digest": "a" * 40},
+            },
+        }
+        contract["verification"]["checks"][0]["acceptance_refs"][0]["set_id"] = (
+            contract["acceptance_set"]["set_id"]
+        )
+        packet = current_task(
+            {"contract_json": json.dumps(contract), "prompt": "do the thing"}
+        )
+        # Obligation texts, the policy and the target bytes all reach the worker:
+        # it is judged against them, so withholding them would be a trap.
+        self.assertEqual(packet["acceptance_set"]["items"], items)
+        self.assertEqual(
+            packet["verification"]["acceptance_coverage"], "require_current_evidence"
+        )
+        self.assertEqual(
+            packet["verification"]["coverage_scope"],
+            {"kind": "commit", "digest": "a" * 40, "boundaries": []},
+        )
+
+    async def test_a_scope_survives_storage_and_the_result_still_projects(self):
+        items = [{"id": "AC-1", "text": "one thing", "obligations": []}]
+        job = await self.call(
+            "tandem_start",
+            cwd=str(self.root),
+            mode="think",
+            timeout_seconds=10,
+            contract={
+                "goal": "scoped-report",
+                "acceptance": ["one thing"],
+                "acceptance_set": {
+                    "set_id": str(uuid4()),
+                    "revision": acceptance_revision(items),
+                    "items": items,
+                },
+            },
+        )
+        result = await self.result(job["task_id"])
+        self.assertEqual(result["outcome"], "success")
+        # The report is stored as JSON and read back as a dict. With a declared set
+        # the projection reads that scope, which is the path that used to raise.
+        coverage = result["acceptance_coverage"]
+        self.assertEqual(coverage["assessment"], "assessed")
+        self.assertEqual(coverage["target"]["source"], "report_declared")
+        self.assertEqual(coverage["target"]["scope"]["digest"], "a" * 40)
+        self.assertEqual(coverage["denominator"]["evidence_units"], 1)
+        self.assertEqual(coverage["units"][0]["mapping"], "unmapped")
+        self.assertEqual(coverage["acceptance"], "not_assessed")
 
     async def test_missing_report_cannot_be_claimed_as_success(self):
         job = await self.start("missing-report")

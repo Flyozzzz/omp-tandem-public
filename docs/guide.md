@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Package 3.9.1 (released 2026-09-16)** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Package 3.10.0 (released 2026-09-16)** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -728,6 +728,36 @@ Paths must belong to the admitted Git root; nested repository/worktree/symlink b
 The check ladder is cumulative: `candidate` includes targeted checks, `integration` includes all three phases. Declared preparation plus known estimates cannot exceed the whole task deadline; missing estimates remain unknown. Commands are not executed by preflight. A successful final report for an explicit ladder needs every selected `check_id`, its `run_id`, and a current passing entry in `check_runs`; history keeps earlier failures. A passed review task still does not accept a shared submission.
 
 For a known current candidate, a check may declare `scope: {"kind":"tree|commit|archive|content","digest":"..."}` using the existing CheckScope type (choose one actual kind). Other-byte runs stay in the audit history but are not current evidence. Without an explicit scope, ambiguous different-input failures remain unresolved. All current criterion/role groups must pass; a claimed pass cannot hide another role's current failure. `result.verification` and `facts.checks` assess the declared current inputs, while `check_runs` retains the unscoped history. Reports permit at most 200 run records for up to 50 declared checks; overflow is refused, never silently trimmed.
+
+### Declared acceptance evidence
+
+A green check list can sit beside requirements nobody exercised: the checks are the ones somebody remembered to declare, and they are their own denominator. `acceptance_set` makes the declared criteria the denominator instead.
+
+Give the contract the same acceptance list in structured form — the texts must repeat `acceptance` exactly, in order, so there is never a second source of truth — and give each criterion a stable `id`. A criterion whose content is several clauses declares them as `obligations`, each with its own `id`, text and the exact `environment` it is owed in:
+
+```json
+{"acceptance": ["A checked demo task is struck through, lands at its insertion position, the counters recalculate, and the total is unchanged."],
+ "acceptance_set": {"set_id": "<uuid>", "revision": "<sha256 of the items>", "items": [
+   {"id": "AC-FR01-04", "text": "A checked demo task is struck through, lands at its insertion position, the counters recalculate, and the total is unchanged.",
+    "obligations": [{"id": "strike", "text": "struck through", "environment": {"browser": "webkit"}},
+                    {"id": "position", "text": "lands at its insertion position"},
+                    {"id": "counters", "text": "the counters recalculate"},
+                    {"id": "total", "text": "the total does not change"}]}]}}
+```
+
+That criterion is **four** evidence units, not one. A `VerificationCheck` names what it intends to exercise through `acceptance_refs`, many-to-many, and a mapping of the parent criterion credits none of its declared obligations — otherwise one check against a four-clause criterion would read as covered.
+
+The revision is the content of the set, not a version number you choose: editing a criterion's text changes it, and evidence recorded against the old revision stays visible as history rather than current credit. A check carries the same idea: `check_revision` binds a run to the declaration it observed, so changing a command or a mapping does not keep the old credit.
+
+`result.acceptance_coverage` reports one row per unit, keeping apart what is genuinely different: a unit nobody mapped, a mapped check the ladder did not select, a selected check with no run at all, a run that explicitly says `not_run`, a current failure, a pass against other bytes, a run whose environment differs from the one required, a run whose environment was never recorded (unknown, not a match), a stale check revision, and a run of a mapped check that recorded no mapping. These are not mutually exclusive: one unit really can have a declaration, a current failure and an older passing run at once.
+
+`acceptance_coverage: "require_current_evidence"` on the plan turns that picture into admission: a success report is refused while any declared unit lacks an applicable current passing run. The default stays `report_only`, which refuses nothing. A strict request without a declared set is refused rather than quietly downgraded, and an empty set reports `not_assessable` rather than vacuous eligibility.
+
+A task that declares no set is reported as `assessment: "not_declared"`, with the number of acceptance strings for orientation and no denominator. It is not reported as zero coverage: inventing identities for plain strings would accuse every existing caller of mappings it never made.
+
+**What this never claims.** The projection counts declarations and runs. It does not establish that a mapped check asserts the right behaviour, that the declared obligations exhaust the criterion, or that a passing run means the requirement is met — `semantic_sufficiency` and `acceptance` stay `not_assessed` in every response, including when every unit has a current pass. A participant can declare a mapping its test does not honour, and no schema detects that; the projection makes the assertion explicit and reviewable, which is a different thing from certifying it.
+
+In this release the feature is task-local. Work steps refuse these declarations with `acceptance_coverage_unsupported_surface` rather than accepting and ignoring them, and a task bound to a work attempt reports `assessment: "unsupported_surface"` instead of applying its own set to a plan it does not own. Carrying sets and immutable runs through work cards and review captures follows in 3.10.1.
 
 Shared steps have separate `requirements`/`verification` for implementation and `review_requirements`/`review_verification` for the reviewer. Review write requirements are invalid. A required shell check does not bypass snapshot-only review or an absent grant; unresolved checks must remain blocked/partial, not silently waived.
 

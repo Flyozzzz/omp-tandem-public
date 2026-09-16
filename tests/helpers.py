@@ -69,6 +69,9 @@ for line in sys.stdin:
             emit({'type': 'host_tool_call', 'id': 'bad_question', 'toolCallId': 'bad-question-call', 'toolName': 'tandem_ask', 'arguments': {'question': 'Too short?', 'timeout_seconds': 1}})
         elif scenario == 'blocked':
             finish({'outcome': 'blocked', 'summary': 'Missing credentials', 'answer': 'Provide credentials before deployment can proceed.', 'blockers': ['Credentials are required']})
+        elif scenario == 'scoped-report':
+            finish({'outcome': 'success', 'summary': 'Scoped evidence', 'answer': 'Recorded a run against named bytes.',
+                    'verification_scope': {'kind': 'commit', 'digest': 'a' * 40}})
         elif scenario == 'paragraph':
             finish({'outcome': 'success', 'summary': 'Paragraph prepared', 'answer': 'Поручайте независимый анализ; приёмку проверяйте сами.'})
         elif scenario == 'long-answer':
