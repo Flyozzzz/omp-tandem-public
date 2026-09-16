@@ -350,9 +350,10 @@ def build_server(configuration: Bridge | RuntimeOptions):
     ) -> dict:
         """Get the actual answer, work outcome and next_action. Questions return immediately.
 
-        wait_seconds: 0..1200. Ask for a long wait only when this client's own request
-        deadline outlives it; the server cannot deliver a response the client stopped
-        waiting for. wait_mode="auto" also returns as soon as event delivery covers this
+        wait_seconds: 0..1200, served in full by the server. A client may stop holding the
+        call in the foreground first, and what it does then differs by client: if it answers
+        that it moved the request to a background task, read that result instead of retrying;
+        one measured Claude Code run handed off at 120 seconds and delivered every result. wait_mode="auto" also returns as soon as event delivery covers this
         task; "bounded" waits for the task itself, which costs one call instead of many
         when the client cannot use the waiting time. Either way the wait is finite and
         cancellable, and expiry is reported in `wait`, never as a task state.
@@ -471,7 +472,8 @@ def build_server(configuration: Bridge | RuntimeOptions):
     ) -> dict:
         """Wait for ANY selected task to finish or ask a question, not for each in turn.
 
-        wait_seconds: 0..1200, bounded by this client's own request deadline. wait_mode
+        wait_seconds: 0..1200, served in full by the server; a client may stop holding the call in the
+        foreground first; if it says it moved the request to a background task, read that result. wait_mode
         works as in tandem_result: "auto" also returns once event delivery covers every
         pending task, "bounded" waits for one of them to become ready. Returns ready
         IDs/questions, not full answers. Read ready terminal results with tandem_result
