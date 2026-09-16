@@ -7,6 +7,7 @@ from pathlib import Path
 
 from pydantic import ConfigDict, Field
 
+from .observation import MAX_WAIT_SECONDS
 from .runtime_identity import runtime_identity
 from .work_items import (
     WorkCommand,
@@ -21,7 +22,8 @@ from .work_workspace import WorkWorkspace
 class WorkToolRequest(WorkPresentation):
     model_config = ConfigDict(extra="forbid")
     request: WorkCommand
-    wait_seconds: int = Field(default=0, ge=0, le=25)
+    wait_seconds: int = Field(default=0, ge=0, le=MAX_WAIT_SECONDS)
+    after_revision: int | None = Field(default=None, ge=0)
 
 
 def read_work_token(path: Path) -> str:

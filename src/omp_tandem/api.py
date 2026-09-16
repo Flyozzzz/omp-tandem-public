@@ -2,7 +2,6 @@
 
 # Eager annotations preserve model types in FastMCP's Context-injection wrappers.
 import asyncio
-import time
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
@@ -15,6 +14,7 @@ from .channel import ChannelFastMCP
 from .execution import ExecutionOptions, profile_catalog
 from .findings import FindingChange, FindingDraft
 from .models import ArtifactInfo, ConversationHandoff, TaskContract, TurnContract
+from .observation import MAX_WAIT_SECONDS, Observation
 from .project_context import ContextReadRequest, ProjectContext, read_task_context
 from .prompts import coordinator_instructions
 from .reviews import PublicationBusy, ReviewRequest, publication_lock
@@ -79,7 +79,8 @@ def build_server(configuration: Bridge | RuntimeOptions):
     async def tandem_work(
         request: WorkCommand,
         ctx: Context,
-        wait_seconds: Annotated[int, Field(ge=0, le=25)] = 0,
+        wait_seconds: Annotated[int, Field(ge=0, le=MAX_WAIT_SECONDS)] = 0,
+        after_revision: Annotated[int | None, Field(ge=0)] = None,
         view: Literal["summary", "plan", "step", "full"] = "summary",
         format: Literal["json", "markdown"] = "json",
         limit: Annotated[int, Field(ge=1, le=200)] = 50,
@@ -99,6 +100,9 @@ def build_server(configuration: Bridge | RuntimeOptions):
         Progress defaults to a bounded summary. Follow returned section/cursor
         pointers for omitted material; choose plan/step/full only when needed.
         Waiting observes committed changes, not permission to start an agent.
+        Give after_revision the revision you last read: a card already past it returns at
+        once instead of waiting for the next change. It is an observation baseline, never
+        expected_revision, a claim, or permission to replay work.
         Autonomous grants and uncertain-attempt reconciliation are operator CLI actions.
         """
         bridge = await runtime.get(ctx)
@@ -112,14 +116,33 @@ def build_server(configuration: Bridge | RuntimeOptions):
             include_snapshots=include_snapshots,
             section=section,
         )
+        observation, reason = Observation(wait_seconds), None
+        if after_revision is not None and not (
+            wait_seconds and request.action == "get" and request.work_id
+        ):
+            raise ValueError(
+                "after_revision only qualifies a waiting get of one work_id"
+            )
         if wait_seconds and request.action == "get" and request.work_id:
+            # The read is authorized before the baseline is compared, so an
+            # observation baseline can never disclose a card this seat cannot read.
             state = await asyncio.to_thread(bridge.work_observation, request)
-            deadline = time.monotonic() + wait_seconds
-            while time.monotonic() < deadline:
-                await asyncio.sleep(min(0.2, max(0, deadline - time.monotonic())))
+            observation.observed()
+            if after_revision is not None:
+                if after_revision > state["revision"]:
+                    raise ValueError(
+                        f"after_revision {after_revision} is ahead of the current "
+                        f"revision {state['revision']}; reread the card"
+                    )
+                if after_revision < state["revision"]:
+                    reason = "revision_changed"
+            while reason is None and not observation.expired:
+                await observation.pause()
                 observed = await asyncio.to_thread(bridge.work_observation, request)
+                observation.observed()
                 if observed != state:
-                    break
+                    reason = "revision_changed"
+            reason = reason or "deadline_elapsed"
         result = await asyncio.to_thread(bridge.work, request, presentation=options)
         # Each session observes the same durable card; channel delivery only hints.
         result["delivery"] = bridge.channel.delivery
@@ -127,7 +150,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
             "Read current shared-task state after a wake. Use bounded tandem_work get "
             "waiting when idle; do not replay claims or launches. Explicit pause remains sticky."
         )
-        return result
+        return result if reason is None else observation.record(result, reason)
 
     if restricted_work:
 
@@ -321,35 +344,53 @@ def build_server(configuration: Bridge | RuntimeOptions):
     async def tandem_result(
         task_id: str,
         ctx: Context,
-        wait_seconds: Annotated[int, Field(ge=0, le=25)] = 0,
+        wait_seconds: Annotated[int, Field(ge=0, le=MAX_WAIT_SECONDS)] = 0,
         details: bool = False,
+        wait_mode: Literal["auto", "bounded"] = "auto",
     ) -> dict:
         """Get the actual answer, work outcome and next_action. Questions return immediately.
 
-        wait_seconds: 0..25. completed is turn completion, not proof of success.
-        answer holds the requested text; summary only describes the work. When answer_truncated,
-        read answer_artifact_id. details=true includes the full answer/report/contract/diagnostics.
+        wait_seconds: 0..1200. Ask for a long wait only when this client's own request
+        deadline outlives it; the server cannot deliver a response the client stopped
+        waiting for. wait_mode="auto" also returns as soon as event delivery covers this
+        task; "bounded" waits for the task itself, which costs one call instead of many
+        when the client cannot use the waiting time. Either way the wait is finite and
+        cancellable, and expiry is reported in `wait`, never as a task state.
+        completed is turn completion, not proof of success. answer holds the requested
+        text; summary only describes the work. When answer_truncated, read
+        answer_artifact_id. details=true includes the full answer/report/contract/diagnostics.
         """
         bridge = await runtime.get(ctx)
         await bridge.channel.bind(ctx)
-        deadline = time.monotonic() + wait_seconds
+        observation = Observation(wait_seconds, wait_mode)
         while True:
             task = await asyncio.to_thread(bridge.tasks.get, task_id)
-            if (
-                task["status"] == "waiting_input"
-                or task["status"] not in ACTIVE
-                or bridge.channel.can_await([task_id])
-                or time.monotonic() >= deadline
-            ):
-                result = await asyncio.to_thread(bridge.view, task_id, details)
-                await asyncio.to_thread(
-                    bridge.channel.seen,
-                    task_id,
-                    result["status"],
-                    result.get("question", {}).get("question_id"),
-                )
-                return bridge.channel.decorate(result)
-            await asyncio.sleep(0.15)
+            observation.observed()
+            if task["status"] == "waiting_input":
+                reason = "question"
+            elif task["status"] not in ACTIVE:
+                reason = "terminal"
+            elif observation.follows_delivery and bridge.channel.can_await([task_id]):
+                reason = "event_delivery_available"
+            elif observation.expired:
+                reason = "deadline_elapsed"
+            else:
+                await observation.pause()
+                continue
+            result = await asyncio.to_thread(bridge.view, task_id, details)
+            # A task that ends while the response is being built has ended; the
+            # predicate that released the wait must not outrank what was read.
+            if result["status"] == "waiting_input":
+                reason = "question"
+            elif result["status"] not in ACTIVE:
+                reason = "terminal"
+            await asyncio.to_thread(
+                bridge.channel.seen,
+                task_id,
+                result["status"],
+                result.get("question", {}).get("question_id"),
+            )
+            return bridge.channel.decorate(observation.record(result, reason))
 
     @mcp.tool()
     async def tandem_reply(
@@ -425,26 +466,36 @@ def build_server(configuration: Bridge | RuntimeOptions):
     async def tandem_wait(
         task_ids: Annotated[list[str], Field(min_length=1, max_length=32)],
         ctx: Context,
-        wait_seconds: Annotated[int, Field(ge=0, le=25)] = 20,
+        wait_seconds: Annotated[int, Field(ge=0, le=MAX_WAIT_SECONDS)] = 20,
+        wait_mode: Literal["auto", "bounded"] = "auto",
     ) -> dict:
-        """Wait for ANY selected task to finish or ask a question, not 25s per task.
+        """Wait for ANY selected task to finish or ask a question, not for each in turn.
 
-        Returns ready IDs/questions, not full answers. Read ready terminal results with tandem_result
+        wait_seconds: 0..1200, bounded by this client's own request deadline. wait_mode
+        works as in tandem_result: "auto" also returns once event delivery covers every
+        pending task, "bounded" waits for one of them to become ready. Returns ready
+        IDs/questions, not full answers. Read ready terminal results with tandem_result
         and remove them from later wait sets; reply directly to a returned question. Does not
         acknowledge terminal events or rerun work. Await events only with a live independent watchdog.
         """
         bridge = await runtime.get(ctx)
         await bridge.channel.bind(ctx)
-        deadline = time.monotonic() + wait_seconds
+        observation = Observation(wait_seconds, wait_mode)
         while True:
             result = await asyncio.to_thread(bridge.wait_snapshot, task_ids)
-            if (
-                result["ready"]
-                or bridge.channel.can_await(result["pending"])
-                or time.monotonic() >= deadline
+            observation.observed()
+            if result["ready"]:
+                reason = "ready"
+            elif observation.follows_delivery and bridge.channel.can_await(
+                result["pending"]
             ):
-                return bridge.channel.decorate(result)
-            await asyncio.sleep(0.15)
+                reason = "event_delivery_available"
+            elif observation.expired:
+                reason = "deadline_elapsed"
+            else:
+                await observation.pause()
+                continue
+            return bridge.channel.decorate(observation.record(result, reason))
 
     @mcp.tool()
     async def tandem_project_context(
@@ -609,7 +660,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
     @mcp.tool()
     async def tandem_review(
         ctx: Context,
-        action: Literal["create", "read", "assess"],
+        action: Literal["create", "prepare", "read", "assess"],
         request: ReviewRequest | None = None,
         review_id: str | None = None,
         section: Literal[
@@ -636,12 +687,19 @@ def build_server(configuration: Bridge | RuntimeOptions):
         to a think task for snapshot-only review. Author rationale is withheld unless explicitly
         revealed in a comparison turn. Read pages by next_offset, not the live working directory.
         assess reports applicability at observation time, not whole-system correctness.
+        prepare classifies the same request without saving anything: it reports every
+        repairable selection conflict at once and proposes the corrected paths, which
+        the caller decides whether to apply. It reserves nothing, so capture classifies
+        the files again and a repaired request is a new request, not a retry.
         """
         bridge = await runtime.get(ctx)
-        if action == "create":
+        if action in ("create", "prepare"):
             if request is None or review_id is not None:
-                raise ValueError("create requires request and no review_id")
-            return await asyncio.to_thread(bridge.reviews.create, request)
+                raise ValueError(f"{action} requires request and no review_id")
+            worker = (
+                bridge.reviews.create if action == "create" else bridge.reviews.prepare
+            )
+            return await asyncio.to_thread(worker, request)
         if review_id is None or request is not None:
             raise ValueError("read/assess require review_id and no request")
         if action == "assess":
@@ -668,7 +726,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
         execution: ExecutionOptions | None = None,
         budget_seconds: Annotated[int | None, Field(ge=10, le=7200)] = None,
         compare: bool | None = None,
-        wait_seconds: Annotated[int, Field(ge=0, le=25)] = 25,
+        wait_seconds: Annotated[int, Field(ge=0, le=MAX_WAIT_SECONDS)] = 25,
         question_id: str | None = None,
         answer: Annotated[str | None, Field(min_length=1, max_length=60000)] = None,
     ) -> dict:
@@ -734,16 +792,20 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 raise ValueError("Question fields are only valid for reply")
             elif action == "cancel":
                 await asyncio.to_thread(bridge.review_runs.cancel, run_id)
-        deadline = time.monotonic() + wait_seconds
+        observation, reason = Observation(wait_seconds), None
         while action != "cancel":
             status = await asyncio.to_thread(bridge.review_runs.state, run_id)
-            if (
-                status == "waiting_input"
-                or status not in ACTIVE
-                or time.monotonic() >= deadline
-            ):
-                break
-            await asyncio.sleep(0.15)
+            observation.observed()
+            if status == "waiting_input":
+                reason = "question"
+            elif status not in ACTIVE:
+                reason = "terminal"
+            elif observation.expired:
+                reason = "deadline_elapsed"
+            else:
+                await observation.pause()
+                continue
+            break
         result = await asyncio.to_thread(bridge.review_runs.view, run_id)
         await asyncio.to_thread(
             _review_seen,
@@ -772,12 +834,18 @@ def build_server(configuration: Bridge | RuntimeOptions):
             for field in ("independent", "comparison", "findings"):
                 result.pop(field, None)
             result["full_result_pending"] = True
+        if reason is not None:
+            if result["status"] == "waiting_input":
+                reason = "question"
+            elif result["status"] not in ACTIVE:
+                reason = "terminal"
+            observation.record(result, reason)
         return bridge.channel.decorate(result)
 
     @mcp.tool()
     async def tandem_findings(
         ctx: Context,
-        action: Literal["create", "update", "get", "list"],
+        action: Literal["create", "update", "get", "list", "pin", "project"],
         conversation_id: str | None = None,
         review_id: str | None = None,
         finding_id: str | None = None,
@@ -788,15 +856,30 @@ def build_server(configuration: Bridge | RuntimeOptions):
         task_id: str | None = None,
         offset: Annotated[int, Field(ge=0)] = 0,
         limit: Annotated[int, Field(ge=1, le=200)] = 50,
+        set_id: str | None = None,
+        finding_ids: Annotated[list[str] | None, Field(max_length=100)] = None,
     ) -> dict:
         """Track version-bound review findings without rewriting their history.
 
         Validity and resolution are separate. A claimed fix is not verified; verify_fixed needs
         evidence and a completed verification task for its snapshot. Update requires the current
         expected_revision. Get by stable finding_id or conversation_id plus human number.
+        pin fixes the membership of a correction set for review_id once, so closure can be
+        answered later; a live list cannot, because closing a finding removes it from the list.
+        project reads what became of every pinned member of set_id, optionally against a target
+        review. It records dispositions and decides nothing: a claimed fix is still unverified,
+        and an accounted-for member is not a fix that holds.
         """
         bridge = await runtime.get(ctx)
         store = bridge.findings
+        if action == "pin":
+            if review_id is None:
+                raise ValueError("pin requires the review_id whose findings are pinned")
+            return await asyncio.to_thread(store.pin, review_id, finding_ids)
+        if action == "project":
+            if set_id is None:
+                raise ValueError("project requires set_id")
+            return await asyncio.to_thread(store.project, set_id, review_id)
         if action == "create":
             if conversation_id is None or review_id is None or finding is None:
                 raise ValueError(

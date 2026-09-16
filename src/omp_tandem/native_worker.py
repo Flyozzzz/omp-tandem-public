@@ -16,6 +16,7 @@ from .execution import (
     stop_record,
 )
 from .models import decode_outcome, outcome_schema, parse_outcome
+from .observation import CANCELLATION_CADENCE, step_interval
 from .project_context import ContextReadRequest, read_task_context
 from .prompts import WORKER_INSTRUCTIONS
 from .runtime_identity import register_schemas
@@ -100,12 +101,18 @@ class NativeWorker:
                             "Shared work is withheld during independent snapshot review; "
                             "read the pinned snapshot through tandem_review_read"
                         )
-                deadline = time.monotonic() + request.wait_seconds
-                if (
+                started = time.monotonic()
+                deadline = started + request.wait_seconds
+                waiting = (
                     request.request.action == "get"
                     and request.wait_seconds
                     and request.request.work_id
-                ):
+                )
+                if request.after_revision is not None and not waiting:
+                    raise ValueError(
+                        "after_revision only qualifies a waiting get of one work_id"
+                    )
+                if waiting:
                     token = observation_token(
                         self.work_items,
                         request.request,
@@ -119,10 +126,32 @@ class NativeWorker:
                         attempt_token=token,
                         step_id=request.request.step_id,
                     )
-                    while time.monotonic() < deadline:
+                    seen = request.after_revision
+                    if seen is not None and seen > state["revision"]:
+                        raise ValueError(
+                            f"after_revision {seen} is ahead of the current "
+                            f"revision {state['revision']}; reread the card"
+                        )
+                    # A revision committed before this call already answers it.
+                    while seen is None or seen >= state["revision"]:
+                        if time.monotonic() >= deadline:
+                            break
+                        step = (
+                            step_interval(time.monotonic() - started)
+                            if request.wait_seconds > 30
+                            else CANCELLATION_CADENCE
+                        )
+                        until = min(time.monotonic() + step, deadline)
+                        # Reads may be deferred as the wait lengthens; noticing
+                        # that the caller has gone may not.
+                        while time.monotonic() < until:
+                            if context.cancelled:
+                                raise Cancelled()
+                            time.sleep(
+                                min(CANCELLATION_CADENCE, until - time.monotonic())
+                            )
                         if context.cancelled:
                             raise Cancelled()
-                        time.sleep(min(0.2, max(0, deadline - time.monotonic())))
                         if self.work_items.progress(request.request.work_id) != state:
                             break
                 result = perform_work(

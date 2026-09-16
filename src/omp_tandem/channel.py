@@ -239,6 +239,9 @@ class ChannelDelivery:
 
     def decorate(self, result):
         task_id, status = result.get("task_id"), result.get("status")
+        # A caller that asked to wait inside the call is told to wait that way
+        # again, rather than handed back to delivery it deliberately declined.
+        bounded = result.get("wait", {}).get("mode") == "bounded"
         if self.watchdog is not None and task_id and status:
             self.watchdog.observe(task_id, status)
         ids = list(result.get("pending", []))
@@ -247,7 +250,7 @@ class ChannelDelivery:
         result["delivery"] = self.delivery
         result["delivery_instructions"] = self.delivery_instructions
         result["watchdog"] = self._watchdog_metadata(ids)
-        automatic = self.can_await(ids)
+        automatic = self.can_await(ids) and not bounded
         if "ready" in result and "pending" in result:
             result["next_action"] = (
                 "handle_ready"

@@ -38,6 +38,18 @@ class PublicationBusy(RuntimeError):
     """A controller operation must yield to an atomic snapshot publication."""
 
 
+class SelectionConflict(ValueError):
+    """The declared selection can be repaired by its caller; nothing was published.
+
+    The repair is described, never applied: which files are reviewed is the
+    caller's decision, and silently widening it would change what was reviewed.
+    """
+
+    def __init__(self, message: str, diagnostics: dict):
+        super().__init__(message)
+        self.diagnostics = diagnostics
+
+
 @contextmanager
 def publication_lock(scope: ProjectScope, *, blocking=True):
     """Serialize publication with controller writes, without waiting in its guard."""
@@ -702,6 +714,38 @@ class ReviewStore:
             mode,
         )
 
+    @staticmethod
+    def _conflicts(request, identity, conflicts, complete):
+        """Describe the repair; applying it stays the caller's decision."""
+        paths = sorted({item["path"] for item in conflicts})
+        normalized = request.model_dump()
+        for key in ("paths", "context_paths"):
+            if normalized[key] is not None:
+                normalized[key] = sorted(set(normalized[key]))
+        return {
+            "code": "selection_conflict",
+            "scope": "declared_selection",
+            "observed_at": time.time(),
+            "request_fingerprint": _sha(_json(normalized).encode()),
+            "source": request.source,
+            "requested_base": request.base,
+            "resolved_base": identity.get("base_commit"),
+            # False means the scan stopped early, so this is not the whole account.
+            "complete": complete,
+            "conflicts": sorted(conflicts, key=lambda item: item["path"]),
+            "proposed_selection_patch": {
+                "add_to_paths": paths,
+                "remove_from_context_paths": paths,
+            }
+            if complete
+            else None,
+            "patch_applied": False,
+            "capture_published": False,
+            "worker_started": False,
+            "requires_new_request_key": True,
+            "requires_revalidation": True,
+        }
+
     def _capture(
         self, request: ReviewRequest, directory: str = ""
     ) -> tuple[dict, list[tuple[str, str, bytes]]]:
@@ -722,94 +766,123 @@ class ReviewStore:
             if request.source == "commit"
             else {}
         )
-        for path in paths:
-            if request.source == "worktree":
-                selected, mode, signature = self._working(path, directory)
-                observed[path] = (selected, mode, signature)
-            base, base_mode = self._blob(tree.get(path), directory)
-            stages = index.get(path, []) if request.source != "commit" else []
-            if len(stages) > 1 or (stages and stages[0][2] != "0"):
-                raise ValueError(f"Unmerged index entry cannot be certified: {path}")
-            staged, staged_mode = self._blob(stages[0] if stages else None, directory)
-            if request.source == "staged":
-                selected, mode = staged, staged_mode
-            if request.source == "commit":
-                selected, mode = self._blob(commit_tree.get(path), directory)
-            if path in context_paths and selected is None:
-                raise ValueError(
-                    f"Required context is missing from the {request.source} source: {path}; "
-                    "provide an explicit expanded capture before review"
-                )
-            if selected is None and base is None and staged is None:
-                raise ValueError(
-                    f"Selected file does not exist in the {request.source} source or base: {path}"
-                )
-            row = {
-                "path": path,
-                "selected": _descriptor(selected, mode),
-                "base": _descriptor(base, base_mode),
-                "staged": _descriptor(staged, staged_mode),
-            }
-            row["change"] = (
-                "added"
-                if base is None
-                else "deleted"
-                if selected is None
-                else "unchanged"
-                if (selected, mode) == (base, base_mode)
-                else "modified"
-            )
-            if (
-                identity["kind"] == "git"
-                and path not in selected_paths
-                and row["change"] != "unchanged"
-            ):
-                raise ValueError(
-                    f"Context path has changes: {path}; include it in paths to review those changes"
-                )
-            row["role"] = (
-                "change"
-                if path in selected_paths and row["change"] != "unchanged"
-                else "context"
-            )
-            files.append(row)
-            for section, data in (
-                ("selected", selected),
-                ("base", base),
-                ("staged", staged),
-            ):
-                if data is not None:
-                    total += len(data)
-                    if total > _MAX_TOTAL:
-                        raise ValueError("Review content exceeds 16 MiB")
-                    contents.append((section, path, data))
-            if row["role"] == "change":
-                diff.append(
-                    f"File: {path}\nModes: {base_mode or 'absent'} -> {mode or 'absent'}\n"
-                )
-                try:
-                    old, new = (
-                        (base or b"").decode("utf-8"),
-                        (selected or b"").decode("utf-8"),
+        # Every repairable conflict in one pass: the caller should not discover
+        # them one refused capture at a time.
+        conflicts = []
+        try:
+            for path in paths:
+                if request.source == "worktree":
+                    selected, mode, signature = self._working(path, directory)
+                    observed[path] = (selected, mode, signature)
+                base, base_mode = self._blob(tree.get(path), directory)
+                stages = index.get(path, []) if request.source != "commit" else []
+                if len(stages) > 1 or (stages and stages[0][2] != "0"):
+                    raise ValueError(
+                        f"Unmerged index entry cannot be certified: {path}"
                     )
-                    if "\0" in old or "\0" in new:
-                        raise UnicodeError
-                    for line in difflib.unified_diff(
-                        old.splitlines(keepends=True),
-                        new.splitlines(keepends=True),
-                        fromfile=f"base/{path}",
-                        tofile=f"selected/{path}",
-                    ):
-                        diff.append(
-                            line
-                            if line.endswith("\n")
-                            else line + "\n\\ No newline at end of file\n"
-                        )
-                    diff.append("\n")
-                except UnicodeError:
+                staged, staged_mode = self._blob(
+                    stages[0] if stages else None, directory
+                )
+                if request.source == "staged":
+                    selected, mode = staged, staged_mode
+                if request.source == "commit":
+                    selected, mode = self._blob(commit_tree.get(path), directory)
+                if path in context_paths and selected is None:
+                    raise ValueError(
+                        f"Required context is missing from the {request.source} source: {path}; "
+                        "provide an explicit expanded capture before review"
+                    )
+                if selected is None and base is None and staged is None:
+                    raise ValueError(
+                        f"Selected file does not exist in the {request.source} source or base: {path}"
+                    )
+                row = {
+                    "path": path,
+                    "selected": _descriptor(selected, mode),
+                    "base": _descriptor(base, base_mode),
+                    "staged": _descriptor(staged, staged_mode),
+                }
+                row["change"] = (
+                    "added"
+                    if base is None
+                    else "deleted"
+                    if selected is None
+                    else "unchanged"
+                    if (selected, mode) == (base, base_mode)
+                    else "modified"
+                )
+                if (
+                    identity["kind"] == "git"
+                    and path not in selected_paths
+                    and row["change"] != "unchanged"
+                ):
+                    conflicts.append(
+                        {
+                            "path": path,
+                            "code": "changed_context_path",
+                            "change": row["change"],
+                        }
+                    )
+                row["role"] = (
+                    "change"
+                    if path in selected_paths and row["change"] != "unchanged"
+                    else "context"
+                )
+                files.append(row)
+                for section, data in (
+                    ("selected", selected),
+                    ("base", base),
+                    ("staged", staged),
+                ):
+                    if data is not None:
+                        total += len(data)
+                        if total > _MAX_TOTAL:
+                            raise ValueError("Review content exceeds 16 MiB")
+                        contents.append((section, path, data))
+                if row["role"] == "change":
                     diff.append(
-                        f"Binary content; base sha256={row['base']['sha256']}; selected sha256={row['selected']['sha256']}\n"
+                        f"File: {path}\nModes: {base_mode or 'absent'} -> {mode or 'absent'}\n"
                     )
+                    try:
+                        old, new = (
+                            (base or b"").decode("utf-8"),
+                            (selected or b"").decode("utf-8"),
+                        )
+                        if "\0" in old or "\0" in new:
+                            raise UnicodeError
+                        for line in difflib.unified_diff(
+                            old.splitlines(keepends=True),
+                            new.splitlines(keepends=True),
+                            fromfile=f"base/{path}",
+                            tofile=f"selected/{path}",
+                        ):
+                            diff.append(
+                                line
+                                if line.endswith("\n")
+                                else line + "\n\\ No newline at end of file\n"
+                            )
+                        diff.append("\n")
+                    except UnicodeError:
+                        diff.append(
+                            f"Binary content; base sha256={row['base']['sha256']}; selected sha256={row['selected']['sha256']}\n"
+                        )
+        except _Mutation:
+            raise
+        except ValueError as exc:
+            # The scan stopped for something promotion cannot repair, so the
+            # conflicts found so far are not a complete account of the selection.
+            if not conflicts:
+                raise
+            raise SelectionConflict(
+                str(exc), self._conflicts(request, identity, conflicts, False)
+            ) from exc
+        if conflicts:
+            raise SelectionConflict(
+                "Context paths have changes: "
+                + "; ".join(item["path"] for item in conflicts)
+                + "; include them in paths to review those changes",
+                self._conflicts(request, identity, conflicts, True),
+            )
         # Both complete scans must agree, including identity and selection. No live
         # reads are needed later to reconstruct any section of this bundle.
         current_index = self._index(directory) if identity["kind"] == "git" else {}
@@ -1086,6 +1159,28 @@ class ReviewStore:
             with closing(self._connect()) as db:
                 db.execute("BEGIN")
                 self._corrective_context(db, request.corrective)
+
+    def prepare(self, request: ReviewRequest) -> dict:
+        """Classify the declared selection without publishing a snapshot.
+
+        This is a rehearsal, not a reservation: nothing is saved, no worker is
+        launched, and the real capture classifies the files again for itself.
+        """
+        if not isinstance(request, ReviewRequest):
+            request = ReviewRequest.model_validate(request)
+        with self._bind(request.review_directory):
+            try:
+                manifest, _ = self._capture(request, request.review_directory)
+            except SelectionConflict as conflict:
+                return conflict.diagnostics
+        roles = [row["role"] for row in manifest["files"]]
+        return {
+            **self._conflicts(request, manifest["git"], [], True),
+            "code": "selection_ready",
+            "proposed_selection_patch": None,
+            "change_count": roles.count("change"),
+            "context_count": roles.count("context"),
+        }
 
     def create(
         self, request: ReviewRequest, *, reservation: CaptureReservation | None = None

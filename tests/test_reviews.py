@@ -14,7 +14,12 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from omp_tandem.artifacts import ArtifactStore
-from omp_tandem.reviews import ReviewCheck, ReviewRequest, ReviewStore
+from omp_tandem.reviews import (
+    ReviewCheck,
+    ReviewRequest,
+    ReviewStore,
+    SelectionConflict,
+)
 from omp_tandem.workspace import resolve_scope
 
 
@@ -691,7 +696,7 @@ class ReviewTests(unittest.TestCase):
         self.initialize()
         (self.root / "tracked.txt").write_text("selected")
         (self.root / "deleted.txt").write_text("also changed")
-        with self.assertRaisesRegex(ValueError, "Context path has changes"):
+        with self.assertRaisesRegex(ValueError, "Context paths have changes"):
             self.create(paths=["tracked.txt"], context_paths=["deleted.txt"])
         with self.assertRaisesRegex(ValueError, "Required context is missing"):
             self.create(paths=["tracked.txt"], context_paths=["missing.txt"])
@@ -701,6 +706,76 @@ class ReviewTests(unittest.TestCase):
             paths=["tracked.txt", "deleted.txt"], context_paths=["deleted.txt"]
         )
         self.assertEqual(included["change_count"], 2)
+
+    def test_every_changed_context_path_is_reported_with_its_repair(self):
+        self.initialize()
+        (self.root / "second.txt").write_text("base\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "second")
+        (self.root / "tracked.txt").write_text("selected")
+        (self.root / "deleted.txt").write_text("also changed")
+        (self.root / "second.txt").write_text("changed too\n")
+        with self.assertRaises(SelectionConflict) as conflict:
+            self.create(
+                paths=["tracked.txt"],
+                context_paths=["deleted.txt", "second.txt"],
+            )
+        report = conflict.exception.diagnostics
+        # One refusal names every repairable path, not the first one found.
+        self.assertEqual(
+            [item["path"] for item in report["conflicts"]],
+            ["deleted.txt", "second.txt"],
+        )
+        self.assertEqual(
+            report["proposed_selection_patch"],
+            {
+                "add_to_paths": ["deleted.txt", "second.txt"],
+                "remove_from_context_paths": ["deleted.txt", "second.txt"],
+            },
+        )
+        self.assertTrue(report["complete"])
+        self.assertEqual(
+            (
+                report["patch_applied"],
+                report["capture_published"],
+                report["source"],
+            ),
+            (False, False, "worktree"),
+        )
+        repaired = self.create(
+            paths=["tracked.txt", *report["proposed_selection_patch"]["add_to_paths"]],
+            context_paths=[],
+        )
+        self.assertEqual(repaired["change_count"], 3)
+
+    def test_preparing_a_selection_publishes_nothing_and_still_reports_the_repair(self):
+        self.initialize()
+        (self.root / "tracked.txt").write_text("selected")
+        (self.root / "deleted.txt").write_text("also changed")
+        rehearsal = self.store.prepare(
+            ReviewRequest(
+                requirements="Preserve the original behavior",
+                paths=["tracked.txt"],
+                context_paths=["deleted.txt"],
+            )
+        )
+        self.assertEqual(rehearsal["code"], "selection_conflict")
+        self.assertEqual(
+            rehearsal["proposed_selection_patch"]["add_to_paths"], ["deleted.txt"]
+        )
+        self.assertFalse(rehearsal["capture_published"])
+        ready = self.store.prepare(
+            ReviewRequest(
+                requirements="Preserve the original behavior",
+                paths=["tracked.txt", "deleted.txt"],
+            )
+        )
+        self.assertEqual(ready["code"], "selection_ready")
+        self.assertEqual(ready["conflicts"], [])
+        self.assertIsNone(ready["proposed_selection_patch"])
+        self.assertEqual(ready["change_count"], 2)
+        # A rehearsal reserves nothing, so the real capture is still the first one.
+        self.assertTrue(self.create(paths=["tracked.txt", "deleted.txt"])["review_id"])
 
     def test_non_git_context_is_explicit_saved_material_not_a_second_change(self):
         (self.root / "file.txt").write_text("selected code")

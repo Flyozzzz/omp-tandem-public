@@ -166,6 +166,19 @@ class FindingStore:
                 BEFORE DELETE ON finding_history BEGIN
                     SELECT RAISE(ABORT, 'Finding history is append-only');
                 END;
+                CREATE TABLE IF NOT EXISTS correction_sets (
+                    set_id TEXT PRIMARY KEY,
+                    review_id TEXT NOT NULL,
+                    code_fingerprint TEXT NOT NULL,
+                    selection TEXT NOT NULL,
+                    complete_at_pin INTEGER NOT NULL,
+                    pinned_at REAL NOT NULL,
+                    members_json TEXT NOT NULL
+                );
+                CREATE TRIGGER IF NOT EXISTS correction_sets_no_update
+                BEFORE UPDATE ON correction_sets BEGIN
+                    SELECT RAISE(ABORT, 'A pinned correction set is immutable');
+                END;
                 CREATE TABLE IF NOT EXISTS finding_reports (
                     task_id TEXT PRIMARY KEY,
                     report_id TEXT NOT NULL,
@@ -411,6 +424,184 @@ class FindingStore:
                 [*values, limit, offset],
             ).fetchall()
             return [self._get(db, row["finding_id"], summary=True) for row in rows]
+
+    @staticmethod
+    def _eligible(row):
+        """The same membership a corrective review accepts: open against that snapshot."""
+        return row["validity"] != "rejected" and row["resolution"] != "verified_fixed"
+
+    def pin(self, review_id, finding_ids=None):
+        """Fix the membership of a correction set once, so closure can be answered later.
+
+        A live query cannot answer 'what happened to each': closing a finding removes
+        it from the query, and the set silently shrinks to the ones still open.
+        """
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._review(db, review_id)
+            row = db.execute(
+                "SELECT manifest FROM reviews WHERE review_id=?", (review_id,)
+            ).fetchone()
+            fingerprint = json.loads(row["manifest"])["code_fingerprint"]
+            if finding_ids is None:
+                selection, complete = "all_currently_bound_nonrejected_unverified", True
+                rows = [
+                    record
+                    for record in db.execute(
+                        "SELECT * FROM findings WHERE review_id=? ORDER BY conversation_id, number",
+                        (review_id,),
+                    )
+                    if self._eligible(record)
+                ]
+            else:
+                selection, complete = "explicit_member_list", False
+                if len(set(finding_ids)) != len(finding_ids):
+                    raise ValueError("Duplicate finding in the correction set")
+                rows = []
+                for finding_id in finding_ids:
+                    record = self._row(db, finding_id)
+                    if record["review_id"] != review_id or not self._eligible(record):
+                        raise ValueError(
+                            "A correction set holds open findings bound to its own snapshot"
+                        )
+                    rows.append(record)
+            if not rows:
+                raise ValueError("That snapshot has no open findings to pin")
+            members = [
+                {
+                    "finding_id": record["finding_id"],
+                    "baseline_revision": record["revision"],
+                    "title": json.loads(record["draft_json"])["title"],
+                }
+                for record in rows
+            ]
+            set_id, pinned_at = str(uuid4()), time.time()
+            db.execute(
+                "INSERT INTO correction_sets(set_id,review_id,code_fingerprint,selection,"
+                "complete_at_pin,pinned_at,members_json) VALUES (?,?,?,?,?,?,?)",
+                (
+                    set_id,
+                    review_id,
+                    fingerprint,
+                    selection,
+                    int(complete),
+                    pinned_at,
+                    _json(members),
+                ),
+            )
+            db.execute("COMMIT")
+        return self.project(set_id)
+
+    def project(self, set_id, target_review_id=None):
+        """Read what became of every pinned member. It records; it decides nothing."""
+        _identifier(set_id)
+        with closing(self._connect()) as db:
+            db.execute("BEGIN")
+            pinned = db.execute(
+                "SELECT * FROM correction_sets WHERE set_id=?", (set_id,)
+            ).fetchone()
+            if pinned is None:
+                raise ValueError("Unknown correction set in this project")
+            declared, target = set(), None
+            if target_review_id is not None:
+                self._review(db, target_review_id)
+                manifest = json.loads(
+                    db.execute(
+                        "SELECT manifest FROM reviews WHERE review_id=?",
+                        (target_review_id,),
+                    ).fetchone()["manifest"]
+                )
+                target = {
+                    "review_id": target_review_id,
+                    "code_fingerprint": manifest["code_fingerprint"],
+                }
+                declared = {
+                    item["finding_id"]
+                    for item in (manifest.get("corrective") or {}).get(
+                        "open_findings", []
+                    )
+                }
+            rows, counts = (
+                [],
+                {
+                    "unresolved": 0,
+                    "verified_fixed_for_target": 0,
+                    "rejected": 0,
+                    "unknown": 0,
+                },
+            )
+            for member in json.loads(pinned["members_json"]):
+                identifier = member["finding_id"]
+                try:
+                    current = self._get(db, identifier, summary=True)
+                except ValueError:
+                    # A member that cannot be read is named, never quietly dropped.
+                    counts["unknown"] += 1
+                    rows.append(
+                        {**member, "disposition": "unknown", "current_revision": None}
+                    )
+                    continue
+                verified_for = current["verified_review_id"]
+                if current["validity"] == "rejected":
+                    disposition = "rejected"
+                    counts["rejected"] += 1
+                elif current["resolution"] == "verified_fixed":
+                    same = target is not None and verified_for == target["review_id"]
+                    disposition = (
+                        "verified_fixed_for_target" if same else "verified_fixed"
+                    )
+                    counts["verified_fixed_for_target" if same else "unresolved"] += 1
+                else:
+                    disposition = (
+                        "claimed_fixed_unverified"
+                        if current["resolution"] == "claimed_fixed"
+                        else "open"
+                    )
+                    counts["unresolved"] += 1
+                rows.append(
+                    {
+                        **member,
+                        "current_revision": current["revision"],
+                        "current_review_id": current["review_id"],
+                        "validity": current["validity"],
+                        "resolution": current["resolution"],
+                        "disposition": disposition,
+                        "verified_review_id": verified_for,
+                        "history_revisions_since_baseline": list(
+                            range(
+                                member["baseline_revision"] + 1, current["revision"] + 1
+                            )
+                        ),
+                        "declared_in_target_corrective_context": identifier in declared
+                        if target
+                        else None,
+                    }
+                )
+        settled = counts["unresolved"] == 0 and counts["unknown"] == 0
+        return {
+            "correction_set": {
+                "set_id": pinned["set_id"],
+                "source_review_id": pinned["review_id"],
+                "source_code_fingerprint": pinned["code_fingerprint"],
+                "pinned_at": pinned["pinned_at"],
+                "selection": pinned["selection"],
+                "member_count": len(rows),
+                "complete_at_pin": bool(pinned["complete_at_pin"]),
+            },
+            "target": target,
+            "observed_at": time.time(),
+            "rows": rows,
+            "summary": {
+                "members": len(rows),
+                **counts,
+                # Every member has a row; it says nothing about whether fixes hold.
+                "all_members_accounted_for": True,
+                "closure": "resolved_by_recorded_dispositions"
+                if settled
+                else "unresolved",
+                "review_acceptance": "not_assessed",
+            },
+        }
 
     def for_task(self, task_id, limit=50, offset=0):
         self._page(offset, limit)
