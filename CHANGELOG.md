@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.9.0 — 2026-09-16
+
+### Changes
+
+- `tandem_result`, `tandem_wait`, `tandem_work` and review-run status accept `wait_seconds` up to 1200, and a new `wait_mode="bounded"` waits for the observed state instead of returning as soon as event delivery could wake the caller. Defaults and the existing `auto` behaviour are unchanged. Every wait stays finite and cancellable, extends no turn budget, question deadline or review budget, and now reports why it ended in a `wait` block; expiry is an observation, never a task state. A response to a bounded wait is not handed back to event delivery the caller declined. Reads back off as a wait lengthens while cancellation keeps its original cadence, and a request longer than the client's own deadline is still the caller's to size: the server does not negotiate it.
+- `tandem_work(action="get")` accepts `after_revision`, the revision the caller last read, so a card already past it returns at once. The baseline used to be taken when the call began, which made a revision committed between two reads wait for the next one. It is an observation baseline only: not `expected_revision`, no claim, no permission to replay work, and a baseline ahead of the card is refused rather than waited for.
+- A review capture that receives a changed file as `context_paths` now reports every repairable path in one refusal with a proposed selection patch, instead of surfacing them one refused capture at a time. `tandem_review(action="prepare")` runs the same classification without saving anything, reserving nothing and launching nothing. The patch is described, never applied: which files are reviewed stays the caller's decision, a repaired request is a new logical request, and `complete: false` marks a scan that stopped for something promotion cannot repair. A failed `tandem_review_run` carries the same object as `capture_diagnostics`.
+- `tandem_findings` gains `pin` and `project`. Pinning fixes the membership of a correction set once — every finding bound to that snapshot that is neither rejected nor already verified fixed — so closure can be answered later; a live list of open findings cannot answer it, because closing one removes it from the list. The projection reports each member's baseline and current revision, the revisions recorded since, and a disposition, naming an unreadable member as unknown rather than dropping it. It records and decides nothing: accounting for every member is not a claim that a fix holds, and `verify_fixed` still needs its own completed verification task.
+- The coordinator instructions and the EN guide describe the bounded wait as the idle path when there is no other work to do, rather than a chain of short waits.
+
 ## 3.8.1 — 2026-09-16
 
 ### Fixes
