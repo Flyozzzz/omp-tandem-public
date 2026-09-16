@@ -72,6 +72,17 @@ def main() -> int:
         sys.stderr.write(
             "Capture failed: " + json.dumps(message, ensure_ascii=True) + "\n"
         )
+        # A repairable selection keeps its structure across the process boundary;
+        # a bounded error string alone would make the caller guess the repair.
+        diagnostics = getattr(exc, "diagnostics", None)
+        if isinstance(diagnostics, dict):
+            report = json.dumps(
+                {"capture_diagnostics": diagnostics},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+            if len(report) + 1 <= _MAX_RESPONSE:
+                sys.stderr.write(report + "\n")
         return 1
 
 

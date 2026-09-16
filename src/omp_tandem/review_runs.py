@@ -27,6 +27,31 @@ MAX_CAPTURES = 4
 _CAPTURE_OUTPUT_LIMIT = 4 * 1024 * 1024
 
 
+CAPTURE_MARKER = "Capture failed: "
+
+
+def _capture_error(error: bytes) -> tuple[str, dict | None]:
+    """The child's bounded failure report: its message, and a repair when it found one."""
+    text = error.decode("utf-8", "replace")
+    message, report = "", None
+    for line in text.splitlines():
+        line = line.strip()
+        # Interpreter warnings share this stream, so only the child's own marked
+        # line is its failure; everything else is noise that must not replace it.
+        if line.startswith(CAPTURE_MARKER):
+            message = line
+        elif line.startswith("{"):
+            try:
+                payload = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(payload, dict) and isinstance(
+                payload.get("capture_diagnostics"), dict
+            ):
+                report = payload["capture_diagnostics"]
+    return message or text.strip(), report
+
+
 class ReviewRuns:
     def __init__(
         self, tasks, reviews, start_task, read_task, reply_task, cancel_task, owner
@@ -66,6 +91,7 @@ class ReviewRuns:
             for name, declaration in (
                 ("capture_id", "TEXT"),
                 ("capture_started", "INTEGER NOT NULL DEFAULT 0"),
+                ("capture_diagnostics_json", "TEXT"),
             ):
                 if name not in columns:
                     db.execute(
@@ -359,6 +385,9 @@ class ReviewRuns:
             "phase": run["phase"],
             "outcome": run["outcome"],
             "error": run["error"],
+            "capture_diagnostics": json.loads(run["capture_diagnostics_json"])
+            if run["capture_diagnostics_json"]
+            else None,
             "stop_pending": dict(stop_pending) if stop_pending else None,
             "created": run["created"],
             "deadline": run["deadline"],
@@ -627,10 +656,10 @@ class ReviewRuns:
             failure = None
             try:
                 if code:
-                    raise ValueError(
-                        error.decode("utf-8", "replace").strip()
-                        or f"worker exited {code}"
-                    )
+                    message, report = _capture_error(error)
+                    if report is not None:
+                        self._update(run_id, capture_diagnostics_json=_json(report))
+                    raise ValueError(message or f"worker exited {code}")
                 snapshot = json.loads(output)
                 if (
                     not isinstance(snapshot, dict)

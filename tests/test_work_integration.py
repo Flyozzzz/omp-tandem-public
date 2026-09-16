@@ -212,6 +212,104 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("plan", observed)
         self.assertEqual(observed["steps"][0]["state"], "ready")
 
+    async def test_native_observation_baseline_skips_the_wait_entirely(self):
+        identifier = await self.create(owner="omp")
+        summary = to_jsonable_python(
+            (
+                await self.omp.call_tool(
+                    "tandem_work", {"request": {"action": "get", "work_id": identifier}}
+                )
+            ).data
+        )
+        worker = self.omp_bridge.runtime.worker
+        task_id, conversation_id = str(uuid4()), str(uuid4())
+        lease = self.omp_bridge.tasks.lock(conversation_id)
+        self.addCleanup(lease.close)
+        now = time.time()
+        with closing(self.omp_bridge.tasks.connect()) as db:
+            db.execute(
+                "INSERT INTO tasks(task_id,conversation_id,created,updated,cwd,mode,model,prompt,status,deadline) "
+                "VALUES (?,?,?,?,?,'think','unused','Observe shared progress','running',?)",
+                (task_id, conversation_id, now, now, str(self.root), now + 60),
+            )
+        tool = next(
+            item
+            for item in worker.worker_tools({"task_id": task_id})
+            if item.name == "tandem_work"
+        )
+        request = tool.parse_params(
+            {
+                "request": {"action": "get", "work_id": identifier},
+                "wait_seconds": 30,
+                "after_revision": summary["revision"] - 1,
+            }
+        )
+        with patch(
+            "omp_tandem.native_worker.time.sleep",
+            side_effect=AssertionError("waited for a revision it had already missed"),
+        ):
+            observed = json.loads(
+                tool.execute(
+                    request, HostToolContext("wait", threading.Event(), lambda _: None)
+                )
+            )
+        self.assertEqual(observed["revision"], summary["revision"])
+        ahead = tool.parse_params(
+            {
+                "request": {"action": "get", "work_id": identifier},
+                "wait_seconds": 30,
+                "after_revision": summary["revision"] + 1,
+            }
+        )
+        with self.assertRaises(ValueError) as refused:
+            tool.execute(
+                ahead, HostToolContext("wait", threading.Event(), lambda _: None)
+            )
+        self.assertIn("ahead of the current", str(refused.exception))
+
+    async def test_observation_baseline_answers_with_a_revision_already_committed(self):
+        identifier = await self.create()
+        view = await self.call(self.claude, {"action": "get", "work_id": identifier})
+        started = time.monotonic()
+        observed = await self.call(
+            self.claude,
+            {"action": "get", "work_id": identifier},
+            wait_seconds=10,
+            after_revision=view["revision"] - 1,
+        )
+        # The change the caller has not seen yet is already the answer.
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(observed["revision"], view["revision"])
+        self.assertEqual(observed["wait"]["reason"], "revision_changed")
+        started = time.monotonic()
+        unchanged = await self.call(
+            self.claude,
+            {"action": "get", "work_id": identifier},
+            wait_seconds=1,
+            after_revision=view["revision"],
+        )
+        self.assertGreaterEqual(time.monotonic() - started, 1)
+        self.assertEqual(unchanged["wait"]["reason"], "deadline_elapsed")
+        with self.assertRaises(ToolError) as ahead:
+            await self.call(
+                self.claude,
+                {"action": "get", "work_id": identifier},
+                wait_seconds=10,
+                after_revision=view["revision"] + 1,
+            )
+        self.assertIn("ahead of the current", str(ahead.exception))
+        for unusable in (
+            {"request": {"action": "get", "work_id": identifier}},
+            {
+                "request": {"action": "list"},
+                "wait_seconds": 5,
+            },
+        ):
+            with self.subTest(request=unusable), self.assertRaises(ToolError):
+                await self.claude.call_tool(
+                    "tandem_work", {**unusable, "after_revision": 0}
+                )
+
     async def context_attempt(self, paths):
         (self.root / "caller.py").write_text("pinned caller\n")
         self.git("add", "caller.py")

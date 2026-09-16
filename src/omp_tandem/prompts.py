@@ -31,7 +31,11 @@ Closing the MCP owner stops its native turns; explicitly authorized separate wor
 POLLING_INSTRUCTIONS = """Runs: tandem_review_run(action='status', run_id, wait_seconds=25).
 Individual tasks: tandem_result(wait_seconds=25); several: tandem_wait(task_ids, wait_seconds=25),
 then read ready results. Repeat while active; handle questions, remove handled terminal IDs.
-Shared tasks: tandem_work(request={action:'get',work_id},wait_seconds=25); act on current assignments,
+With no complementary work of your own, ask for one long wait instead of many short ones:
+wait_seconds up to 1200 with wait_mode='bounded', which waits for the state itself rather than
+returning as soon as delivery could wake you. Request only what this client's own deadline outlives.
+Shared tasks: tandem_work(request={action:'get',work_id},wait_seconds=25); pass after_revision with
+the revision you last read, so a card already past it returns at once. Act on current assignments,
 not the wake itself. Paused work never restarts implicitly.
 No zero-wait loops, tandem_list polling or promised automatic delivery.
 Before result-driven effects claim tandem_receipt: require authorized=true, retain token, complete afterward.
@@ -39,7 +43,9 @@ Uncertain claims need external reconciliation, not replay; no exactly-once exter
 
 PUSH_INSTRUCTIONS = """Push accelerates delivery; it does not replace bounded waiting by itself.
 Only next_action=await_event attests a currently armed independent watchdog: keep the client open
-and do complementary work. Otherwise repeat tandem_result(wait_seconds=25), or tandem_wait for several.
+and do complementary work. If you have no complementary work, do not recall a short wait on every
+response: ask for one long wait_seconds with wait_mode='bounded', which ignores delivery coverage
+and waits for the task. Otherwise repeat tandem_result(wait_seconds=25), or tandem_wait for several.
 On an event or watchdog bounded_check use review-run status for scenario tasks; otherwise tandem_result.
 Handle questions promptly. A running result rearms only through the installed hook; follow next_action.
 Claim tandem_receipt before applying result-driven side effects; only authorized=true allows application.

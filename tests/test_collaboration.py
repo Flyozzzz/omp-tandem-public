@@ -160,15 +160,15 @@ class CollaborationTests(RpcHarness):
             tool for tool in tools if tool.name == "tandem_result"
         ).inputSchema
         wait = schema["properties"]["wait_seconds"]
-        self.assertEqual((wait.get("minimum"), wait.get("maximum")), (0, 25))
+        self.assertEqual((wait.get("minimum"), wait.get("maximum")), (0, 1200))
         job = await self.start("blocked")
         await self.result(job["task_id"])
-        for value in (-1, 26):
+        for value in (-1, 1201):
             with self.subTest(value=value), self.assertRaises(ToolError):
                 await self.call(
                     "tandem_result", task_id=job["task_id"], wait_seconds=value
                 )
-        for value in (0, 25):
+        for value in (0, 25, 1200):
             result = await self.call(
                 "tandem_result", task_id=job["task_id"], wait_seconds=value
             )

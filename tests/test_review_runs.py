@@ -6,13 +6,14 @@ import os
 import subprocess
 import threading
 import time
+import unittest
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
 from omp_tandem import __file__ as package_file
-from omp_tandem.review_runs import RUN_ACTIVE, ReviewRuns
+from omp_tandem.review_runs import RUN_ACTIVE, ReviewRuns, _capture_error
 from tests.helpers import RpcHarness
 from tests.test_review_integration import REVIEW_PEER
 
@@ -36,6 +37,31 @@ RUN_PEER = (
         "        elif response.get('expired'):",
     )
 )
+
+
+class CaptureErrorTests(unittest.TestCase):
+    def test_the_childs_own_marker_outranks_whatever_else_shares_the_stream(self):
+        stream = (
+            b"/site-packages/jwt.py:10: DeprecationWarning: authlib is deprecated\n"
+            b'Capture failed: "Context paths have changes: a.py; include them"\n'
+            b'{"capture_diagnostics":{"code":"selection_conflict","conflicts":'
+            b'[{"path":"a.py","code":"changed_context_path","change":"modified"}]}}\n'
+        )
+        message, report = _capture_error(stream)
+        self.assertTrue(message.startswith("Capture failed: "))
+        self.assertIn("Context paths have changes", message)
+        self.assertEqual(report["conflicts"][0]["path"], "a.py")
+
+    def test_an_unmarked_failure_still_reports_everything_it_printed(self):
+        message, report = _capture_error(b"segmentation fault\n")
+        self.assertEqual((message, report), ("segmentation fault", None))
+
+    def test_a_truncated_report_line_is_ignored_rather_than_guessed(self):
+        message, report = _capture_error(
+            b'Capture failed: "boom"\n{"capture_diagnostics":{"code":\n'
+        )
+        self.assertIn("boom", message)
+        self.assertIsNone(report)
 
 
 class ReviewRunTests(RpcHarness):
