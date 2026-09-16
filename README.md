@@ -91,7 +91,7 @@ The agent uses `tandem_review_run`: a saved staged/index snapshot, one independe
 
 See [compact views, runtime identity and recovery](docs/guide.md#compact-contracts) and [operator blocker resolution](docs/guide.md#operator-unblock). Hints and notifications grant no authority; resolving a blocker never resumes or authorizes work. Independent acceptance is separate from operator application and publication.
 
-Current package: **3.8.0**. [Context capsules, preflight, fresh conversations and corrective review](docs/guide.md#context-efficient-work) reduce repeated coordination without removing permission or acceptance checks. See the [changelog](CHANGELOG.md). Building/checking packages does not tag, publish, install into a user session or apply code.
+Current package: **3.8.1**. [Context capsules, preflight, fresh conversations and corrective review](docs/guide.md#context-efficient-work) reduce repeated coordination without removing permission or acceptance checks. See the [changelog](CHANGELOG.md). Building/checking packages does not tag, publish, install into a user session or apply code.
 
 ## Plan changes and repository handover
 
