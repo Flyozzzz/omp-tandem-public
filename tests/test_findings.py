@@ -42,7 +42,12 @@ class FindingTests(unittest.TestCase):
                 CREATE TABLE reviews (review_id TEXT PRIMARY KEY, scope_id TEXT NOT NULL, created REAL NOT NULL, manifest TEXT NOT NULL);
                 CREATE TABLE tasks (task_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, review_id TEXT, status TEXT NOT NULL, report_json TEXT);
             """)
-            manifest = json.dumps({"files": [{"path": "src/payments.py"}]})
+            manifest = json.dumps(
+                {
+                    "files": [{"path": "src/payments.py"}],
+                    "code_fingerprint": "f" * 64,
+                }
+            )
             db.executemany(
                 "INSERT INTO reviews VALUES (?, 'project', ?, ?)",
                 [
@@ -95,6 +100,80 @@ class FindingTests(unittest.TestCase):
             },
             record["revision"],
         )
+
+    def test_a_pinned_set_still_accounts_for_a_member_a_live_list_would_drop(self):
+        first = self.change(self.create(), "confirm")
+        second = self.change(self.create(title="Second defect"), "confirm")
+        pinned = self.store.pin(self.review)
+        self.assertEqual(pinned["correction_set"]["member_count"], 2)
+        self.assertTrue(pinned["correction_set"]["complete_at_pin"])
+        self.assertEqual(pinned["summary"]["closure"], "unresolved")
+        claimed = self.change(first, "claim_fixed")
+        self.change(claimed, "verify_fixed", verification_task_id=self.task)
+        projected = self.store.project(pinned["correction_set"]["set_id"], self.review)
+        rows = {row["finding_id"]: row for row in projected["rows"]}
+        # The closed member is still in the set; a live query would have lost it.
+        self.assertEqual(
+            rows[first["finding_id"]]["disposition"], "verified_fixed_for_target"
+        )
+        self.assertEqual(rows[second["finding_id"]]["disposition"], "open")
+        self.assertEqual(
+            rows[first["finding_id"]]["history_revisions_since_baseline"], [3, 4]
+        )
+        self.assertEqual(projected["summary"]["unresolved"], 1)
+        self.assertEqual(projected["summary"]["closure"], "unresolved")
+        self.assertEqual(projected["summary"]["review_acceptance"], "not_assessed")
+        self.change(self.store.get(second["finding_id"]), "reject", review=self.review)
+        settled = self.store.project(pinned["correction_set"]["set_id"], self.review)
+        self.assertEqual(
+            settled["summary"]["closure"], "resolved_by_recorded_dispositions"
+        )
+        self.assertTrue(settled["summary"]["all_members_accounted_for"])
+
+    def test_an_unreadable_member_is_named_rather_than_quietly_dropped(self):
+        finding = self.create()
+        pinned = self.store.pin(self.review)
+        with closing(self.connect()) as db:
+            db.execute(
+                "DELETE FROM findings WHERE finding_id=?", (finding["finding_id"],)
+            )
+        projected = self.store.project(pinned["correction_set"]["set_id"])
+        self.assertEqual(projected["rows"][0]["disposition"], "unknown")
+        self.assertEqual(projected["summary"]["unknown"], 1)
+        self.assertEqual(projected["summary"]["closure"], "unresolved")
+
+    def test_membership_is_fixed_when_pinned_and_cannot_be_rewritten(self):
+        self.create()
+        pinned = self.store.pin(self.review)
+        later = self.create(title="Found after the set was pinned")
+        projected = self.store.project(pinned["correction_set"]["set_id"])
+        self.assertEqual(
+            [row["finding_id"] for row in projected["rows"]],
+            [row["finding_id"] for row in pinned["rows"]],
+        )
+        self.assertNotIn(
+            later["finding_id"], [row["finding_id"] for row in projected["rows"]]
+        )
+        with closing(self.connect()) as db, self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE correction_sets SET selection='rewritten'")
+
+    def test_an_explicit_subset_does_not_claim_to_be_the_whole_set(self):
+        chosen = self.create()
+        self.create(title="Deliberately left out")
+        pinned = self.store.pin(self.review, [chosen["finding_id"]])
+        self.assertFalse(pinned["correction_set"]["complete_at_pin"])
+        self.assertEqual(pinned["correction_set"]["selection"], "explicit_member_list")
+        self.assertEqual(len(pinned["rows"]), 1)
+        verified = self.change(
+            self.change(self.create(title="Already settled"), "confirm"), "claim_fixed"
+        )
+        self.change(verified, "verify_fixed", verification_task_id=self.task)
+        with self.assertRaises(ValueError):
+            self.store.pin(self.review, [verified["finding_id"]])
+        with self.assertRaises(ValueError):
+            self.store.pin(self.review, [chosen["finding_id"], chosen["finding_id"]])
+        with self.assertRaises(ValueError):
+            self.store.pin(self.new_review)
 
     def test_uncaptured_location_and_blocked_verification_are_not_certified(self):
         with self.assertRaises(ValueError):

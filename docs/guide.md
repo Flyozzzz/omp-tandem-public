@@ -938,6 +938,16 @@ Validity (`hypothesis`, `confirmed`, `rejected`) and resolution (`open`, `claime
 
 Worker reports may include optional `findings` and `finding_updates`. Their ingestion is atomic and idempotent; concurrent stale revisions are rejected rather than overwriting history.
 
+### Correction sets
+
+Asking a review "were the previous findings closed?" cannot be answered by listing open findings, because closing one removes it from the list: the set silently shrinks to whatever is still open, and a set that is entirely closed looks identical to one that never existed.
+
+`tandem_findings(action="pin", review_id=...)` fixes the membership once. It takes every finding currently bound to that snapshot that is neither rejected nor already verified fixed — the same eligibility a corrective review accepts — and records each member with the revision it had at that moment. A pinned set is immutable: findings raised afterwards are not members, and the stored rows cannot be rewritten. Pass `finding_ids` to pin a deliberate subset; that set reports `complete_at_pin: false`, because it was never the whole set.
+
+`tandem_findings(action="project", set_id=..., review_id=<target>)` then reads what became of every member: its baseline and current revision, the revisions recorded since, its current binding, and a `disposition` — `open`, `claimed_fixed_unverified`, `verified_fixed_for_target`, `verified_fixed` elsewhere, `rejected`, or `unknown` when the record cannot be read. With a target review it also says whether each member was declared in that review's corrective context.
+
+The projection records; it decides nothing. `all_members_accounted_for` means every member has a row, not that any fix holds. `closure: "resolved_by_recorded_dispositions"` means every member was explicitly rejected or verified for the target — an account of what was recorded, not acceptance of the work, which is why `review_acceptance` stays `not_assessed`. A claimed fix remains unverified, and `verify_fixed` still needs its own completed verification task bound to the snapshot.
+
 ## Product knowledge and decisions
 
 `tandem_project_context` publishes immutable snapshots of a product's summary, components, rules, examples, sources, and decisions. No snapshot is automatically invented from the repository name.
@@ -1061,7 +1071,7 @@ The compact review scenario is the default entry for changes review; `tandem_wor
 | `tandem_review` | `action=create/read/assess`, request or review ID, section/path, paging | Immutable review materials and current applicability |
 | `tandem_review_run` | `action=start/status/reply/cancel`, request/key or run ID, total budget, execution, bounded wait | Capture and orchestrate a complete read-only review |
 | `tandem_work` | `request: WorkCommand`, bounded `wait_seconds` | Shared plan/checklist, role-bound claims, blockers, immutable submissions and acceptance; no autonomous permission grants |
-| `tandem_findings` | `action=create/update/get/list`, IDs, draft/change, revision, paging | Snapshot-bound findings and append-only history |
+| `tandem_findings` | `action=create/update/get/list/pin/project`, IDs, draft/change, revision, paging, `set_id`/`finding_ids` | Snapshot-bound findings, append-only history, and pinned correction sets |
 | `tandem_diagnose` | `live`, existing diagnostic `task_id`, expected project, bounded wait | Explicit current-client connectivity check |
 | `tandem_receipt` | `task_id`, `action=status/claim/complete`, claim token | Gate result application separately from notification acknowledgment |
 

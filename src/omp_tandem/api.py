@@ -845,7 +845,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
     @mcp.tool()
     async def tandem_findings(
         ctx: Context,
-        action: Literal["create", "update", "get", "list"],
+        action: Literal["create", "update", "get", "list", "pin", "project"],
         conversation_id: str | None = None,
         review_id: str | None = None,
         finding_id: str | None = None,
@@ -856,15 +856,30 @@ def build_server(configuration: Bridge | RuntimeOptions):
         task_id: str | None = None,
         offset: Annotated[int, Field(ge=0)] = 0,
         limit: Annotated[int, Field(ge=1, le=200)] = 50,
+        set_id: str | None = None,
+        finding_ids: Annotated[list[str] | None, Field(max_length=100)] = None,
     ) -> dict:
         """Track version-bound review findings without rewriting their history.
 
         Validity and resolution are separate. A claimed fix is not verified; verify_fixed needs
         evidence and a completed verification task for its snapshot. Update requires the current
         expected_revision. Get by stable finding_id or conversation_id plus human number.
+        pin fixes the membership of a correction set for review_id once, so closure can be
+        answered later; a live list cannot, because closing a finding removes it from the list.
+        project reads what became of every pinned member of set_id, optionally against a target
+        review. It records dispositions and decides nothing: a claimed fix is still unverified,
+        and an accounted-for member is not a fix that holds.
         """
         bridge = await runtime.get(ctx)
         store = bridge.findings
+        if action == "pin":
+            if review_id is None:
+                raise ValueError("pin requires the review_id whose findings are pinned")
+            return await asyncio.to_thread(store.pin, review_id, finding_ids)
+        if action == "project":
+            if set_id is None:
+                raise ValueError("project requires set_id")
+            return await asyncio.to_thread(store.project, set_id, review_id)
         if action == "create":
             if conversation_id is None or review_id is None or finding is None:
                 raise ValueError(
