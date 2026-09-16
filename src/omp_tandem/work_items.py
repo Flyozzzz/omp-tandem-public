@@ -432,6 +432,25 @@ class WorkPlan(_Model):
     context: str = Field(default="", max_length=64000)
 
     @model_validator(mode="after")
+    def acceptance_coverage_unsupported(self) -> Self:
+        # Declared acceptance evidence is task-local in 3.10.0. Accepting these
+        # fields here and ignoring them would be worse than refusing them.
+        for step in self.steps:
+            for plan in (step.verification, step.review_verification):
+                if plan is None:
+                    continue
+                if (
+                    plan.acceptance_coverage != "report_only"
+                    or plan.coverage_scope is not None
+                    or any(check.acceptance_refs for check in plan.checks)
+                ):
+                    raise ValueError(
+                        "acceptance_coverage_unsupported_surface: declared acceptance "
+                        "evidence is supported on task contracts, not on work steps"
+                    )
+        return self
+
+    @model_validator(mode="after")
     def validate_graph(self) -> Self:
         steps = {step.id: step for step in self.steps}
         if len(steps) != len(self.steps):
@@ -595,6 +614,16 @@ def _operation_fingerprint(command, bound, *, version=2):
         for key in ("verification", "review_verification"):
             if step.get(key) is None:
                 step.pop(key)
+                continue
+            # Additions that carry no declaration must not change an old receipt.
+            plan = step[key]
+            if plan.get("acceptance_coverage") == "report_only":
+                plan.pop("acceptance_coverage")
+            if plan.get("coverage_scope") is None:
+                plan.pop("coverage_scope", None)
+            for check in plan.get("checks") or []:
+                if check.get("acceptance_refs") == []:
+                    check.pop("acceptance_refs")
     digest = hashlib.sha256(
         _json(
             {"command": payload, "attempt_id": bound["attempt_id"] if bound else None}

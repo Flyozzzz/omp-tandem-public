@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.10.0 — 2026-09-16
+
+### Changes
+
+- Task contracts accept an optional `acceptance_set`: the same acceptance list in structured form, whose texts must repeat `acceptance` exactly so there is never a second source of truth. Each criterion carries a stable id, and a criterion whose content is several clauses declares them as `obligations` with their own ids and the exact `environment` each is owed in. The declared criteria — expanded to one evidence unit per obligation — become the denominator of coverage, instead of the checks somebody remembered to declare.
+- `VerificationCheck` gains `acceptance_refs`, many-to-many, stating what a check is intended to exercise. A mapping of a parent criterion credits none of its declared obligations: otherwise one check against a four-clause criterion would read as covered, which is the failure this feature exists to catch. Set revisions are content digests and `CheckRun` records the `check_revision` they observed, so editing a criterion's text or a check's command leaves old evidence visible as history rather than current credit.
+- `result.acceptance_coverage` keeps apart what is genuinely different: unmapped units, mapped checks the ladder did not select, selected checks with no run, runs that explicitly say not_run, current failures, passes against other bytes, environment mismatches, environments never recorded (unknown, not a match), stale check revisions, and runs of a mapped check that recorded no mapping. The dimensions are not mutually exclusive, because one unit really can have a declaration, a current failure and an older passing run at once.
+- `VerificationPlan.acceptance_coverage="require_current_evidence"` refuses a success report while any declared unit lacks an applicable current passing run. The default `report_only` refuses nothing, so existing callers are unaffected; a strict request without a declared set is refused rather than quietly downgraded, and an empty set reports `not_assessable` rather than vacuous eligibility.
+- A task that declares no set reports `assessment: "not_declared"` with no denominator, rather than zero coverage. Inventing identities for plain strings would accuse every existing caller of mappings it never made.
+- The feature is task-local in this release. Work steps refuse these declarations with `acceptance_coverage_unsupported_surface` rather than accepting and ignoring them, a task bound to a work attempt reports `unsupported_surface` instead of applying its own set to a plan it does not own, and existing work operation receipts keep their identity because the new defaults are stripped before fingerprinting. Carrying sets and immutable runs through work cards and review captures follows in 3.10.1.
+- The projection counts; it never decides. `semantic_sufficiency` and `acceptance` stay `not_assessed` in every response, including when every unit has a current pass: a participant can declare a mapping its test does not honour, and no schema detects that.
+
 ## 3.9.1 — 2026-09-16
 
 ### Fixes

@@ -5,9 +5,10 @@ import time
 from contextlib import closing
 from uuid import uuid4
 
+from .acceptance import enforce_coverage
 from .artifacts import ArtifactStore
 from .findings import FindingStore
-from .models import decode_outcome
+from .models import AcceptanceSet, VerificationPlan, decode_outcome
 from .project_context import ProjectContextStore
 from .runtime_models import (
     ACTIVE,
@@ -111,6 +112,18 @@ class TaskInteraction:
                 else contract.get("verification")
             )
             enforce_verification(verification, report)
+            # Declared acceptance evidence is task-local in this release: when a work
+            # attempt owns the plan, the task's own set says nothing about that plan's
+            # denominator, so the gate does not run rather than run on the wrong set.
+            if attempt is None:
+                declared = contract.get("acceptance_set")
+                enforce_coverage(
+                    AcceptanceSet.model_validate(declared) if declared else None,
+                    VerificationPlan.model_validate(verification)
+                    if verification
+                    else None,
+                    report,
+                )
             if (
                 report.outcome not in ("blocked", "partial")
                 and db.execute(
