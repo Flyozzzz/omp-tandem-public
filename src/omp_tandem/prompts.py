@@ -33,7 +33,13 @@ Individual tasks: tandem_result(wait_seconds=25); several: tandem_wait(task_ids,
 then read ready results. Repeat while active; handle questions, remove handled terminal IDs.
 With no complementary work of your own, ask for one long wait instead of many short ones:
 wait_seconds up to 1200 with wait_mode='bounded', which waits for the state itself rather than
-returning as soon as delivery could wake you. Request only what this client's own deadline outlives.
+returning as soon as delivery could wake you. The server serves the whole wait; a client may stop
+waiting in the foreground first, and what it does then is the client's own behaviour. If the response
+says the client moved the request to a background task, that is a handoff, not a failure: keep the
+handle and read that result rather than starting a second observation. One measured Claude Code run
+did this at 120 seconds and delivered every such result later; treat that as an observation of one
+client, not a rule. Otherwise, on a real cancellation or timeout, read the same task/run identity
+with a bounded wait, never a new launch.
 Shared tasks: tandem_work(request={action:'get',work_id},wait_seconds=25); pass after_revision with
 the revision you last read, so a card already past it returns at once. Act on current assignments,
 not the wake itself. Paused work never restarts implicitly.
@@ -45,7 +51,9 @@ PUSH_INSTRUCTIONS = """Push accelerates delivery; it does not replace bounded wa
 Only next_action=await_event attests a currently armed independent watchdog: keep the client open
 and do complementary work. If you have no complementary work, do not recall a short wait on every
 response: ask for one long wait_seconds with wait_mode='bounded', which ignores delivery coverage
-and waits for the task. Otherwise repeat tandem_result(wait_seconds=25), or tandem_wait for several.
+and waits for the task. If the client answers that it moved the request to a background
+task, read that result; that is delivery, not failure. Clients differ: one Claude Code run handed off
+at 120 seconds, another client may simply cancel, so branch on what the response actually says. Otherwise repeat tandem_result(wait_seconds=25), or tandem_wait for several.
 On an event or watchdog bounded_check use review-run status for scenario tasks; otherwise tandem_result.
 Handle questions promptly. A running result rearms only through the installed hook; follow next_action.
 Claim tandem_receipt before applying result-driven side effects; only authorized=true allows application.

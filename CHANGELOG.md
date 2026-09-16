@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.9.1 — 2026-09-16
+
+### Fixes
+
+- The long-wait guidance shipped in 3.9.0 described the client's side of a wait wrongly. It told callers to ask only for what "this client's own request deadline outlives", because the server "cannot deliver a response the client stopped waiting for". A real run measured the opposite: Claude Code does not stop waiting — it moves a request still outstanding at 120 seconds into a background task, says so in the immediate response, and delivers the real result later as a notification. All ten such calls in that run delivered, a median of 235 seconds after the handoff. The guide, the coordinator instructions, the tandem skill and the tool docstrings now describe that handoff as delivery to read rather than a failure to retry; they say that stopping the client's waiter is not cancelling the work and that the background task does not survive exiting the session, and they keep the fallback for a genuine cancellation as a bounded read of the same task or run identity, never a new launch. No behaviour changed: the server still serves the whole wait and the 1200-second bound is untouched.
+- The guide now separates the two deliveries that share a word. `delivery` describes this plugin's own channel — whether a task event can wake the coordinator — and says nothing about what a client does with an outstanding MCP request. `delivery=poll` means this plugin will not be the one notifying, not that no notification is possible.
+
 ## 3.9.0 — 2026-09-16
 
 ### Changes
