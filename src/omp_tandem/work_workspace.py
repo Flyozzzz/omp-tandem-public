@@ -312,9 +312,13 @@ class WorkWorkspace:
             raise ValueError("The submitted object must itself be a commit")
         return actual
 
-    def _tree(self, commit: str) -> dict[str, tuple[str, str]]:
+    def _tree(
+        self, commit: str, *, cwd: Path | None = None
+    ) -> dict[str, tuple[str, str]]:
         result = {}
-        for entry in self._git(self.scope.root, "ls-tree", "-rz", commit).split(b"\0"):
+        for entry in self._git(cwd or self.scope.root, "ls-tree", "-rz", commit).split(
+            b"\0"
+        ):
             if not entry:
                 continue
             header, raw_path = entry.split(b"\t", 1)
@@ -693,53 +697,74 @@ class WorkWorkspace:
         capture: bool = True,
         allow_ignored: bool = False,
     ) -> tuple[dict, dict]:
-        def inaccessible(error):
-            raise ValueError(
-                f"Workspace directory cannot be inspected: {error.filename}"
-            ) from error
-
         files = set()
+        violations = []
         ignored = set()
+        protected = set()
         if allow_ignored:
+            for relative in baseline.keys() | owned:
+                while relative and relative not in protected:
+                    protected.add(relative)
+                    relative = relative.rpartition("/")[0]
             ignored = {
-                _path(name.decode())
+                _path(name.decode().removesuffix("/"))
                 for name in self._git(
                     path,
                     "ls-files",
                     "--others",
                     "--ignored",
+                    "--directory",
                     "--exclude-standard",
                     "-z",
                 ).split(b"\0")
                 if name
             }
-            ignored.difference_update(owned)
-            ignored.difference_update(baseline)
-        for directory, directories, names in os.walk(
-            path, followlinks=False, onerror=inaccessible
-        ):
-            if Path(directory) == path:
-                names = [name for name in names if name != ".git"]
-            for name in directories[:]:
-                item = Path(directory) / name
-                if item.relative_to(path).as_posix() in ignored:
-                    directories.remove(name)
-                    continue
-                if item.is_symlink() or name.lower() == ".git":
-                    raise ValueError(
-                        f"Unsafe workspace directory: {item.relative_to(path)}"
-                    )
-            for name in names:
-                relative = _path((Path(directory) / name).relative_to(path).as_posix())
+
+        def excluded(relative):
+            if relative in protected:
+                return False
+            while relative:
                 if relative in ignored:
-                    continue
-                if relative not in baseline and relative not in owned:
-                    raise ValueError(
-                        f"Unexpected untracked or ignored file outside ownership: {relative}"
-                    )
-                files.add(relative)
-                if len(files) > _MAX_FILES:
-                    raise ValueError("Workspace exceeds the file-count safety limit")
+                    return True
+                relative = relative.rpartition("/")[0]
+            return False
+
+        pending = [path]
+        while pending:
+            directory = pending.pop()
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if directory == path and entry.name == ".git":
+                            continue
+                        relative = _path(
+                            (directory / entry.name).relative_to(path).as_posix()
+                        )
+                        # Excluded dependencies are not pinned input. Do not inspect
+                        # their links or descend into them, even to classify entries.
+                        if allow_ignored and excluded(relative):
+                            continue
+                        info = entry.stat(follow_symlinks=False)
+                        if stat.S_ISDIR(info.st_mode):
+                            pending.append(directory / entry.name)
+                            continue
+                        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                            raise ValueError(
+                                f"Unsafe nonregular or shared workspace file: {relative}"
+                            )
+                        if relative not in baseline and relative not in owned:
+                            violations.append(
+                                f"Unexpected untracked or ignored file outside ownership: {relative}"
+                            )
+                        files.add(relative)
+                        if len(files) > _MAX_FILES:
+                            raise ValueError(
+                                "Workspace exceeds the file-count safety limit"
+                            )
+            except OSError as error:
+                raise ValueError(
+                    f"Workspace directory cannot be inspected: {error.filename}"
+                ) from error
         algorithm = (
             self._git(path, "rev-parse", "--show-object-format").decode().strip()
         )
@@ -761,17 +786,19 @@ class WorkWorkspace:
             digest = hasher.hexdigest()
             snapshot[relative] = (mode, digest)
             if baseline.get(relative) != snapshot[relative]:
-                if relative not in owned:
-                    raise ValueError(
+                if relative not in owned and relative in baseline:
+                    violations.append(
                         f"Unexpected modification outside ownership: {relative}"
                     )
                 if capture:
                     contents[relative] = content
         removed = baseline.keys() - snapshot.keys()
         if removed - owned:
-            raise ValueError(
-                f"Unexpected deletion outside ownership: {sorted(removed - owned)[0]}"
+            violations.append(
+                f"Unexpected deletion outside ownership: {', '.join(sorted(removed - owned))}"
             )
+        if violations:
+            raise ValueError("; ".join(violations))
         return snapshot, contents
 
     def _retain(self, attempt: dict, commit: str) -> None:
@@ -839,6 +866,196 @@ class WorkWorkspace:
                 "changed_files": changed,
             }
 
+    @staticmethod
+    def _verification_metadata(path: Path) -> str:
+        """Fingerprint private Git input, refusing links, shared files and indirection."""
+        marker = path / ".git"
+        if path.resolve() != path or marker.is_symlink() or not marker.is_dir():
+            raise ValueError("Verification Git metadata has been replaced")
+        for relative in (
+            "commondir",
+            "objects/info/alternates",
+            "objects/info/http-alternates",
+            "info/grafts",
+        ):
+            candidate = marker / relative
+            if candidate.exists() or candidate.is_symlink():
+                raise ValueError(f"Unsafe verification Git metadata: .git/{relative}")
+        digest = hashlib.sha256()
+        total = count = 0
+
+        def inaccessible(error):
+            raise ValueError(
+                f"Verification metadata cannot be inspected: {error.filename}"
+            ) from error
+
+        for directory, directories, names in os.walk(
+            marker, followlinks=False, onerror=inaccessible
+        ):
+            directories.sort()
+            for name in directories:
+                if (Path(directory) / name).is_symlink():
+                    raise ValueError(
+                        f"Unsafe verification Git metadata: {Path(directory) / name}"
+                    )
+            for name in sorted(names):
+                item = Path(directory) / name
+                relative = item.relative_to(marker).as_posix()
+                descriptor = os.open(item, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(descriptor, "rb") as stream:
+                    before = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                        raise ValueError(
+                            f"Unsafe or shared verification Git metadata: .git/{relative}"
+                        )
+                    total += before.st_size
+                    count += 1
+                    if total > _MAX_SNAPSHOT + _MAX_FILES * 512 or count > _MAX_FILES:
+                        raise ValueError(
+                            "Verification Git metadata exceeds safety limits"
+                        )
+                    digest.update(relative.encode() + b"\0")
+                    digest.update(f"{before.st_mode}:{before.st_size}\0".encode())
+                    remaining = before.st_size
+                    while remaining:
+                        chunk = stream.read(min(remaining, 1024 * 1024))
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                        remaining -= len(chunk)
+                    after = os.fstat(stream.fileno())
+                    if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                        after.st_size,
+                        after.st_mtime_ns,
+                        after.st_ctime_ns,
+                    ):
+                        raise ValueError(
+                            f"Verification Git metadata changed during inspection: .git/{relative}"
+                        )
+        return digest.hexdigest()
+
+    def prepare_verification(self, attempt: dict, directory: Path) -> dict:
+        """Create an exclusive standalone shallow copy; never run checkout filters."""
+
+        def check_deadline():
+            deadline = attempt.get("deadline")
+            if deadline is not None and time.time() >= deadline:
+                raise ValueError(
+                    "Verification preparation exceeded the attempt deadline"
+                )
+
+        check_deadline()
+        with self._lock():
+            self._repository()
+            if attempt.get("kind") != "review":
+                raise ValueError("Only review attempts can prepare verification input")
+            commit = self._commit(attempt["submission"]["commit"])
+            self._tree(commit)
+            tree = (
+                self._git(self.scope.root, "rev-parse", f"{commit}^{{tree}}")
+                .decode()
+                .strip()
+            )
+            path = Path(directory)
+            if not path.is_absolute() or path.resolve() != path:
+                raise ValueError(
+                    "Verification directory must be an exact absolute path without symbolic links"
+                )
+            # mkdir is exclusive: never overwrite or reuse an earlier command's input.
+            path.mkdir(mode=0o700)
+            algorithm = (
+                self._git(self.scope.root, "rev-parse", "--show-object-format")
+                .decode()
+                .strip()
+            )
+            self._git(
+                path, "init", "--quiet", "--template=", f"--object-format={algorithm}"
+            )
+            objects = {commit, tree}
+            for row in self._git(self.scope.root, "ls-tree", "-rtz", commit).split(
+                b"\0"
+            ):
+                if row:
+                    objects.add(row.split(b"\t", 1)[0].split()[2].decode("ascii"))
+            check_deadline()
+            pack = self._git(
+                self.scope.root,
+                "pack-objects",
+                "--stdout",
+                data=("\n".join(sorted(objects)) + "\n").encode("ascii"),
+                output_limit=_MAX_SNAPSHOT + _MAX_FILES * 512,
+            )
+            check_deadline()
+            self._git(path, "index-pack", "--stdin", data=pack)
+            # Include the complete commit and tree, not mutable branch refs or history.
+            (path / ".git/shallow").write_text(commit + "\n", encoding="ascii")
+            self._git(path, "update-ref", "--no-deref", "HEAD", commit)
+            self._git(path, "read-tree", commit)
+            check_deadline()
+            self._materialize(path, tree)
+            workspace = {
+                "path": str(path),
+                "commit": commit,
+                "tree_hash": tree,
+                "git_metadata": self._verification_metadata(path),
+            }
+            self.verify_verification(workspace)
+            check_deadline()
+            return workspace
+
+    def verify_verification(self, workspace: dict) -> None:
+        """Detect changed verification input; ignored build output may remain.
+
+        This is an input-integrity guard, not an operating-system execution sandbox.
+        The caller must retain the whole trusted result from prepare_verification.
+        """
+        self._identity()
+        path = Path(workspace["path"])
+        try:
+            if self._verification_metadata(path) != workspace.get("git_metadata"):
+                raise ValueError("Verification Git metadata or index changed")
+            self._validate_repository(path)
+            commit = workspace["commit"]
+            if not _COMMIT.fullmatch(commit):
+                raise ValueError("Verification requires an immutable commit")
+            if (
+                self._git(path, "symbolic-ref", "-q", "HEAD", allow_failure=True)
+                is not None
+            ):
+                raise ValueError("Verification HEAD must remain detached")
+            if self._git(path, "rev-parse", "HEAD").decode().strip() != commit:
+                raise ValueError("Verification HEAD changed")
+            if (
+                self._git(path, "rev-parse", "HEAD^{tree}").decode().strip()
+                != workspace["tree_hash"]
+            ):
+                raise ValueError("Verification tree changed")
+            if self._git(path, "ls-files", "-u", "-z") or self._git(
+                path,
+                "diff",
+                "--cached",
+                "--name-only",
+                "--no-ext-diff",
+                "--no-textconv",
+                "-z",
+                commit,
+                "--",
+            ):
+                raise ValueError("Verification index changed")
+            self._snapshot(
+                path,
+                self._tree(commit, cwd=path),
+                set(),
+                capture=False,
+                allow_ignored=True,
+            )
+            if self._verification_metadata(path) != workspace["git_metadata"]:
+                raise ValueError("Verification Git metadata changed during inspection")
+        except OSError as error:
+            raise ValueError(
+                f"Unsafe or inaccessible verification input: {error.filename}"
+            ) from error
+
     def verify_review(self, attempt: dict, plan: dict, workspace: dict) -> None:
         """Reject acceptance if the reviewer changed the submitted checkout."""
         with self._lock():
@@ -894,48 +1111,98 @@ class WorkWorkspace:
             message=f"Preserve interrupted shared-work step {attempt['step_id']}",
         )
 
+    def _submission_snapshot(
+        self, attempt: dict, plan: dict, workspace: dict, *, capture: bool
+    ) -> tuple:
+        """Share capture policy without mutating Git objects, refs or either index."""
+        path, metadata = self._metadata(attempt, plan, workspace)
+        if metadata["kind"] != "implement":
+            raise ValueError("Review attempts cannot publish implementation snapshots")
+        base = self._commit(metadata["base_commit"])
+        baseline = self._tree(base)
+        owned = set(metadata["owned_files"])
+        violations = []
+        conflicts = self._git(path, "ls-files", "-u", "-z")
+        if conflicts:
+            names = sorted(
+                {
+                    _path(row.split(b"\t", 1)[1].decode())
+                    for row in conflicts.split(b"\0")
+                    if row
+                }
+            )
+            violations.append(
+                f"Unresolved index conflicts require reconciliation: {', '.join(names)}"
+            )
+        staged = self._git(
+            path,
+            "diff",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "-z",
+            base,
+            "--",
+        )
+        outside = sorted(
+            {_path(name.decode()) for name in staged.split(b"\0") if name} - owned
+        )
+        if outside:
+            violations.append(
+                f"Unexpected staged modification outside ownership: {', '.join(outside)}"
+            )
+        allow_ignored = shell_permission(attempt)
+        try:
+            snapshot, contents = self._snapshot(
+                path, baseline, owned, capture=capture, allow_ignored=allow_ignored
+            )
+        except (ValueError, OSError) as error:
+            # Unsafe or incomplete inspection is still a refusal, not a partial pass.
+            violations.append(str(error))
+        if violations:
+            raise ValueError("; ".join(violations))
+        changed = sorted(
+            name
+            for name in baseline.keys() | snapshot.keys()
+            if baseline.get(name) != snapshot.get(name)
+        )
+        return path, base, baseline, owned, allow_ignored, snapshot, contents, changed
+
+    def validate_submission(self, attempt: dict, plan: dict) -> dict:
+        """Preflight only: positive validation is neither a freeze nor a submission."""
+        with self._lock():
+            self._repository()
+            manifest = self.directory / f"{attempt['attempt_id']}.json"
+            self._attempt_path(attempt)
+            if manifest.is_symlink() or not manifest.is_file():
+                raise ValueError("Attempt workspace manifest is missing or unsafe")
+            prepared = json.loads(manifest.read_text(encoding="utf-8"))
+            workspace = {
+                "path": attempt.get("workspace"),
+                "base_commit": prepared.get("base_commit"),
+            }
+            path, base, _, _, _, _, _, changed = self._submission_snapshot(
+                attempt, plan, workspace, capture=False
+            )
+            self._metadata(attempt, plan, workspace)
+            return {
+                "status": "valid",
+                "workspace": str(path),
+                "base_commit": base,
+                "changed_files": changed,
+                "output_committed": False,
+            }
+
     def finish(
         self, attempt: dict, plan: dict, workspace: dict, *, message: str | None = None
     ) -> dict:
         """Commit a verified raw-byte snapshot, including owned additions/deletions."""
         with self._lock():
             self._repository()
-            path, metadata = self._metadata(attempt, plan, workspace)
-            if metadata["kind"] != "implement":
-                raise ValueError(
-                    "Review attempts cannot publish implementation snapshots"
-                )
-            base = self._commit(metadata["base_commit"])
-            baseline = self._tree(base)
-            owned = set(metadata["owned_files"])
-            if self._git(path, "ls-files", "-u", "-z"):
-                raise ValueError("Unresolved index conflicts require reconciliation")
-            staged = self._git(
-                path,
-                "diff",
-                "--cached",
-                "--name-only",
-                "--no-renames",
-                "--no-ext-diff",
-                "--no-textconv",
-                "-z",
-                base,
-                "--",
-            )
-            if any(
-                _path(name.decode()) not in owned
-                for name in staged.split(b"\0")
-                if name
-            ):
-                raise ValueError("Unexpected staged modification outside ownership")
-            allow_ignored = shell_permission(attempt)
-            snapshot, contents = self._snapshot(
-                path, baseline, owned, allow_ignored=allow_ignored
-            )
-            changed = sorted(
-                name
-                for name in baseline.keys() | snapshot.keys()
-                if baseline.get(name) != snapshot.get(name)
+            path, base, _, _, _, snapshot, contents, changed = (
+                self._submission_snapshot(attempt, plan, workspace, capture=True)
             )
             # Build a separate index from the trusted base; the model's index is not
             # an authority, and Git clean filters never transform submitted bytes.
@@ -983,8 +1250,8 @@ class WorkWorkspace:
                 tree = self._git(path, "write-tree", index=index).decode().strip()
             # Detect concurrent edits before promotion; leave the real index/HEAD
             # untouched, so retries and recovery retain the original evidence.
-            observed, _ = self._snapshot(
-                path, baseline, owned, capture=False, allow_ignored=allow_ignored
+            _, _, _, _, _, observed, _, _ = self._submission_snapshot(
+                attempt, plan, workspace, capture=False
             )
             if observed != snapshot:
                 raise ValueError(

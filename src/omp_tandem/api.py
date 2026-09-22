@@ -215,6 +215,19 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 "execution_profiles": profile_catalog(),
                 "runtime_identity": runtime_identity(),
                 "host_owner": bridge.channel.owner,
+                "jev_audit": bridge.jev.status(),
+                "review_checks": {
+                    "available": True,
+                    "policy": "supervisor_checks_v1",
+                    "requires_operator_authorization": True,
+                    "reviewer_shell": False,
+                    "os_sandbox": False,
+                    "executor": "docker",
+                    "process_boundary": "docker_pid_namespace",
+                    "requires_local_engine": True,
+                    "requires_pinned_image": True,
+                    "default_network": "none",
+                },
             }
         )
 
@@ -244,6 +257,39 @@ def build_server(configuration: Bridge | RuntimeOptions):
         )
         return await asyncio.to_thread(
             read_task_context, task, bridge.projects, request
+        )
+
+    @mcp.tool()
+    async def tandem_audit(
+        task_id: str,
+        ctx: Context,
+        offset: Annotated[int, Field(ge=0)] = 0,
+        limit: Annotated[int, Field(ge=1, le=10)] = 5,
+        preview: bool = False,
+        expected_input_sha256: Annotated[
+            str | None, Field(pattern=r"^[0-9a-f]{64}$")
+        ] = None,
+    ) -> dict:
+        """Explicitly ask Jev about gaps in a completed task's reported evidence.
+
+        preview=true shows the exact bounded export without a key, network call or
+        reservation. Sending requires operator opt-in and an OpenRouter key.
+        expected_input_sha256 refuses changed input before sending. The request
+        includes selected criteria, goal, report prose and check descriptions.
+        No source files, commands, task context, artifact bodies or history are read
+        for export; report prose itself may still contain sensitive information.
+        Advice is not verification, acceptance, a finding or permission to act.
+        Ordinary results and waiting never call Jev. Exact repeated pages reuse the
+        saved attempt, including failures; changed/overlapping pages may incur cost.
+        No automatic retry after a timeout, cancellation or unresolved attempt.
+        """
+        bridge = await runtime.get(ctx)
+        return await bridge.jev.audit(
+            task_id,
+            offset=offset,
+            limit=limit,
+            preview=preview,
+            expected_input_sha256=expected_input_sha256,
         )
 
     @mcp.tool()

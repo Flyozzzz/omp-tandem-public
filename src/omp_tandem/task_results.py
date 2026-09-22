@@ -10,6 +10,7 @@ from .artifacts import ArtifactStore
 from .execution import conversation_usage, failure_fact, task_usage
 from .models import AcceptanceSet, CheckRun, VerificationPlan, assess_checks
 from .project_context import ProjectContextStore
+from .review_check_state import has_review_runner
 from .runtime_identity import runtime_identity
 from .runtime_models import ACTIVE
 from .task_contracts import current_task, work_policy
@@ -31,11 +32,16 @@ def read_artifact_text(artifacts, artifact_id):
 
 class TaskResults:
     def __init__(
-        self, tasks: TaskStore, artifacts: ArtifactStore, projects: ProjectContextStore
+        self,
+        tasks: TaskStore,
+        artifacts: ArtifactStore,
+        projects: ProjectContextStore,
+        work_items=None,
     ):
         self.tasks = tasks
         self.artifacts = artifacts
         self.projects = projects
+        self.work_items = work_items
 
     def view(self, task_id, details=False, *, refresh=True):
         task = self.tasks.get(task_id, refresh=refresh)
@@ -170,6 +176,35 @@ class TaskResults:
             current_checks = assess_verification(verification, runs)
             current_checks["unreadable_records"] = unreadable
             result["verification"] = current_checks
+        if attempt is not None and has_review_runner(attempt):
+            if self.work_items is None:
+                raise ValueError("Trusted review verification store is unavailable")
+            trusted = self.work_items.review_check_assessment(
+                attempt["attempt_id"], current=False
+            )
+            current_checks = assess_verification(verification, trusted["runs"])
+            current_checks.update(
+                status=trusted["status"],
+                source="supervisor_checks_v1",
+                applicability="recorded_attempt_snapshot",
+            )
+            result["verification"] = current_checks
+            result["trusted_verification"] = {
+                "source": "supervisor_checks_v1",
+                "attempt_id": attempt["attempt_id"],
+                "status": trusted["status"],
+                "settled": trusted["settled"],
+                "runs": trusted["runs"] if details else None,
+                "reader": {
+                    "tool": "tandem_work",
+                    "request": {
+                        "action": "get",
+                        "work_id": attempt["work_id"],
+                        "step_id": attempt["step_id"],
+                    },
+                    "section": "verification",
+                },
+            }
         declared = contract.get("acceptance_set")
         if attempt is not None:
             # A work attempt owns its own plan and denominator; saying anything about
@@ -290,11 +325,12 @@ class TaskResults:
         with closing(self.tasks.connect()) as db:
             try:
                 row = db.execute(
-                    "SELECT json_object('attempt_id',a.attempt_id,'kind',json_extract(a.attempt,'$.kind'),"
+                    "SELECT json_object('attempt_id',a.attempt_id,'work_id',a.work_id,'step_id',a.step_id,'kind',json_extract(a.attempt,'$.kind'),"
                     "'autonomous',json_extract(a.attempt,'$.autonomous'),'authorization_id',json_extract(a.attempt,'$.authorization_id'),"
                     "'state',a.state,'protocol',coalesce(json_extract(a.attempt,'$.protocol'),'legacy_disclosure'),'review_stage',json_extract(a.attempt,'$.review_stage'),"
                     "'review_id',json_extract(a.attempt,'$.review_id'),'verdict',json_extract(a.attempt,'$.verdict'),"
-                    "'verification',json_extract(a.attempt,'$.verification')) AS attempt,"
+                    "'verification',json_extract(a.attempt,'$.verification'),"
+                    "'review_check_policy',json_extract(a.attempt,'$.review_check_policy')) AS attempt,"
                     "json_object('authorization',json_extract(c.card,'$.authorization'),'plan_revision',json_extract(c.card,'$.plan_revision'),"
                     "'status',json_extract(c.card,'$.status')) AS card FROM work_attempts a JOIN work_cards c ON c.work_id=a.work_id WHERE a.native_task_id=?",
                     (task_id,),
@@ -311,6 +347,9 @@ class TaskResults:
             except sqlite3.OperationalError:
                 row, origin_rows = None, []
         attempt = json.loads(row["attempt"]) if row else None
+        if attempt is not None:
+            # SQLite json_extract represents JSON booleans as integer scalars.
+            attempt["autonomous"] = bool(attempt["autonomous"])
         card = json.loads(row["card"]) if row else None
         # Claims this turn made through its own tandem_work tool: token-free
         # recovery state only, never dispatch authority.

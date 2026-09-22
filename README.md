@@ -91,7 +91,9 @@ The agent uses `tandem_review_run`: a saved staged/index snapshot, one independe
 
 See [compact views, runtime identity and recovery](docs/guide.md#compact-contracts) and [operator blocker resolution](docs/guide.md#operator-unblock). Hints and notifications grant no authority; resolving a blocker never resumes or authorizes work. Independent acceptance is separate from operator application and publication.
 
-Current package: **3.10.0**. One [long bounded wait](docs/guide.md#delivery) replaces a chain of short ones, a refused [review capture](docs/guide.md#review) names every repairable path at once, and a [pinned correction set](docs/guide.md#review) answers what became of the previous round's findings. All additive: defaults, permissions and acceptance checks are unchanged. See the [changelog](CHANGELOG.md). Building/checking packages does not tag, publish, install into a user session or apply code.
+Optional [Jev evidence audits](docs/guide.md#optional-jev-evidence-audit) flag possible gaps between a completed task's criteria and its reported checks. The `jev-audit` skill starts with a keyless exact-payload preview; sending remains opt-in and requires an OpenRouter key. It is advice, not source inspection or independent acceptance.
+
+Current package: **3.11.0**. Managed submission checks ownership before recording intent; current views distinguish intent from committed output. Explicitly authorized [supervisor review checks](docs/guide.md#controlled-review-checks) use a prepared, immutable Linux Docker image and a separate exact-commit copy inside the existing product step, without reviewer shell tools. Network defaults to none; confirmed container removal is required, with no host fallback. Old grants are not upgraded. See the [changelog](CHANGELOG.md). Publishing or installing an update never restarts existing work or authorizes new execution.
 
 ## Plan changes and repository handover
 

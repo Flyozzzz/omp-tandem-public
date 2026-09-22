@@ -10,6 +10,7 @@ from .artifacts import ArtifactStore
 from .findings import FindingStore
 from .models import AcceptanceSet, VerificationPlan, decode_outcome
 from .project_context import ProjectContextStore
+from .review_check_state import has_review_runner
 from .runtime_models import (
     ACTIVE,
     RESERVED_ARTIFACT_PREFIX,
@@ -111,7 +112,14 @@ class TaskInteraction:
                 if attempt is not None
                 else contract.get("verification")
             )
-            enforce_verification(verification, report)
+            trusted = None
+            if attempt is not None and has_review_runner(attempt):
+                trusted = self.work_items.trusted_verification_context(
+                    attempt["attempt_id"]
+                )
+                if trusted is None:
+                    raise ValueError("Supervisor verification context is unavailable")
+            enforce_verification(verification, report, trusted=trusted)
             # Declared acceptance evidence is task-local in this release: when a work
             # attempt owns the plan, the task's own set says nothing about that plan's
             # denominator, so the gate does not run rather than run on the wrong set.

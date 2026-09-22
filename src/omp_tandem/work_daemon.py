@@ -12,6 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .bridge import Bridge
+from .review_containers import resolve_container
 from .work_items import CLAUDE_DEFAULT_MODEL, validate_model
 from .work_supervisor import WorkSupervisor, private_json, supervisor_status
 from .work_workspace import WorkWorkspace
@@ -82,6 +83,37 @@ def parser():
         "--allow-tests",
         action="store_true",
         help="Deprecated alias of --allow-shell with the same arbitrary-shell permission",
+    )
+    authorize.add_argument(
+        "--allow-review-checks",
+        action="store_true",
+        help="Authorize declared review commands in isolated Docker containers after independent reporting; no reviewer shell access",
+    )
+    authorize.add_argument(
+        "--review-check-timeout",
+        type=int,
+        default=300,
+        help="Maximum seconds per supervisor review check, also bounded by the grant deadline",
+    )
+    authorize.add_argument(
+        "--review-check-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Explicit environment variable for review commands; pin its value hash at authorization, never store the value",
+    )
+    authorize.add_argument(
+        "--review-check-image",
+        help="Already available Linux image to pin by immutable ID; required with --allow-review-checks; never pulled automatically",
+    )
+    authorize.add_argument(
+        "--review-check-docker-context",
+        help="Local Docker context to resolve and pin; defaults to the current context",
+    )
+    authorize.add_argument(
+        "--review-check-network",
+        default="none",
+        help="Existing bridge network to pin by ID; default: none",
     )
     revoke = commands.add_parser(
         "revoke", help="Revoke one task's launch grant and stop its managed work"
@@ -370,6 +402,21 @@ def main(argv=None):
                         file=sys.stderr,
                         flush=True,
                     )
+                if not args.allow_review_checks and (
+                    args.review_check_image
+                    or args.review_check_docker_context
+                    or args.review_check_network != "none"
+                ):
+                    raise ValueError("Container options require --allow-review-checks")
+                container = (
+                    resolve_container(
+                        args.review_check_image,
+                        context=args.review_check_docker_context,
+                        network=args.review_check_network,
+                    )
+                    if args.allow_review_checks
+                    else None
+                )
                 request = {
                     "budget_seconds": args.budget_seconds,
                     "max_launches": args.max_launches,
@@ -379,6 +426,10 @@ def main(argv=None):
                     "allow_shell": args.allow_shell or args.allow_tests,
                     "claude_model": args.claude_model,
                     "omp_model": args.model,
+                    "allow_review_checks": args.allow_review_checks,
+                    "review_check_timeout": args.review_check_timeout,
+                    "review_check_env": args.review_check_env,
+                    "review_check_container": container,
                 }
                 if args.preview:
                     # Nothing is written: the operator sees the exact ceiling,

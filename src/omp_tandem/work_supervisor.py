@@ -9,6 +9,8 @@ import threading
 import time
 from uuid import uuid4
 
+from .review_check_state import has_review_runner
+from .review_checks import ReviewChecks
 from .work_adapters import ClaudeWorkAdapter, OmpWorkAdapter
 from .work_items import WorkConflict
 from .work_workspace import WorkWorkspace
@@ -113,6 +115,7 @@ class WorkSupervisor:
         identifier = attempt["attempt_id"]
         adapter = self.adapters[attempt["actor"]]
         handle = None
+        checks = None
         token_file = None
         launching = False
         finished = False
@@ -135,25 +138,47 @@ class WorkSupervisor:
             with os.fdopen(descriptor, "w") as token:
                 token.write(attempt["token"] + "\n")
             launching = True
-            # Adapter persists its non-replay launch marker and native binding
-            # before dispatch. No supervisor thread blocks another attempt's watchdog.
             handle = adapter.start(attempt, plan, workspace, token_file=token_file)
             while True:
                 current = self.store.attempt(identifier)
+                rejected = (current.get("verdict") or {}).get("verdict") == "reject"
                 invalid = (
                     self.stop_event.is_set()
                     or time.monotonic() >= deadline
                     or current["state"] not in ("reserved", "running")
                 )
+                if checks is not None:
+                    if invalid or rejected or current.get("block_intent"):
+                        checks.cancel()
+                    checked = checks.poll()
+                    if checked and checked["status"] == "uncertain" and not rejected:
+                        invalid = True
+                elif (
+                    not invalid
+                    and not rejected
+                    and has_review_runner(current)
+                    and self.store.review_check_context(identifier) is not None
+                ):
+                    checks = ReviewChecks(self.store, self.workspace, identifier)
+                    checks.start()
                 if invalid:
                     adapter.cancel(handle)
                 result = adapter.poll(handle)
                 if result is not None:
+                    if checks is not None:
+                        checks.close()
+                        checked = checks.poll()
+                        if not checked or not checked["teardown_confirmed"]:
+                            raise RuntimeError(
+                                "Review verification teardown remains unconfirmed"
+                            )
+                        if checked["status"] == "uncertain" and not rejected:
+                            invalid = True
                     if invalid:
                         result = {
                             **result,
                             "outcome": "interrupted",
-                            "error": "Execution stopped by pause, deadline, revocation or a changed plan",
+                            "error": "Execution stopped by authorization, deadline or unsettled supervisor verification",
                         }
                     self._finish(attempt, plan, workspace, result)
                     finished = True
@@ -181,6 +206,12 @@ class WorkSupervisor:
                         )
                 except Exception:
                     logger.exception("Assignment cleanup remains unconfirmed")
+            if checks is not None:
+                try:
+                    checks.close()
+                except Exception:
+                    stopped = False
+                    logger.exception("Review check cleanup remains unconfirmed")
             if not finished:
                 self.store.finish_attempt(
                     identifier,
@@ -194,8 +225,13 @@ class WorkSupervisor:
                 if stopped:
                     self.store.confirm_stopped(identifier)
         finally:
-            if token_file is not None:
-                token_file.unlink(missing_ok=True)
+            try:
+                if checks is not None:
+                    checks.cancel()
+                    checks.close()
+            finally:
+                if token_file is not None:
+                    token_file.unlink(missing_ok=True)
 
     def _launch(self, entry):
         attempt = self.store.reserve(

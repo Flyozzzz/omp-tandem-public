@@ -18,6 +18,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from .models import parse_outcome
+from .review_check_state import has_review_runner
 from .reviews import ReviewRequest
 from .verification import verification_requirements
 from .work_items import (
@@ -189,6 +190,8 @@ def _prompt(attempt, plan, workspace):
         "Use the agreed checklist and exact owned_files. Do not commit, switch branches, "
         "merge, change settings, launch other agents, or access token/config files. "
         "The supervisor preserves an immutable commit after you finish. "
+        "A managed submit records intent only; output_committed becomes true only after "
+        "supervisor capture. Never call an acknowledged intent a submitted commit. "
         "Implementation must explain real results and evidence, never claim reviewer acceptance. "
         "Review must independently examine the EXACT submitted snapshot and use tandem_work "
         "accept or reject with exact submission_id, current revision and evidence. "
@@ -212,6 +215,17 @@ def _prompt(attempt, plan, workspace):
             "Missing context requires a new snapshot/attempt, not free-text clarification "
             "within this stage; record blocked/partial and identify exact missing paths.\n"
             if independent
+            else ""
+        )
+        + (
+            "Declared review commands belong to the explicitly authorized supervisor, not your tools. "
+            "After a successful independent report, wait with bounded tandem_work get for verification "
+            "to settle. Then open comparison and read section=verification; follow its opaque "
+            "verification/RUN_ID pointers for logs. Accept requires all trusted checks passed; "
+            "failed checks can justify rejection, never a claim of passing. Do not copy machine "
+            "observations into a participant report, run commands yourself, repair product code, "
+            "or retry an uncertain check. A completed rejection may be a successful review delivery.\\n"
+            if has_review_runner(attempt)
             else ""
         )
         + json.dumps(

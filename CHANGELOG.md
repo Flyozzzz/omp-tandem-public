@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.11.0 — 2026-09-22
+
+### Changes
+
+- Managed submission validates declared ownership before recording immutable intent. New observations distinguish `intent_recorded`, `output_committed` and `capture_failed`; exact operation receipts replay without inspecting a removed workspace. Final capture still revalidates the exact bytes and never adopts undeclared files.
+- Fresh operator `--allow-review-checks` grants require a prepared Linux Docker image, resolved to an immutable ID on a pinned local daemon. Each selected `review_verification` command runs after the immutable independent report in a fresh container, mounting only a standalone exact-commit copy. Models remain snapshot-only; no host-shell fallback, image pull or authority upgrade for old grants.
+- Container removal, unchanged inputs, exit status and comparison gate acceptance across both reviewer seats. Read-only rootfs, private PID/IPC namespaces, dropped capabilities and no network by default constrain execution; optional existing bridge networks require an explicit grant. This does not undo database/network effects or certify universal adversarial isolation.
+- Private verification logs have stage- and scope-checked readers, bounded output and immutable run identities. Unknown create/start/cleanup does not retry or pass. Explicit environment values are pinned by hash and not inherited wholesale.
+- Permitted unowned/untracked ignored dependency outputs, including `.venv` symlinks and package-store hardlinks, are excluded without dereferencing them. Tracked/owned inputs, their ancestors and Git metadata retain strict validation; ignored dependencies are not pinned source.
+- `tandem_audit(preview=true)` returns the complete bounded outgoing payload without a key, reservation or network call. Sending may require its exact `expected_input_sha256`; stale input refuses before charging. A dedicated `jev-audit` skill explains consent, typed uncertainty and advisory-only use without installing third-party hooks.
+- Added opt-in coordinator-only `tandem_audit`: Jev 1.13 on OpenRouter compares completed-task acceptance criteria with reported evidence and returns advisory typed choices. Plain acceptance lists and structured obligations are supported; shared-work-bound tasks remain outside this task-local surface.
+- `--jev-audit` / `OMP_TANDEM_JEV_AUDIT=1` and `OPENROUTER_API_KEY` enable explicit calls; `tandem_scope` exposes safe capability information. Task context, commands, source files, artifact bodies and conversation histories are excluded from requests, but selected report prose may contain sensitive information. Normal result/wait/finish paths never call the provider.
+- Bounded asynchronous HTTP and immutable exact-page reservations preserve original task outcomes and prevent silent replay across concurrent clients, failures and uncertain interruptions. Advice never grants permissions or establishes verification, semantic sufficiency or acceptance.
+
 ## 3.10.0 — 2026-09-16
 
 ### Changes

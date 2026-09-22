@@ -12,6 +12,7 @@ from . import migration
 from .api import build_server
 from .binding import RuntimeOptions
 from .bridge import Bridge
+from .jev_audit import JevConfig
 from .prompts import INSTRUCTIONS
 from .workspace import resolve_scope
 
@@ -81,6 +82,11 @@ def main(argv=None):
         "--model",
         default=os.environ.get("OMP_TANDEM_MODEL"),
         help="Provider/model override; otherwise use the model configured in OMP.",
+    )
+    parser.add_argument(
+        "--jev-audit",
+        action="store_true",
+        help="Enable explicit Jev report audits; sends selected report prose to OpenRouter using OPENROUTER_API_KEY",
     )
     parser.add_argument(
         "--disable-channel",
@@ -161,6 +167,11 @@ def main(argv=None):
         "OMP_TANDEM_CHANNEL", "auto"
     )
     webhook_enabled = not args.no_webhook and enabled_setting("OMP_TANDEM_WEBHOOK", "1")
+    jev_enabled = args.jev_audit or enabled_setting("OMP_TANDEM_JEV_AUDIT", "0")
+    jev_config = JevConfig(
+        enabled=jev_enabled,
+        api_key=os.environ.get("OPENROUTER_API_KEY") if jev_enabled else None,
+    )
     options = RuntimeOptions(
         args.state_dir,
         args.omp,
@@ -172,6 +183,7 @@ def main(argv=None):
         migrate_legacy=not args.no_legacy_import and not args.migrate_only,
         work_participant=args.work_participant,
         work_token_file=args.work_token_file,
+        jev_config=jev_config,
     )
     if args.candidate_smoke:
         bridge = Bridge(
@@ -182,6 +194,7 @@ def main(argv=None):
             channel_enabled=False,
             webhook_enabled=False,
             migrate_legacy=False,
+            jev_config=jev_config,
         )
         print(
             json.dumps(

@@ -121,6 +121,23 @@ def perform_work(
             # Only a retired inferred credential falls back to an unbound read;
             # a refusal of the bound read itself must not fail open.
             token = None
+    if (
+        command.action == "get"
+        and options.section
+        and (
+            options.section == "verification"
+            or options.section.startswith("verification/")
+        )
+    ):
+        return store.review_check_section(
+            command,
+            actor=actor,
+            attempt_token=token,
+            origin=origin,
+            section=options.section,
+            cursor=options.cursor,
+            limit=16000 if "/" in options.section else options.limit,
+        )
     if command.action == "list":
         result = store.list_page(
             actor=actor,
@@ -167,7 +184,22 @@ def perform_work(
             result, actor=actor, view=options.view, format=options.format
         )
     try:
-        result = store.perform(command, actor=actor, attempt_token=token, origin=origin)
+        replayed = None
+        if bound and bound["autonomous"] and command.action == "submit":
+            prepared = store.prepare_submission(
+                command, actor=actor, attempt_token=token, origin=origin
+            )
+            if prepared["replayed"]:
+                replayed = prepared["response"]
+            else:
+                WorkWorkspace(store.scope).validate_submission(
+                    prepared["attempt"], prepared["plan"]
+                )
+        result = (
+            replayed
+            if replayed is not None
+            else store.perform(command, actor=actor, attempt_token=token, origin=origin)
+        )
     except WorkConflict as error:
         if error.current is None:
             raise

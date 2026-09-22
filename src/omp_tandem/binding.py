@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from .bridge import Bridge
+from .jev_audit import JevConfig
 from .work_notifications import WorkNotifications
 from .workspace import client_root_paths
 
@@ -53,6 +54,7 @@ class RuntimeOptions:
     migrate_legacy: bool = True
     work_participant: str = "claude"
     work_token_file: Path | None = None
+    jev_config: JevConfig | None = None
 
 
 class BridgeBinding:
@@ -98,6 +100,7 @@ class BridgeBinding:
             migrate_legacy=options.migrate_legacy,
             work_participant=options.work_participant,
             work_token_file=options.work_token_file,
+            jev_config=options.jev_config,
         )
         self.bridge = bridge
         self.source = source
@@ -188,4 +191,7 @@ class BridgeBinding:
                 try:
                     await asyncio.to_thread(self.bridge.shutdown)
                 finally:
-                    await self.bridge.channel.close()
+                    try:
+                        await self.bridge.jev.close()
+                    finally:
+                        await self.bridge.channel.close()

@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Package 3.10.0 (released 2026-09-16)** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Package 3.11.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -590,7 +590,118 @@ New review attempts use `independent_first`. After the reviewer claim, submit `a
 
 Author notes, free-text evidence and related artifacts remain author interpretation, withheld **until compare opens**, including after recording the report. Managed Claude and OMP reviewers use a server-bound reader for the pinned submission commit, not live filesystem tools or arbitrary shell. Requirements and raw snapshot provenance remain available. Manual publication gates and server-channel filtering do not erase earlier disclosure in an interactive client or create an OS sandbox.
 
-A grant with shell permission creates an operator-owned policy blocker **before a managed review launches**, because no stage-confined shell mechanism is available. Participants cannot waive this blocker. An operator must explicitly resolve it with evidence for a no-shell review (and honestly record unrun checks); otherwise review stays blocked. Do not silently drop required checks or claim unrestricted shell is independent-first.
+Without a fresh supervisor-check grant, legacy shell permission still creates the operator-owned pre-launch review blocker. Participants cannot waive it or hide commands in prose. The separate execution path below preserves snapshot-only reviewer tools; old grants and waivers do not enable it.
+
+### Controlled review checks
+
+One product step can contain implementation, independent read-only assessment,
+code-owned execution and final comparison/acceptance. It does not need a second
+model-driven product step just to run tests. This path is for managed reviews;
+manual shell-requiring claims keep their existing admission rules.
+
+Declare the actual commands in that step's `review_verification`, not in prose:
+
+```json
+{"review_verification": {"stage": "candidate", "checks": [
+  {"id": "unit", "criterion": "The public behavior is exercised", "phase": "targeted",
+   "command": "python -m unittest discover"}
+]}}
+```
+
+The operator must preview and explicitly approve a **fresh** grant:
+
+```sh
+python -m omp_tandem.work_daemon --project-root /absolute/project \
+  --claude-model sonnet --omp-model <provider/model> \
+  authorize <work-id> --budget-seconds 1800 --max-launches 10 \
+  --max-cost-usd 6 --allow-work --allow-shell \
+  --allow-review-checks --review-check-image my-project-checks:ready \
+  --review-check-timeout 300 --preview
+```
+
+This capability requires a running **local Linux Docker engine**, the Docker CLI
+for context discovery, and an already prepared image containing `/bin/sh` and the
+project's actual check tools. For a Bun project, prepare a suitable Bun image;
+the host's `.venv`, Bun installation and caches are not mounted or inherited.
+The operator prepares images explicitly; Tandem never pulls one or falls back to
+host shell. Preview resolves the current local Docker context (or explicit
+`--review-check-docker-context NAME`) and pins the daemon, API and immutable image
+ID. Replacing a tag cannot change an existing grant.
+
+Network is `none` by default. To reach an authorized fixture database, explicitly
+select an existing bridge with `--review-check-network NAME`; its ID is pinned.
+`localhost` is the container, not the host. Configure the actual fixture address
+and credentials deliberately. Tandem does not start services or reset databases.
+
+Append `--review-check-env TEST_DATABASE_URL` only when that variable is configured
+and required. Names and value hashes are pinned at authorization; missing or
+changed values refuse execution. The executor uses the image's PATH and private
+HOME/TMPDIR, with other image ENV defaults cleared unless explicitly selected.
+It does not inherit the model's provider/bridge environment or load `.env` files
+itself; executed project code still can. A command must not silently fall back to
+another database or count a build-cache hit as a new execution when the product
+requires a fresh run. Declare the appropriate command/configuration.
+
+The reviewer first records its complete immutable independent report. Then the
+supervisor executes the selected cumulative ladder serially, each command in a
+fresh container sharing only the standalone exact-commit copy. Input integrity
+is checked before/after each command. Rootfs is read-only; PID/IPC namespaces and
+`/tmp` are private; capabilities are dropped and no-new-privileges is set. No
+Docker socket, original repository or shared Git metadata is mounted.
+An ordinary failed check remains failed evidence; remaining declared checks can
+run while inputs and authority remain valid. Changed inputs, uncertain startup,
+cancellation or unconfirmed teardown cannot become passing evidence or automatic
+retries. The model has no Bash/edit tools and must not repair the candidate.
+
+Wait through normal bounded `tandem_work get`. Before comparison, the verification
+section reveals only status. Once checks settle, `compare` opens bounded logs:
+
+```json
+{"request": {"action": "get", "work_id": "<work-id>", "step_id": "<step-id>"},
+ "section": "verification"}
+```
+
+Follow returned `verification/<run-id>` section pointers and `next_cursor`.
+Each run binds the grant, plan/declaration, submission commit, command and
+execution environment identity; private logs have size/hash checks. Model reports
+cannot mint `machine_observed` records. Native results identify trusted execution
+separately from participant reports. Acceptance requires comparison plus all
+selected current checks passed; settled failures may be inspected and rejected.
+A successful review delivery may therefore contain a rejection, not passing tests.
+
+**Process boundary, not universal security certification:** a command's complete
+container must be observed removed on the pinned daemon before cleanup is
+confirmed. Shell exit, pipe EOF or a PID scan is not sufficient. Lost create/start
+acknowledgments never cause another launch; unavailable Docker or unconfirmed
+removal leaves an uncertain result requiring operator reconciliation.
+
+Explicit network access may create database/API effects that container removal
+does not undo. Parent history, external services and ignored dependencies are
+not pinned by the commit. Permitted untracked/unowned ignored outputs are pruned
+without following symlinks; tracked/owned inputs remain strict. Provider costs
+caused by commands are outside model cost accounting. The new capability is
+absent on legacy grants and does not retroactively authorize active attempts.
+
+The regular suite uses a deterministic Unix Docker API fault peer and local
+Claude/OMP protocol peers, not a daemon or live provider. The opt-in real-Docker
+regressions require an already cached Python image:
+
+```sh
+OMP_TANDEM_TEST_DOCKER_IMAGE=python:3.12-slim-bookworm \
+  uv run --frozen pytest -q tests/test_review_check_docker.py
+```
+
+Linux CI explicitly prepares that image; macOS CI remains Docker-free. Local
+Docker Desktop verification exercises normal output, detached `setsid` helpers,
+cancellation and source-mutation refusal. These checks prove those scenarios,
+not arbitrary external-effect rollback.
+
+Managed submit now checks ownership before recording intent, but does not freeze
+the running workspace. `submission_progress=intent_recorded` and
+`output_committed=false` mean no submitted commit yet. Final capture rechecks the
+bytes; only `output_committed` exposes the retained submission identity.
+`capture_failed` requires reconciliation. Preserve useful work and propose exact
+ownership corrections; never delete a necessary test simply to pass the gate.
 
 ### Explicitly authorize unattended work
 
@@ -757,7 +868,7 @@ A task that declares no set is reported as `assessment: "not_declared"`, with th
 
 **What this never claims.** The projection counts declarations and runs. It does not establish that a mapped check asserts the right behaviour, that the declared obligations exhaust the criterion, or that a passing run means the requirement is met — `semantic_sufficiency` and `acceptance` stay `not_assessed` in every response, including when every unit has a current pass. A participant can declare a mapping its test does not honour, and no schema detects that; the projection makes the assertion explicit and reviewable, which is a different thing from certifying it.
 
-In this release the feature is task-local. Work steps refuse these declarations with `acceptance_coverage_unsupported_surface` rather than accepting and ignoring them, and a task bound to a work attempt reports `assessment: "unsupported_surface"` instead of applying its own set to a plan it does not own. Carrying sets and immutable runs through work cards and review captures follows in 3.10.1.
+Declared acceptance-set coverage remains task-local. Work steps refuse those mappings with `acceptance_coverage_unsupported_surface`, and a work-bound task reports `assessment: "unsupported_surface"` instead of applying its own set to a different plan. Supervisor review execution records actual declared checks; it does not add acceptance-set mapping to work cards or prove semantic sufficiency.
 
 Shared steps have separate `requirements`/`verification` for implementation and `review_requirements`/`review_verification` for the reviewer. Review write requirements are invalid. A required shell check does not bypass snapshot-only review or an absent grant; unresolved checks must remain blocked/partial, not silently waived.
 
@@ -1087,6 +1198,7 @@ The compact review scenario is the default entry for changes review; `tandem_wor
 | `tandem_start` | `cwd`, `prompt` or `contract`, `mode`, timeouts, `execution`, review/context binding, `preflight` | Inspect admission or explicitly start a task |
 | `tandem_continue` | `conversation_id`, `prompt` or `contract`, timeouts, execution/context binding, `continuation`, `handoff`, `preflight` | Resume history or explicitly start a fresh bounded context |
 | `tandem_result` | `task_id`, `wait_seconds`, `details` | Read answer, outcome, question, artifacts, and diagnostics |
+| `tandem_audit` | `task_id`, `offset=0`, `limit=5` (1–10) | Opt-in Jev triage of reported evidence; advisory only, never acceptance |
 | `tandem_wait` | `task_ids`, `wait_seconds` | Wait for any selected result/question |
 | `tandem_list` | `limit` | Recent tasks in this namespace without large bodies |
 | `tandem_reply` | `task_id`, `question_id`, `answer` | Answer the exact pending question |
@@ -1106,6 +1218,75 @@ The compact review scenario is the default entry for changes review; `tandem_wor
 | `tandem_receipt` | `task_id`, `action=status/claim/complete`, claim token | Gate result application separately from notification acknowledgment |
 
 OMP itself receives `tandem_ask`, `tandem_finish`, `tandem_publish_artifact`, and `tandem_read_artifact` as host tools bound to its task. Snapshot tasks additionally receive `tandem_review_read`. `tandem_finish` is mandatory even for a plain-text answer; it is not an ordinary coordinator tool.
+
+### Optional Jev evidence audit
+
+`tandem_audit` compares a completed task's acceptance criteria with its **reported**
+evidence. It does not inspect test source or execute checks. It supports plain
+`contract.acceptance`; a structured `acceptance_set` expands obligations without
+duplicating that list. Tasks bound to shared work are not supported: their
+task-local criteria are not the work plan's acceptance criteria.
+
+The operator enables this separately from the main OMP model:
+
+```sh
+export OMP_TANDEM_JEV_AUDIT=1
+export OPENROUTER_API_KEY='your-key'
+```
+
+Forward these variables to the MCP process, or pass `--jev-audit` to the launcher
+with the key in its environment. Start a new candidate/client session to load
+changed configuration; do not restart active work. A key alone does not enable
+auditing. `tandem_scope.jev_audit` shows enabled/configured state and limits,
+never the key. Missing credentials return `unavailable` without a request.
+
+After reading a completed result, the optional `jev-audit` skill can first preview
+the exact export without a key, network request or reservation:
+
+```json
+{"task_id": "<completed-task-id>", "offset": 0, "limit": 5, "preview": true}
+```
+
+Inspect `payload`, `endpoint`, `request_bytes` and `input_sha256`. With operator
+opt-in and the key configured, send the same page with that approved hash:
+
+```json
+{"task_id": "<completed-task-id>", "offset": 0, "limit": 5,
+ "expected_input_sha256": "<hash-returned-by-preview>"}
+```
+
+A changed input refuses before reservation or sending; preview never grants
+consent, clears an uncertain attempt or makes unsafe data safe to export.
+
+The fixed model is `typesafe/jev-1.13` through OpenRouter's
+`https://openrouter.ai/api/alpha/decisions`. One request asks a Choice per unit on
+the selected page: `no_obvious_mismatch`, `partial_or_missing`, `contradiction`,
+or `unclear`. Follow `next_offset` for more units. Probabilities/confidence are
+model judgments, **not** the probability that the code is correct. A completed
+audit means the response passed protocol validation, not that the task passed.
+Original outcome, checks, acceptance coverage, findings, grants and receipts
+remain unchanged. Never feed this advice into an independent review stage.
+
+**Data disclosure:** the request includes the task identifier, goal, selected
+criteria/obligation references and text, report answer/summary/outcome, check
+descriptions and recorded-run descriptions with roles, environments and provenance/applicability flags.
+It does not fetch or export task context, commands, repository files, artifact
+bodies or conversation history. Exported prose can itself contain sensitive
+information; this allowlist is not secret redaction or DLP. Enabling the feature
+permits these explicit calls to send that prose to OpenRouter/TypeSafe, not an
+automatic scan of saved tasks.
+
+Requests are limited to 32,000 UTF-8 bytes including questions, responses to
+65,536 bytes, and HTTP to 10 seconds. Oversized input is refused rather than
+truncated. There are no redirects or automatic retries. Immutable reserved
+artifacts retain the exact input and response/failure; exact repeated pages,
+including concurrent clients, reuse the saved attempt. A cancelled/crashed
+attempt may remain `prior_attempt_unresolved`; it is never silently replayed.
+Failures are also retained for that exact input. Continue ordinary review if
+advice is unavailable; do not vary pagination merely to bypass the reservation.
+Changed or overlapping pages are different requests and may incur another charge.
+Usage/cost are reported only when observed from the provider, otherwise unknown.
+Ordinary `tandem_result`, waiting and report submission never invoke Jev.
 
 ## Results, questions, and artifacts
 
@@ -1219,6 +1400,7 @@ See [Channels and webhooks](channels.md) for request format, recipient selection
 | `--scope-info` | Operator JSON inspection without starting MCP or importing history |
 | `--omp` | OMP executable; default lookup on `PATH` |
 | `--model` | Override OMP model; otherwise `OMP_TANDEM_MODEL` or OMP configuration |
+| `--jev-audit` | Enable explicit Jev audits; alternatively `OMP_TANDEM_JEV_AUDIT=1`; requires `OPENROUTER_API_KEY` |
 | `--disable-channel` | Force polling without probes/webhook |
 | `--no-webhook` | Disable the HTTP listener |
 | `--webhook-port` | Loopback port; `0` selects a free per-session port |

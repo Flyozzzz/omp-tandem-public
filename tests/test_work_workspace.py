@@ -388,6 +388,277 @@ class WorkWorkspaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside ownership"):
             self.workspaces.verify_review(attempt, plan, workspace)
 
+    def test_submission_preflight_reports_all_unowned_paths_without_capture(self):
+        plan = self.plan(("edit", ["alpha.txt"], []))
+        attempt = self.attempt()
+        workspace = self.workspaces.prepare(attempt, plan, [])
+        attempt["workspace"] = workspace["path"]
+        path = Path(workspace["path"])
+        (path / "tests").mkdir()
+        (path / "tests/test_unit.py").write_text("assert True\n")
+        (path / "beta.txt").write_text("undeclared staged edit\n")
+        self.git(path, "add", "beta.txt")
+        (path / "beta.txt").write_text("beta base\n")
+        (path / "deleted.txt").unlink()
+        refs = self.git(self.root, "show-ref")
+        with self.assertRaises(ValueError) as raised:
+            self.workspaces.validate_submission(attempt, plan)
+        for name in ("tests/test_unit.py", "beta.txt", "deleted.txt"):
+            self.assertIn(name, str(raised.exception))
+        self.assertEqual(self.git(self.root, "show-ref"), refs)
+        self.assertEqual(
+            self.git(path, "rev-parse", "HEAD").decode().strip(), self.source
+        )
+        self.assertTrue((path / "tests/test_unit.py").exists())
+
+    def test_submission_preflight_is_nonpromoting_and_finish_revalidates(self):
+        plan = self.plan(("edit", ["alpha.txt", "new.bin", "deleted.txt"], []))
+        attempt = self.attempt()
+        workspace = self.workspaces.prepare(attempt, plan, [])
+        attempt["workspace"] = workspace["path"]
+        path = Path(workspace["path"])
+        (path / "alpha.txt").write_text("owned modification\n")
+        (path / "new.bin").write_bytes(b"\x00\xff\r\n")
+        (path / "deleted.txt").unlink()
+        self.git(path, "add", "alpha.txt")
+        before = {
+            str(item.relative_to(self.root)): item.read_bytes()
+            for item in (self.root / ".git").rglob("*")
+            if item.is_file()
+        }
+        result = self.workspaces.validate_submission(attempt, plan)
+        self.assertEqual(result["status"], "valid")
+        self.assertFalse(result["output_committed"])
+        self.assertEqual(
+            result["changed_files"], ["alpha.txt", "deleted.txt", "new.bin"]
+        )
+        after = {
+            str(item.relative_to(self.root)): item.read_bytes()
+            for item in (self.root / ".git").rglob("*")
+            if item.is_file()
+        }
+        self.assertEqual(after, before)
+        (path / "beta.txt").write_text("unowned change after preflight\n")
+        with self.assertRaisesRegex(ValueError, "beta.txt"):
+            self.workspaces.finish(attempt, plan, workspace)
+        (path / "beta.txt").write_text("beta base\n")
+        output = self.workspaces.finish(attempt, plan, workspace)
+        self.assertEqual(output["changed_files"], result["changed_files"])
+        self.assertEqual(
+            self.git(self.root, "show", output["commit"] + ":new.bin"), b"\x00\xff\r\n"
+        )
+
+    def test_submission_preflight_refuses_replaced_metadata_head_and_links(self):
+        plan = self.plan(("edit", ["alpha.txt"], []))
+        for mutation in ("head", "manifest", "file", "directory", "git"):
+            with self.subTest(mutation=mutation):
+                attempt = self.attempt()
+                workspace = self.workspaces.prepare(attempt, plan, [])
+                attempt["workspace"] = workspace["path"]
+                path = Path(workspace["path"])
+                if mutation == "head":
+                    self.git(path, "symbolic-ref", "HEAD", "refs/heads/forbidden")
+                elif mutation == "manifest":
+                    manifest = (
+                        self.workspaces.directory / f"{attempt['attempt_id']}.json"
+                    )
+                    replacement = self.home / f"{attempt['attempt_id']}.json"
+                    manifest.rename(replacement)
+                    manifest.symlink_to(replacement)
+                elif mutation == "file":
+                    (path / "alpha.txt").unlink()
+                    (path / "alpha.txt").symlink_to(self.root / "alpha.txt")
+                elif mutation == "directory":
+                    (path / "external").symlink_to(self.root, target_is_directory=True)
+                else:
+                    (path / ".git").unlink()
+                    (path / ".git").symlink_to(self.root / ".git")
+                with self.assertRaises(ValueError):
+                    self.workspaces.validate_submission(attempt, plan)
+
+    def test_verification_copy_is_exact_standalone_and_raw_after_head_advances(self):
+        (self.root / ".gitattributes").write_text(
+            "alpha.txt text eol=crlf\nbeta.txt ident\n"
+        )
+        (self.root / "beta.txt").write_text("$Id$\n")
+        self.git(self.root, "add", ".")
+        self.git(self.root, "commit", "-qm", "attributes")
+        self.source = self.workspaces.source_commit()
+        output = self.publish(
+            "edit", {"alpha.txt": "submitted\n", "nested/new.txt": "nested\n"}
+        )
+        attempt = self.attempt(kind="review", submission=output)
+        review = self.workspaces.prepare(
+            attempt, self.plan(("edit", ["alpha.txt", "nested/new.txt"], [])), []
+        )
+        (self.root / "alpha.txt").write_text("later author commit\n")
+        self.git(self.root, "add", "alpha.txt")
+        self.git(self.root, "commit", "-qm", "later")
+        root_before = self.git(self.root, "rev-parse", "HEAD")
+        sentinel = self.home / "hook-ran"
+        hook = self.root / ".git/hooks/post-checkout"
+        hook.write_text(f"#!/bin/sh\nprintf unsafe > '{sentinel}'\n")
+        hook.chmod(0o700)
+        workspace = self.workspaces.prepare_verification(
+            attempt, self.home / "verification"
+        )
+        path = Path(workspace["path"])
+        self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(
+            self.git(path, "rev-parse", "HEAD").decode().strip(), output["commit"]
+        )
+        self.assertEqual(
+            self.git(path, "rev-parse", "HEAD^{tree}").decode().strip(),
+            output["tree_hash"],
+        )
+        self.assertEqual((path / "alpha.txt").read_bytes(), b"submitted\n")
+        self.assertEqual((path / "beta.txt").read_bytes(), b"$Id$\n")
+        self.assertEqual((path / "nested/new.txt").read_bytes(), b"nested\n")
+        self.assertEqual(
+            Path(
+                self.git(
+                    path, "rev-parse", "--path-format=absolute", "--git-common-dir"
+                )
+                .decode()
+                .strip()
+            ),
+            path / ".git",
+        )
+        self.assertFalse((path / ".git/objects/info/alternates").exists())
+        self.assertFalse(sentinel.exists())
+        source_inodes = {
+            (item.stat().st_dev, item.stat().st_ino)
+            for item in (self.root / ".git").rglob("*")
+            if item.is_file()
+        }
+        for item in (path / ".git").rglob("*"):
+            if item.is_file():
+                self.assertEqual(item.stat().st_nlink, 1)
+                self.assertNotIn(
+                    (item.stat().st_dev, item.stat().st_ino), source_inodes
+                )
+        self.workspaces.verify_verification(workspace)
+        with self.assertRaises(FileExistsError):
+            self.workspaces.prepare_verification(attempt, path)
+        self.assertEqual(self.git(self.root, "rev-parse", "HEAD"), root_before)
+        self.assertEqual(
+            (Path(review["path"]) / "alpha.txt").read_bytes(), b"submitted\n"
+        )
+        # Prove this copy resolves its objects even when the source object store is absent.
+        objects = self.root / ".git/objects"
+        moved = self.root / ".git/saved-objects"
+        objects.rename(moved)
+        try:
+            self.workspaces.verify_verification(workspace)
+            self.assertEqual(self.git(path, "show", "HEAD:alpha.txt"), b"submitted\n")
+        finally:
+            moved.rename(objects)
+
+    def test_ignored_dependency_links_do_not_enter_submission_or_verification_input(
+        self,
+    ):
+        (self.root / ".gitignore").write_text(
+            "ignored.txt\ncache/\n.venv/\nnode_modules/\n"
+        )
+        self.git(self.root, "add", ".gitignore")
+        self.git(self.root, "commit", "-qm", "ignore generated dependencies")
+        self.source = self.workspaces.source_commit()
+        source_files = self.git(self.root, "ls-tree", "-r", "--name-only", self.source)
+        store = self.home / "dependency-store.js"
+        store.write_bytes(b"external dependency\n")
+        missing_interpreter = self.home / "removed-python"
+
+        def install_dependencies(path):
+            (path / ".venv/bin").mkdir(parents=True)
+            (path / ".venv/bin/python").symlink_to(missing_interpreter)
+            (path / "node_modules/package").mkdir(parents=True)
+            os.link(store, path / "node_modules/package/index.js")
+            os.link(store, path / "ignored.txt")
+
+        plan = self.plan(("edit", ["alpha.txt"], []))
+        attempt = self.attempt()
+        attempt["allow_tests"] = True
+        workspace = self.workspaces.prepare(attempt, plan, [])
+        attempt["workspace"] = workspace["path"]
+        path = Path(workspace["path"])
+        install_dependencies(path)
+        submitted = b"owned source\x00\xff\r\n"
+        (path / "alpha.txt").write_bytes(submitted)
+        validated = self.workspaces.validate_submission(attempt, plan)
+        self.assertEqual(validated["changed_files"], ["alpha.txt"])
+        output = self.workspaces.finish(attempt, plan, workspace)
+        self.assertEqual(output["changed_files"], ["alpha.txt"])
+        self.assertEqual(
+            self.git(self.root, "ls-tree", "-r", "--name-only", output["commit"]),
+            source_files,
+        )
+        self.assertEqual(
+            self.git(self.root, "show", output["commit"] + ":alpha.txt"), submitted
+        )
+        verification = self.workspaces.prepare_verification(
+            self.attempt(kind="review", submission=output), self.home / "verification"
+        )
+        copy = Path(verification["path"])
+        for name in (".venv", "node_modules", "ignored.txt"):
+            self.assertFalse((copy / name).exists())
+        self.assertEqual((copy / "alpha.txt").read_bytes(), submitted)
+        install_dependencies(copy)
+        self.workspaces.verify_verification(verification)
+        self.assertEqual(verification["commit"], output["commit"])
+        self.assertEqual(verification["tree_hash"], output["tree_hash"])
+        self.assertEqual(
+            self.git(copy, "ls-tree", "-r", "--name-only", "HEAD"), source_files
+        )
+        self.assertEqual(self.git(copy, "show", "HEAD:alpha.txt"), submitted)
+        self.assertEqual((copy / "alpha.txt").read_bytes(), submitted)
+        self.assertEqual(store.read_bytes(), b"external dependency\n")
+        self.assertTrue((copy / ".venv/bin/python").is_symlink())
+        self.assertFalse(missing_interpreter.exists())
+
+    def test_verification_allows_ignored_build_output_but_refuses_mutated_inputs(self):
+        output = self.publish("edit", {"alpha.txt": "submitted\n"})
+        for mutation in (
+            "tracked",
+            "untracked",
+            "index",
+            "head",
+            "metadata",
+            "symlink",
+            "alternates",
+        ):
+            with self.subTest(mutation=mutation):
+                attempt = self.attempt(kind="review", submission=output)
+                workspace = self.workspaces.prepare_verification(
+                    attempt, self.home / f"verification-{mutation}"
+                )
+                path = Path(workspace["path"])
+                (path / "cache").mkdir()
+                (path / "cache/results.txt").write_text("ordinary build output\n")
+                self.workspaces.verify_verification(workspace)
+                if mutation == "tracked":
+                    (path / "alpha.txt").write_text("modified by a check\n")
+                elif mutation == "untracked":
+                    (path / "new_source.py").write_text("unapproved source\n")
+                elif mutation == "index":
+                    (path / "alpha.txt").write_text("staged\n")
+                    self.git(path, "add", "alpha.txt")
+                    (path / "alpha.txt").write_text("submitted\n")
+                elif mutation == "head":
+                    self.git(path, "symbolic-ref", "HEAD", "refs/heads/check")
+                elif mutation == "metadata":
+                    (path / ".git/info").mkdir(exist_ok=True)
+                    (path / ".git/info/exclude").write_text("new_source.py\n")
+                    (path / "new_source.py").write_text("hidden source\n")
+                elif mutation == "symlink":
+                    (path / "alpha.txt").unlink()
+                    (path / "alpha.txt").symlink_to(self.root / "alpha.txt")
+                else:
+                    (path / ".git/objects/info/alternates").write_text(
+                        str(self.root / ".git/objects") + "\n"
+                    )
+                with self.assertRaises(ValueError):
+                    self.workspaces.verify_verification(workspace)
+
     def test_unexpected_tracked_untracked_ignored_and_deleted_files_are_rejected(self):
         plan = self.plan(("edit", ["alpha.txt"], []))
         for name, content in [
@@ -424,21 +695,70 @@ class WorkWorkspaceTests(unittest.TestCase):
         outside.mkdir()
         sentinel = outside / "sentinel.txt"
         sentinel.write_text("untouched\n")
-        for mode in ("file", "directory", "fifo"):
+        for mode in ("file", "directory", "fifo", "hardlink"):
             with self.subTest(mode=mode):
-                plan = self.plan(("edit", ["nested/sentinel.txt"], []))
+                plan = self.plan(("edit", ["cache/sentinel.txt"], []))
                 attempt = self.attempt()
+                attempt["allow_tests"] = True
                 workspace = self.workspaces.prepare(attempt, plan, [])
+                attempt["workspace"] = workspace["path"]
                 path = Path(workspace["path"])
                 if mode == "directory":
-                    (path / "nested").symlink_to(outside, target_is_directory=True)
+                    (path / "cache").symlink_to(outside, target_is_directory=True)
                 else:
-                    (path / "nested").mkdir()
-                    target = path / "nested/sentinel.txt"
-                    target.symlink_to(sentinel) if mode == "file" else os.mkfifo(target)
+                    (path / "cache").mkdir()
+                    target = path / "cache/sentinel.txt"
+                    if mode == "file":
+                        target.symlink_to(sentinel)
+                    elif mode == "hardlink":
+                        os.link(sentinel, target)
+                    else:
+                        os.mkfifo(target)
+                with self.assertRaisesRegex(ValueError, "Unsafe|nonregular"):
+                    self.workspaces.validate_submission(attempt, plan)
                 with self.assertRaisesRegex(ValueError, "Unsafe|nonregular"):
                     self.workspaces.finish(attempt, plan, workspace)
                 self.assertEqual(sentinel.read_text(), "untouched\n")
+
+    def test_ignored_paths_cannot_hide_tracked_input_or_its_ancestors(self):
+        (self.root / ".gitignore").write_text("cache\n")
+        (self.root / "cache").mkdir()
+        (self.root / "cache/input.txt").write_text("tracked input\n")
+        self.git(self.root, "add", ".gitignore")
+        self.git(self.root, "add", "-f", "cache/input.txt")
+        self.git(self.root, "commit", "-qm", "track input beneath ignored directory")
+        self.source = self.workspaces.source_commit()
+        plan = self.plan(("edit", ["alpha.txt"], []))
+        output = self.publish("edit", {"alpha.txt": "submitted\n"}, plan=plan)
+
+        def replace_input(path, mutation):
+            (path / "cache/input.txt").unlink()
+            if mutation == "file":
+                (path / "cache/input.txt").symlink_to(self.root / "cache/input.txt")
+            else:
+                (path / "cache").rmdir()
+                (path / "cache").symlink_to(
+                    self.root / "cache", target_is_directory=True
+                )
+
+        for mutation in ("file", "directory"):
+            with self.subTest(mutation=mutation):
+                attempt = self.attempt()
+                attempt["allow_tests"] = True
+                workspace = self.workspaces.prepare(attempt, plan, [])
+                attempt["workspace"] = workspace["path"]
+                replace_input(Path(workspace["path"]), mutation)
+                with self.assertRaises(ValueError):
+                    self.workspaces.validate_submission(attempt, plan)
+                with self.assertRaises(ValueError):
+                    self.workspaces.finish(attempt, plan, workspace)
+                verification = self.workspaces.prepare_verification(
+                    self.attempt(kind="review", submission=output),
+                    self.home / f"verification-{mutation}",
+                )
+                replace_input(Path(verification["path"]), mutation)
+                with self.assertRaises(ValueError):
+                    self.workspaces.verify_verification(verification)
 
     def test_escaping_ownership_and_scope_identity_fail_before_worktree_creation(self):
         for name in (

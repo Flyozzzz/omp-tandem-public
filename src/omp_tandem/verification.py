@@ -4,7 +4,7 @@ This module never runs commands or changes grants. Historical runs remain eviden
 not current passing claims.
 """
 
-from .models import CheckRun, VerificationPlan, assess_checks
+from .models import CheckRun, VerificationPlan, assess_checks, check_revision
 
 _PHASES = ("targeted", "candidate", "integration")
 
@@ -80,7 +80,7 @@ def assess_verification(plan, runs) -> dict:
     }
 
 
-def enforce_verification(plan, report) -> None:
+def enforce_verification(plan, report, *, trusted=None) -> None:
     """A success must identify each selected check and its current passing run."""
     if plan is None or report.outcome != "success":
         return
@@ -88,6 +88,39 @@ def enforce_verification(plan, report) -> None:
         check["id"]: check for check in verification_requirements(plan)["checks"]
     }
     claims = {}
+    if trusted is not None:
+        if trusted.get("source") != "supervisor_checks_v1":
+            raise ValueError("Unknown trusted verification source")
+        # A rejection may precede every check, but cannot leave a process active.
+        if trusted.get("verdict") == "reject":
+            if not trusted.get("teardown_confirmed"):
+                raise ValueError("Supervisor verification teardown is not confirmed")
+            return
+        if not trusted.get("settled") or not trusted.get("comparison_opened"):
+            raise ValueError("Supervisor verification and comparison have not settled")
+        if trusted.get("verdict") != "accept" or trusted.get("status") != "passed":
+            raise ValueError("Successful review requires its trusted passing checks")
+        if set(trusted.get("check_ids", [])) != required.keys():
+            raise ValueError("Trusted verification does not match the selected ladder")
+        observed = {
+            run.check_id: run
+            for value in trusted.get("runs", [])
+            for run in [CheckRun.model_validate(value)]
+        }
+        for identifier, check in required.items():
+            run = observed.get(identifier)
+            if (
+                run is None
+                or run.result != "passed"
+                or run.provenance != "machine_observed"
+                or run.criterion != check["criterion"]
+                or run.command != check["command"]
+                or run.check_revision != check_revision(check)
+            ):
+                raise ValueError(
+                    f"Missing current supervisor observation for check {identifier}"
+                )
+        return
     for claim in report.checks:
         if claim.check_id is not None:
             if claim.check_id in claims:

@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**软件包 3.10.0（2026-09-16 发布）** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**软件包 3.11.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -643,7 +643,31 @@ uv run --frozen pytest -q -s -p no:cacheprovider tests/test_work_integration.py 
 
 新审查使用 `independent_first`。`report` 的 `resolution` 为 `success`、`partial` 或 `blocked`，报告不可改写；成功仅说明独立评估完整完成，不说明没有缺陷。只有成功报告才允许比较或验收；可依据独立证据直接拒绝或阻塞。作者说明、自由文本 evidence 和相关产物**直到 compare 开启才披露**，报告后仍然隐藏。
 
-受管 Claude/OMP 审查者通过服务器绑定的 reader 读取固定提交快照，不使用实时文件工具或任意 shell；需求及原始快照来源信息可见。手动发布门槛和服务器过滤不能消除交互客户端先前已见内容，也不是操作系统沙箱。Shell 授权会在**受管审查启动前**建立操作者阻塞：目前没有经过证明的阶段限定 shell。参与者不能解除该策略阻塞；操作者须凭证据明确允许无 shell 审查，并如实记录未执行检查，否则保持阻塞。不得悄悄删除必需检查。
+受管 Claude/OMP 审查者仍通过服务器 reader 读取固定提交，不获得实时文件工具或任意 shell。旧 shell 授权仍保留操作者策略阻塞，参与者不能自行豁免或把必需命令藏进文字。以下新的显式授权允许监督器代码执行已声明检查，而非向审查模型授予 shell；这不是操作系统沙箱。
+
+<a id="controlled-review-checks"></a>
+#### 产品步骤内的独立执行
+
+在步骤的 `review_verification` 声明真实命令及累积阶段。独立报告完整保存后，监督器为每条命令创建新的 Linux Docker 容器，只挂载精确提交的独立副本，不共享作者或 reviewer 的 Git 元数据，也无需仅为测试再建一个产品步骤。手动 shell claim 的权限不变。
+
+```sh
+python -m omp_tandem.work_daemon --project-root /absolute/project \
+  --claude-model sonnet --omp-model <provider/model> \
+  authorize <work-id> --budget-seconds 1800 --max-launches 10 \
+  --max-cost-usd 6 --allow-work --allow-shell \
+  --allow-review-checks --review-check-image my-project-checks:ready \
+  --review-check-timeout 300 --preview
+```
+
+Preview 不激活授权，正式 authorize 仍需操作者明确决定。需要运行中的本地 Linux Docker engine、Docker CLI，以及预先准备好且包含 `/bin/sh` 与项目检查工具的镜像；Bun 项目应使用合适的 Bun 镜像。Tandem 不会自动拉取镜像，也不会回退到主机 shell。当前 Docker context 或明确指定的 `--review-check-docker-context NAME` 被解析并绑定到本地 socket/daemon，镜像绑定不可变 ID；修改标签不能改变已有授权。
+
+网络默认为 `none`。`--review-check-network NAME` 明确选择已有 bridge 网络并固定其 ID。容器内 `localhost` 不是主机；测试数据库地址及 `--review-check-env TEST_DATABASE_URL` 必须明确配置。只记录所选环境变量名称和值哈希，值缺失或变化时拒绝执行。使用镜像 PATH 与私有 HOME/TMPDIR；其他镜像 ENV 默认值清空，除非明确选择。模型环境不会被整体继承；执行器不自行加载 `.env`，但项目命令仍可能加载。要求实际重跑时不能把 cache hit 算成新运行。
+
+Rootfs 只读，PID/IPC 与 `/tmp` 私有，移除 capabilities 并设置 no-new-privileges；不挂载 Docker socket 或原始仓库。停止确认必须观察到同一 daemon 上的容器已删除：shell 退出、EOF 或 PID 扫描都不足够。丢失 create/start 响应不会重放命令；未知清理结果必须由操作者 reconcile。容器不回滚数据库/API 副作用，也不宣称全面抵抗恶意代码；外部费用不属于模型费用统计。未跟踪且未归属的 ignored 依赖不算固定源码，其 symlink/hardlink 不应阻止提交；tracked/owned 输入仍严格验证。
+
+检查期间使用普通有界 get。Compare 前 `verification` 只显示状态，之后按 `verification/<run-id>` 和 `next_cursor` 读取有限日志。Accept 要求 comparison 已开启且所有选中检查当前通过；失败可以检查并拒绝，不得改称测试成功。只有代码可写 machine_observed 记录；取消、输入变化和不确定执行不会自动重试。
+
+受管 submit 先检查文件归属再保存意图；`intent_recorded` 与 `output_committed=false` 不代表已有提交。最终捕获仍重新检查输入，`capture_failed` 需保留工作并恢复，不能为了过门槛删除必要测试。旧授权与活跃尝试不会升级。[完整契约](guide.md#controlled-review-checks)。
 
 ### 阻塞、暂停与在线唤醒
 
@@ -666,7 +690,7 @@ uv run --frozen pytest -q -s -p no:cacheprovider tests/test_work_integration.py 
 {"request":{"action":"get","work_id":"WORK_ID"},"wait_seconds":25}
 ```
 
-`wait_seconds` 范围为 0–25，正值只让 `get` 有界等待已提交的状态变化。事件／Channels 是在线客户端的尽力唤醒提示：醒来后重新读取持久任务卡，不把消息当作执行权或需要重发启动的信号。通知不能复活已经退出的 Claude／OMP 客户端。只有另行启动的自主控制器拥有独立生命周期；它观察持久状态，不依赖客户端持续接收推送。
+`wait_seconds` 范围为 0–1200，正值只让 `get` 有界等待已提交的状态变化。事件／Channels 是在线客户端的尽力唤醒提示：醒来后重新读取持久任务卡，不把消息当作执行权或需要重发启动的信号。通知不能复活已经退出的 Claude／OMP 客户端。只有另行启动的自主控制器拥有独立生命周期；它观察持久状态，不依赖客户端持续接收推送。
 
 ### 操作者自主授权与生命周期
 
@@ -805,6 +829,36 @@ python -m omp_tandem.work_daemon --project-root /absolute/project \
 已知当前候选输入时，检查可声明现有 CheckScope 的 `scope`：实际 `kind`（`tree`、`commit`、`archive` 或 `content`）与 `digest`。其他字节的执行保留在审计历史，但不属于当前证据。未声明 scope 时，不同输入的模糊失败仍未解决。所有当前 criterion/role 组都必须通过；一个 pass 不能隐藏另一角色的当前失败。`result.verification` 和 `facts.checks` 评估声明的当前输入，`check_runs` 保留完整历史。最多 50 项声明检查、200 条 run 记录；超限拒绝，不静默裁剪。
 
 共享步骤的 `requirements`/`verification` 针对实现，`review_requirements`/`review_verification` 独立针对审查者。reviewer 写入需求无效。必需 shell-check 不会绕过 snapshot-only 模式或缺失授权；未完成检查应为 blocked/partial，不能静默豁免。
+
+### 声明式验收证据
+
+一份全绿的检查清单，完全可能与无人验证过的需求并存：这些检查是某个人记得声明的那些，而它们又充当了自己的分母。`acceptance_set` 把声明的验收标准变成分母。
+
+在契约中以结构化形式给出同一份验收清单——文本必须与 `acceptance` 逐字一致且顺序相同，以免出现第二个事实来源——并为每条标准给出稳定的 `id`。内容包含多个分句的标准，把它们声明为 `obligations`：每项有自己的 `id`、文本，以及它应当在其中被验证的确切 `environment`：
+
+```json
+{"acceptance": ["演示中被勾选的任务带删除线，落到其插入顺序位置，分组计数重算，总计不变。"],
+ "acceptance_set": {"set_id": "<uuid>", "revision": "<items 的 sha256>", "items": [
+   {"id": "AC-FR01-04", "text": "演示中被勾选的任务带删除线，落到其插入顺序位置，分组计数重算，总计不变。",
+    "obligations": [{"id": "strike", "text": "带删除线", "environment": {"browser": "webkit"}},
+                    {"id": "position", "text": "落到其插入顺序位置"},
+                    {"id": "counters", "text": "分组计数重算"},
+                    {"id": "total", "text": "总计不变"}]}]}}
+```
+
+这条标准是**四个**证据单元，而不是一个。`VerificationCheck` 通过 `acceptance_refs` 声明它打算验证什么，多对多；而指向父标准的映射不为其任何一项声明的义务记分——否则一次针对四分句标准的检查就会被读作已覆盖。
+
+revision 是集合的内容，不是你挑选的版本号：修改标准文本就会改变它，针对旧 revision 记录的证据仍作为历史可见，但不再是当前记分。检查同理：`check_revision` 把一次运行绑定到它所观察的那份声明，因此更换命令或映射不会保留旧的记分。
+
+`result.acceptance_coverage` 每个单元一行，并把真正不同的情况区分开：无人映射的单元；已映射但阶梯未选中的检查；已选中却完全没有运行的检查；明确记为 `not_run` 的运行；当前失败；针对其他字节通过的运行；环境与要求不符的运行；环境根本未被记录的运行（未知，不等于匹配）；过期的 check revision；以及已映射检查的运行却未记录映射。这些情况并不互斥：同一个单元确实可能同时有声明、当前失败和一次更早的通过运行。
+
+计划上的 `acceptance_coverage: "require_current_evidence"` 把这幅图景变成准入：只要还有任何一个已声明单元缺少适用的当前通过运行，成功报告就会被拒绝。默认仍为 `report_only`，它不拒绝任何东西。没有声明集合的严格请求会被拒绝，而不是悄悄降级；空集合报告 `not_assessable`，而不是空洞的合格。
+
+未声明集合的任务报告 `assessment: "not_declared"`，附带验收字符串的数量以供定位，没有分母。这不等于零覆盖：为普通字符串编造标识，等于指控每一个既有调用方做过它从未做过的映射。
+
+**它从不主张什么。** 该投影统计的是声明与运行。它并不确立：被映射的检查断言了正确的行为、声明的义务穷尽了该标准、或一次通过的运行意味着需求已满足——`semantic_sufficiency` 与 `acceptance` 在任何响应中都保持 `not_assessed`，即使每个单元都有当前通过。参与者可以声明一个其测试并不遵守的映射，任何 schema 都发现不了；投影让这条主张变得显式、可供审查——这与为它背书是两回事。
+
+声明式 `acceptance_set` 覆盖仍仅作用于任务。共享步骤以 `acceptance_coverage_unsupported_surface` 拒绝这些映射，绑定任务报告 `assessment: "unsupported_surface"`，不会把自己的集合套用到另一计划。监督器执行会记录已声明检查的真实运行，但不为工作卡片增加 acceptance-set 映射，也不证明测试语义充分。
 
 ### 固定胶囊，而非每轮重复完整快照
 
@@ -977,7 +1031,7 @@ OMP 会核对实际模型及其支持的思考等级。模型不支持所请求�
 `request` 与底层捕获 API 使用相同的 `ReviewRequest`。路径相对绑定的项目根目录；省略 `paths` 表示所选来源的全部变更，也可显式限定变更路径。无需传入 `cwd`、`mode`、`review_stage` 或自己创建 `review_id`。
 
 - **总预算：**公开参数名为 `budget_seconds`，默认 600 秒，MCP 接口允许 10–7200 秒；覆盖本次受理后的捕获／启动、两个阶段和等待澄清时间，不是每阶段各给一份预算。
-- **每阶段配置：**`execution` 仍有自己的 profile／显式超时上限，每次派发按该上限和总预算剩余时间中的较小值限制。增加总预算不会自动提高 `quick` 的每阶段时限；`deep` 也不能越过总预算。`wait_seconds` 为 0–25，默认 25，只控制一次调用等待多久，不延长运行期限。
+- **每阶段配置：**`execution` 仍有自己的 profile／显式超时上限，每次派发按该上限和总预算剩余时间中的较小值限制。增加总预算不会自动提高 `quick` 的每阶段时限；`deep` 也不能越过总预算。`wait_seconds` 为 0–1200，默认 25，只控制一次调用等待多久，不延长运行期限。
 - **轮数：**默认 `compare=true`，但只有保存了非空作者方案或论据，且独立阶段为 `completed`、结构化报告为 `success`，才进入**一次**比较。无作者材料或 `compare=false` 时只有独立一轮；最多两轮，不做第三轮共识整合。`partial`／`blocked` 不会触发比较。
 - **无变更：**捕获中没有已选变更时，返回 `status=no_changes`、`phase=capture`，不调用模型；仅补充上下文也不能启动空审查。
 - **权限：**两个阶段均为 `think`，只读保存的材料。场景不派发 `work`、不执行 shell／测试、不自动应用建议，也不将模型结论自动视为有效缺陷。`checks[].command` 只是已提供证据的标签，不会执行。
@@ -1371,15 +1425,20 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 <a id="mcp-tools"></a>
 ## MCP 工具
 
-共 20 个 MCP 工具。首次只读审查优先使用 `tandem_review_run`；共享实现使用 `tandem_work`。原有单任务与逐阶段工具仍然保留。宿主前缀可能不同；以下是稳定的工具后缀。MCP `Context` 由系统注入，不是用户参数。
+首次只读审查优先使用 `tandem_review_run`；共享实现使用 `tandem_work`。原有单任务与逐阶段工具仍然保留。宿主前缀可能不同；以下是稳定的工具后缀。MCP `Context` 由系统注入，不是用户参数。
+
+可选的 `tandem_audit` 由操作者通过 `OMP_TANDEM_JEV_AUDIT=1` 或 `--jev-audit` 启用，并在 MCP 环境中配置 `OPENROUTER_API_KEY`。读取已完成的报告后显式调用；它只比较验收条款与报告中的证据描述，不改变任务结果、检查或验收。目标、所选条款、回答/摘要及检查描述会发送至 OpenRouter/TypeSafe；这些文本本身可能含敏感信息。不会读取任务上下文、命令、源文件、产物正文或会话历史。相同页面复用已保存的尝试（包括失败），不确定中断后不会自动重试；不同页面可能另行收费。普通 result/wait/finish 不调用 Jev，建议不能传入独立审查阶段。[完整契约与限制](guide.md#optional-jev-evidence-audit)。
+
+`jev-audit` skill 建议先以 `preview:true` 查看完整有界 payload、目的地、字节数和哈希，无需密钥、网络或保留尝试。发送仍需明确启用与密钥；`expected_input_sha256` 在输入变化时于收费前拒绝。预览不是同意，也不会清除已有失败。
 
 | 工具 | 主要输入 | 用途 |
 |---|---|---|
 | `tandem_scope` | 无 | 检查不可变的项目边界和启动迁移结果 |
-| `tandem_work` | `request: WorkCommand`、`wait_seconds=0..25` | [共享计划、CAS 更新、领取、提交与独立验收](#shared-work)；自主授权及不确定执行恢复仅限操作者 CLI |
+| `tandem_work` | `request: WorkCommand`、`wait_seconds=0..1200` | [共享计划、CAS 更新、领取、提交与独立验收](#shared-work)；自主授权及不确定执行恢复仅限操作者 CLI |
 | `tandem_start` | `cwd`、`prompt` 或 `contract`、`mode`、超时、execution/review/context、`preflight` | 检查准入或显式启动任务 |
 | `tandem_continue` | `conversation_id`、`prompt` 或 `contract`、超时、execution/context、`continuation`、`handoff`、`preflight` | 继续历史或显式新建有限上下文 |
 | `tandem_result` | `task_id`、`wait_seconds`、`details` | 读取回答、结果判定、问题、产物和诊断信息 |
+| `tandem_audit` | `task_id`、`offset=0`、`limit=5`（1–10） | 显式启用的 Jev 证据声明审计；仅提供建议，不是验证或验收 |
 | `tandem_wait` | `task_ids`、`wait_seconds` | 等待任意选定结果／问题 |
 | `tandem_list` | `limit` | 列出本命名空间中的近期任务，不包含大段正文 |
 | `tandem_reply` | `task_id`、`question_id`、`answer` | 回答准确匹配的待处理问题 |
@@ -1495,7 +1554,9 @@ Claude Code 可以选择通过 Channels 投递任务／问题／Webhook 事件�
 
 通用协作指令与投递方式无关。`tandem_scope` 和任务工具响应返回当前的 `delivery_instructions`；结合 `delivery` 与 `next_action` 执行，投递方式变化时替换旧流程。MCP 工具集合保持不变。
 
-- **轮询（`delivery=poll`）：** 任务不会自动唤醒协调者。执行互补工作，或对单个任务使用 `tandem_result(wait_seconds=25)`，对多个任务使用 `tandem_wait(task_ids, wait_seconds=25)`，然后读取就绪结果。及时处理问题，移除已处理的终态 ID。只要仍有活动任务就继续；不要零等待循环、轮询 `tandem_list` 或承诺稍后收到通知。强制轮询流程不包含通道设置和 Webhook 管理。
+- **一次长等待，而不是多次短等待。** 无法利用等待时间的协调者，每等待一次就付出一个模型回合；而在看门狗已就绪时普通等待会立即返回，反复等待就变成空转。直接请求你真正需要的等待：`wait_seconds` 最高 **1200**，配合 `wait_mode="bounded"`，等待的是观察到的状态，而不是投递变为可用。服务端会完整执行这段等待；客户端愿意在前台停留多久是另一个问题，服务端并不回答它。不同客户端行为不同，因此请根据响应实际写明的内容分支，而不是根据某个数字。
+- **客户端边界：Claude Code 的 120 秒。** 在一次实测中，每个到 **120 秒** 仍未完成的请求都被转为后台任务：即时响应会明确说明这一点并给出任务名，等待继续进行，真正的结果稍后以通知送达——十次这样的调用全部送达，中位数为移交后 235 秒。这是对一个客户端在某一天的观察，不是保证，也不是应当据以设计的阈值。当响应确实报告了这种移交，请把它当作投递而非失败：保留句柄、读取那个结果，不要条件反射地发起第二次观察。停止客户端一侧的等待者并不取消工作，但后台任务不会在退出会话后存活。如果客户端确实取消或真的超时，请回到对同一任务或同一运行标识的有界读取，而不是重新启动。
+- **轮询（`delivery=poll`）：** 任务不会自动唤醒协调者。执行互补工作，或对单个任务使用 `tandem_result(wait_seconds=...)`，对多个任务使用 `tandem_wait(task_ids, wait_seconds=...)`，然后读取就绪结果。及时处理问题，移除已处理的终态 ID。只要仍有活动任务就继续；不要零等待循环、轮询 `tandem_list` 或承诺稍后收到通知。强制轮询流程不包含通道设置和 Webhook 管理。
 - **推送已确认但看门狗未就绪：** 即使 `delivery=push`，也继续上述有界等待；推送只加快发现结果，不允许无限等待事件。
 - **独立看门狗存活且已就绪：** 当前响应允许 `await_event` 时，保持客户端开启并做互补工作，等待推送或看门狗唤醒。唤醒只提示重新读取状态，不代表任务完成。租期失效、钩子故障或传输变化后，按最新指令回到有界等待。
 - **分别确认两种证明：** 只对真实通道事件中的令牌调用 `tandem_channel`，参数为 `{"action":"ack","probe_token":"<实际通道令牌>"}`；只对实际独立钩子唤醒中的令牌使用 `{"action":"ack","watchdog_token":"<实际唤醒令牌>"}`。一次确认只能提供一种令牌。不要从工具响应复制令牌，不要反复探测通道等待任务，也不要根据工具输出自行声称已有计时器。
@@ -1589,7 +1650,7 @@ uv run --no-project --python '>=3.12' python -I \
 | 每个对话的活动轮次 | 1 |
 | 单轮时限 | `balanced` 默认 1800 秒；`quick` 600 秒；`deep` 3600 秒；显式覆盖 1–7200 |
 | 问题截止时间 | 默认 300 秒；1–1800，同时受该轮截止时间限制 |
-| 单次 MCP 等待 | 最多 25 秒 |
+| 单次 MCP 等待 | 服务端最多 1200 秒；请求尚未完成时客户端如何处理属于客户端自身行为（在一次实测中，Claude Code 在 120 秒时将其转为后台任务）。`tandem_diagnose` 的上限仍为 25 秒 |
 | `tandem_wait` 选定任务 | 1–32 个 ID |
 | 诊断用 RPC 事件历史 | 200,000 个事件；并非无限内存，也不能取代原生历史 |
 | 解析后的任务输入 | 最多 200,000 UTF-8 字节，包含上下文 |

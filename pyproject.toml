@@ -4,15 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "omp-tandem"
-version = "3.10.0"
+version = "3.11.0"
 description = "Project-isolated AI peer collaboration through Oh My Pi, MCP, and agent plugins"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
+    "docker>=7.1,<8",
     "fastmcp==2.14.7",
     "mcp>=1.30,<2",
+    "httpx>=0.28.1,<1",
     "pydantic>=2.11,<3",
     "omp-rpc @ https://github.com/can1357/oh-my-pi/archive/daf07999c2fee9b22edc7bf8fea1fb6272e0df5e.tar.gz#subdirectory=python/omp-rpc",
 ]

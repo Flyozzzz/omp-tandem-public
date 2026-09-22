@@ -40,6 +40,14 @@ jobs:
         run: uv sync --frozen --group dev
       - name: Run isolated tests
         run: uv run --frozen pytest -q
+      - name: Prove real Docker review-check isolation
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        run: |
+          docker pull python:3.12-slim-bookworm
+          image_id="$(docker image inspect python:3.12-slim-bookworm --format '{{.Id}}')"
+          OMP_TANDEM_TEST_DOCKER_IMAGE="$image_id" \
+            uv run --frozen pytest -q tests/test_review_check_docker.py
       - name: Build wheel
         run: uv build --wheel
       - name: Verify real pinned OMP with localhost model

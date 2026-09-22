@@ -11,6 +11,7 @@ from .channel import ChannelDelivery
 from .context_transfer import ContextTransfer
 from .diagnostics import Diagnostics
 from .findings import FindingStore
+from .jev_audit import JevAudit, JevConfig
 from .native_worker import NativeWorker
 from .project_context import ProjectContextStore
 from .receipts import ReceiptStore
@@ -42,6 +43,7 @@ class Bridge:
         migrate_legacy=True,
         work_participant="claude",
         work_token_file: Path | None = None,
+        jev_config: JevConfig | None = None,
     ):
         self.scope = resolve_scope(state_dir, project_root, source=project_source)
         slots = WorkerSlots(self.scope.base)
@@ -89,7 +91,10 @@ class Bridge:
         self.interaction = TaskInteraction(
             self.tasks, self.artifacts, self.projects, self.findings, self.work_items
         )
-        self.results = TaskResults(self.tasks, self.artifacts, self.projects)
+        self.results = TaskResults(
+            self.tasks, self.artifacts, self.projects, self.work_items
+        )
+        self.jev = JevAudit(self.tasks, self.artifacts, self.results, jev_config)
         worker = NativeWorker(
             self.tasks,
             self.artifacts,

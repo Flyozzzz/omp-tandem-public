@@ -20,9 +20,17 @@ Use continuation=fresh with an explicit source-backed handoff at a new deliverab
 Fresh does not transfer claims, grants or approval. Unknown effects require existing reconciliation.
 Think: context; analyze: reads; work: edits/runs. Reports/checks are claims; artifacts may be unfinished.
 For low-level truncated answers read answer_artifact_id; details=true gives full results.
+The optional jev-audit skill can preview tandem_audit's exact export without a key or request.
+Sending still requires operator opt-in/key; expected_input_sha256 refuses changed input.
+Never self-enable, poll, or retry unavailable advice; it is not verification/acceptance
+and must not enter independent review.
 Follow CURRENT delivery_instructions/next_action. Finish owned work unless user pauses.
 Shared complex work: tandem_work stores an agreed versioned plan, role-bound checklist and dependencies.
 Both participants agree; claim eligible steps, submit evidence, distinct reviewer accepts exact output.
+Managed submit records intent, not a committed output; read submission_progress/output_committed.
+Fresh operator --allow-review-checks can authorize supervisor-owned declared review commands
+after independent reporting, without reviewer shell. Wait for settled checks, open comparison,
+read the verification section, then decide. Legacy grants/waivers never imply this capability.
 Use the revision returned by the latest mutation; reread on conflict or peer changes.
 operation_id identifies exact retries, not permission to replay work.
 Uncertain attempts require operator reconciliation. Only operator CLI grants detached execution.

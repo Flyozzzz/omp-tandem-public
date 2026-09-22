@@ -26,6 +26,14 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from .models import TaskRequirements, VerificationPlan
+from .review_check_state import (
+    ReviewCheckState,
+    authorization_policy,
+    declaration_revision,
+    public_policy,
+    selected_policy,
+    valid_container,
+)
 from .task_store import initialize_database
 from .verification import verification_requirements
 from .workspace import ProjectScope
@@ -154,6 +162,11 @@ def grant_preview(grant: dict) -> dict:
             "read": True,
             "edit_write": grant.get("allow_work") is True,
             "shell": shell_permission(grant),
+            "review_checks": (grant.get("review_check_policy") or {}).get("policy")
+            == "supervisor_checks_v1"
+            and valid_container(
+                (grant.get("review_check_policy") or {}).get("container")
+            ),
             "network": "unrestricted for the worker process",
             "os_sandbox": False,
         },
@@ -659,11 +672,26 @@ def _public_binding(binding):
 
 
 def _public_attempt(attempt):
-    return {
+    public = {
         key: _public_binding(value) if key == "binding" else value
         for key, value in attempt.items()
-        if key not in {"token", "token_hash"}
+        if key not in {"token", "token_hash", "review_check_policy"}
     }
+    if attempt.get("review_check_policy"):
+        public["review_check_policy"] = public_policy(attempt["review_check_policy"])
+    if attempt.get("kind") == "implement":
+        committed = bool((attempt.get("output") or {}).get("commit"))
+        public["output_committed"] = committed
+        public["submission_progress"] = (
+            "output_committed"
+            if committed
+            else "capture_failed"
+            if attempt.get("submission_intent") and attempt.get("finished_at")
+            else "intent_recorded"
+            if attempt.get("submission_intent")
+            else "not_requested"
+        )
+    return public
 
 
 def _claim_replay_allowed(attempt, origin):
@@ -765,7 +793,11 @@ class WorkPresentation(_Model):
     limit: int = Field(default=50, ge=1, le=200)
     cursor: str | None = None
     include_snapshots: bool = False
-    section: str | None = Field(default=None, pattern=r"^[a-z_]+$", max_length=64)
+    section: str | None = Field(
+        default=None,
+        pattern=r"^(?:[a-z_]+|verification/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+        max_length=64,
+    )
 
 
 def _section_arguments(work_id, section):
@@ -1021,10 +1053,21 @@ def present_work(
     return result
 
 
+def _submission_request(command, bound):
+    if command.work_id is None:
+        command = command.model_copy(update={"work_id": bound["work_id"]})
+    if command.step_id is None:
+        command = command.model_copy(update={"step_id": bound["step_id"]})
+    if command.work_id != bound["work_id"] or command.step_id != bound["step_id"]:
+        raise ValueError("Bound worker cannot act on another work or step")
+    return command
+
+
 class WorkStore:
     def __init__(self, database: Path, scope: ProjectScope):
         self.database = Path(database)
         self.scope = scope
+        self._review_checks = ReviewCheckState(self)
         # Per-thread delegation marker: set only while a successor host acts on a
         # recovered claim, so recorded events name who actually recorded them.
         self._local = threading.local()
@@ -1087,6 +1130,7 @@ class WorkStore:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS work_operations (actor TEXT NOT NULL, operation_id TEXT NOT NULL, fingerprint TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(actor, operation_id))"
             )
+            self._review_checks._initialize_review_checks(db)
 
     @contextmanager
     def _transaction(self, *, timeout=10):
@@ -1299,6 +1343,10 @@ class WorkStore:
             except ValueError as error:
                 view["authorization"]["model_selection_error"] = str(error)
             view["authorization"]["preview"] = grant_preview(view["authorization"])
+            if view["authorization"].get("review_check_policy"):
+                view["authorization"]["review_check_policy"] = public_policy(
+                    view["authorization"]["review_check_policy"]
+                )
         identifiers = [step["attempt"] for step in view["steps"] if step["attempt"]]
         attempts = (
             {
@@ -1321,6 +1369,14 @@ class WorkStore:
                 # Truthful protocol label: attempts created before independent-first
                 # stages existed disclosed author material from the start.
                 step["attempt"].setdefault("protocol", "legacy_disclosure")
+            attempt = step["attempt"]
+            committed = bool((step.get("submission") or {}).get("commit"))
+            step["output_committed"] = committed
+            step["submission_progress"] = (
+                "output_committed"
+                if committed
+                else (attempt or {}).get("submission_progress", "not_requested")
+            )
             if (
                 step["attempt"]
                 and step["attempt"]["state"] in _ACTIVE
@@ -2377,6 +2433,113 @@ class WorkStore:
                 event["snapshot"].pop("markdown", None)
         return result
 
+    def review_check_context(self, attempt_id):
+        return self._review_checks.review_check_context(attempt_id)
+
+    def reserve_review_check(self, attempt_id, check_id):
+        return self._review_checks.reserve_review_check(attempt_id, check_id)
+
+    def start_review_check(self, run_id, *, pid=None, execution):
+        return self._review_checks.start_review_check(
+            run_id, pid=pid, execution=execution
+        )
+
+    def finish_review_check(
+        self,
+        run_id,
+        *,
+        result,
+        exit_code,
+        error,
+        output,
+        execution,
+        process_confirmed_gone,
+        input_unchanged,
+    ):
+        return self._review_checks.finish_review_check(
+            run_id,
+            result=result,
+            exit_code=exit_code,
+            error=error,
+            output=output,
+            execution=execution,
+            process_confirmed_gone=process_confirmed_gone,
+            input_unchanged=input_unchanged,
+        )
+
+    def review_check_assessment(self, attempt_id, *, current=True):
+        return self._review_checks.review_check_assessment(attempt_id, current=current)
+
+    def trusted_verification_context(self, attempt_id):
+        return self._review_checks.trusted_verification_context(attempt_id)
+
+    def review_check_section(
+        self,
+        request,
+        *,
+        actor,
+        attempt_token=None,
+        origin=None,
+        section="verification",
+        cursor=None,
+        limit=50,
+    ):
+        return self._review_checks.review_check_section(
+            request,
+            actor=actor,
+            attempt_token=attempt_token,
+            origin=origin,
+            section=section,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    def _require_review_checks(self, db, attempt, *, accept=False):
+        return self._review_checks._require_review_checks(db, attempt, accept=accept)
+
+    def prepare_submission(self, request, *, actor, attempt_token, origin=None):
+        """Resolve exact receipts before filesystem preflight; dry-run shared admission."""
+        command = WorkCommand.model_validate(request)
+        if command.action != "submit" or actor not in {"claude", "omp"}:
+            raise ValueError("Submission preflight requires a managed owner submit")
+        self._local.delegation = None
+        try:
+            with self._transaction() as db:
+                bound = self._credential(db, attempt_token, actor)
+                if not bound["autonomous"] or bound["kind"] != "implement":
+                    raise ValueError(
+                        "Submission preflight requires a managed implementation"
+                    )
+                command = _submission_request(command, bound)
+                receipt = db.execute(
+                    "SELECT fingerprint,response FROM work_operations WHERE actor=? AND operation_id=?",
+                    (actor, command.operation_id),
+                ).fetchone()
+                if receipt:
+                    # The ordinary receipt path checks fingerprint and caller binding;
+                    # it intentionally does not demand a still-live historical attempt.
+                    response = self._perform_command(
+                        db, command, actor, attempt_token, origin, None
+                    )
+                    return {"replayed": True, "response": response}
+                # Run the real admission path in a rolled-back savepoint, rather
+                # than maintain a second, inevitably drifting CAS/phase validator.
+                db.execute("SAVEPOINT submission_preflight")
+                try:
+                    self._perform_command(
+                        db, command, actor, attempt_token, origin, None
+                    )
+                finally:
+                    db.execute("ROLLBACK TO submission_preflight")
+                    db.execute("RELEASE submission_preflight")
+                return {
+                    "replayed": False,
+                    "attempt": bound,
+                    "plan": self._load(db, bound["work_id"])["plan"],
+                }
+        finally:
+            self._local.delegation = None
+
     def perform(
         self,
         command: WorkCommand | dict,
@@ -2903,6 +3066,7 @@ class WorkStore:
                     )
                 if reason := self._review_phase_reason(bound, action):
                     raise ValueError(reason)
+                self._require_review_checks(db, bound)
                 bound["comparison_opened_at"] = time.time()
                 bound["review_stage"] = "comparison"
                 self._save_attempt(db, bound)
@@ -2935,6 +3099,8 @@ class WorkStore:
                     )
                 if reason := self._review_phase_reason(bound, action):
                     raise ValueError(reason)
+                if action == "accept":
+                    self._require_review_checks(db, bound, accept=True)
                 if any(
                     self._step(card, dependency)["state"] != "accepted"
                     for dependency in step["depends_on"]
@@ -2990,13 +3156,17 @@ class WorkStore:
                     self._save_attempt(db, bound)
             else:
                 raise ValueError("Unsupported transition")
-        return self._record(
+        result = self._record(
             db,
             card,
             action,
             actor,
             {"note": command.note, "evidence": command.evidence},
         )
+        if action == "submit":
+            result["submission_progress"] = "intent_recorded"
+            result["output_committed"] = False
+        return result
 
     @staticmethod
     def _blocker(actor, note, condition, plan_revision, step_id):
@@ -3053,6 +3223,10 @@ class WorkStore:
         max_attempt_cost_usd: float | None = None,
         claude_model: str | None = None,
         omp_model: str | None = None,
+        allow_review_checks: bool = False,
+        review_check_timeout: int = 300,
+        review_check_env: list[str] | None = None,
+        review_check_container: dict | None = None,
     ) -> dict:
         """Validate and describe a grant without storing anything.
 
@@ -3106,6 +3280,12 @@ class WorkStore:
                 "omp": "default" if omp_model is None else "explicit",
             },
         }
+        review_policy = authorization_policy(
+            allow_review_checks,
+            review_check_timeout,
+            review_check_env,
+            review_check_container,
+        )
         grant = {
             "budget_seconds": budget_seconds,
             "max_launches": max_launches,
@@ -3115,6 +3295,7 @@ class WorkStore:
             "max_attempt_cost_usd": ceiling,
             "attempt_cost_policy": policy,
             **selection,
+            **({"review_check_policy": review_policy} if review_policy else {}),
         }
         return {**grant, "preview": grant_preview(grant), "stored": False}
 
@@ -3140,6 +3321,20 @@ class WorkStore:
                 raise ValueError(
                     "Stop and reconcile outstanding attempts before replacing authorization"
                 )
+            if fields.get("review_check_policy"):
+                fields["review_check_policy"].update(
+                    plan_revision=card["plan_revision"],
+                    declarations={
+                        spec["id"]: declaration_revision(spec)
+                        for spec in card["plan"]["steps"]
+                    },
+                )
+                prospective = {**card, "authorization": fields}
+                for spec in card["plan"]["steps"]:
+                    if spec.get("review_verification") or (
+                        spec.get("review_requirements") or {}
+                    ).get("requires_shell"):
+                        selected_policy(prospective, spec)
             now = time.time()
             card["authorization"] = {
                 "authorization_id": str(uuid4()),
@@ -3382,7 +3577,7 @@ class WorkStore:
                     reason = "blocker_open"
                 if kind == "implement":
                     if credential.get("submission_intent"):
-                        reason = "submission_already_recorded"
+                        reason = "submission_intent_already_recorded"
                     add("submit", step, kind, credential, reason)
                     continue
                 submission = step["submission"]
@@ -3489,9 +3684,20 @@ class WorkStore:
             raise ValueError(
                 "Declared write requirement is incompatible with review role"
             )
+        runner_policy = (
+            selected_policy(card, spec)
+            if autonomous
+            and kind == "review"
+            and (spec.get("review_verification") or requirements.requires_shell)
+            else None
+        )
         needs_shell = requirements.requires_shell or verification["requires_shell"]
-        if needs_shell and (
-            not autonomous or kind == "review" or not shell_permission(grant or {})
+        if (
+            needs_shell
+            and not runner_policy
+            and (
+                not autonomous or kind == "review" or not shell_permission(grant or {})
+            )
         ):
             raise ValueError(
                 "Declared shell requirement is not granted for this attempt"
@@ -3539,7 +3745,7 @@ class WorkStore:
                 )
             if kind == "implement" and not grant["allow_work"]:
                 raise ValueError("Operator did not grant implementation permission")
-            if kind == "review" and shell_permission(grant):
+            if kind == "review" and shell_permission(grant) and not runner_policy:
                 step = self._step(card, step_id)
                 if not self._shell_waiver(step, self._review_scope(card, step)):
                     raise ValueError(
@@ -3602,9 +3808,9 @@ class WorkStore:
                     "review_scope": self._review_scope(
                         card, step, autonomous=autonomous
                     ),
-                    # Arbitrary shell for a reviewer would bypass the snapshot reader;
-                    # no stage-scoped execution path exists yet, so it is blocked here.
-                    "shell_check_policy": "blocked_no_stage_scoped_execution"
+                    "shell_check_policy": "supervisor_checks_v1"
+                    if runner_policy
+                    else "blocked_no_stage_scoped_execution"
                     if autonomous and shell_permission(grant)
                     else "not_granted",
                 }
@@ -3627,6 +3833,17 @@ class WorkStore:
             "block_intent": None,
             "cost_recorded": False,
             **({"binding": binding} if binding is not None else {}),
+            **(
+                {
+                    "review_check_policy": {
+                        **runner_policy,
+                        "commit": step["submission"]["commit"],
+                        "declaration_revision": declaration_revision(spec),
+                    }
+                }
+                if runner_policy
+                else {}
+            ),
         }
         self._save_attempt(db, attempt)
         step.update(state="running", attempt=attempt["attempt_id"])
@@ -3676,6 +3893,12 @@ class WorkStore:
             self._require_open(card)
             grant = card["authorization"]
             if not grant or not shell_permission(grant):
+                return None
+            spec = next(item for item in card["plan"]["steps"] if item["id"] == step_id)
+            if (
+                spec.get("review_verification")
+                or (spec.get("review_requirements") or {}).get("requires_shell")
+            ) and selected_policy(card, spec):
                 return None
             step = self._step(card, step_id)
             if step["submission"] is None:
@@ -4105,6 +4328,7 @@ class WorkStore:
                 and attempt["verdict"]
                 and not unresolved
             ):
+                self._review_checks.require_finalization(db, attempt)
                 attempt["state"] = "succeeded"
                 verdict = attempt["verdict"]
                 step["acceptance"] = verdict if verdict["verdict"] == "accept" else None

@@ -18,6 +18,7 @@ from .models import (
 )
 from .native_worker import NativeWorker
 from .project_context import ProjectContextStore
+from .review_check_state import has_review_runner
 from .runtime_models import MAX_EVENT_HISTORY
 from .task_contracts import (
     TaskMessages,
@@ -366,6 +367,9 @@ class TaskRuntime:
                 attempt["kind"] == "review"
                 and attempt.get("protocol") == "independent_first"
             )
+            # A separate code-owned executor satisfies this declaration; the
+            # model still has only the pinned reader and work protocol.
+            shell = shell or has_review_runner(attempt)
             write = attempt["kind"] == "implement" and attempt["allow_work"]
         else:
             shell = write = mode == "work"
