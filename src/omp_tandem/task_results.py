@@ -37,11 +37,14 @@ class TaskResults:
         artifacts: ArtifactStore,
         projects: ProjectContextStore,
         work_items=None,
+        *,
+        model_routing=None,
     ):
         self.tasks = tasks
         self.artifacts = artifacts
         self.projects = projects
         self.work_items = work_items
+        self.model_routing = model_routing
 
     def view(self, task_id, details=False, *, refresh=True):
         task = self.tasks.get(task_id, refresh=refresh)
@@ -110,6 +113,10 @@ class TaskResults:
                 else "not_observed",
             },
         }
+        if self.model_routing is not None:
+            routing = self.model_routing.view(task, details=details)
+            if routing is not None:
+                result["execution"]["routing"] = routing
         attempt, attempt_context = self._attempt_context(task_id, task)
         result["execution"]["attempt"] = attempt_context
         with closing(self.tasks.connect()) as db:

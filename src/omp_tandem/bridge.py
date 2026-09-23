@@ -11,7 +11,11 @@ from .channel import ChannelDelivery
 from .context_transfer import ContextTransfer
 from .diagnostics import Diagnostics
 from .findings import FindingStore
-from .jev_audit import JevAudit, JevConfig
+from .jev_audit import JevAudit
+from .jev_client import JevConfig
+from .jev_recommend import JevRecommendations
+from .model_routing import ModelRouter
+from .model_routing_state import RoutingPolicy
 from .native_worker import NativeWorker
 from .project_context import ProjectContextStore
 from .receipts import ReceiptStore
@@ -44,6 +48,7 @@ class Bridge:
         work_participant="claude",
         work_token_file: Path | None = None,
         jev_config: JevConfig | None = None,
+        routing_policy: RoutingPolicy | None = None,
     ):
         self.scope = resolve_scope(state_dir, project_root, source=project_source)
         slots = WorkerSlots(self.scope.base)
@@ -91,10 +96,16 @@ class Bridge:
         self.interaction = TaskInteraction(
             self.tasks, self.artifacts, self.projects, self.findings, self.work_items
         )
+        self.model_routing = ModelRouter(self.tasks, routing_policy, jev_config)
         self.results = TaskResults(
-            self.tasks, self.artifacts, self.projects, self.work_items
+            self.tasks,
+            self.artifacts,
+            self.projects,
+            self.work_items,
+            model_routing=self.model_routing,
         )
         self.jev = JevAudit(self.tasks, self.artifacts, self.results, jev_config)
+        self.jev_recommend = JevRecommendations(self.tasks, jev_config)
         worker = NativeWorker(
             self.tasks,
             self.artifacts,
@@ -102,6 +113,7 @@ class Bridge:
             messages,
             executable,
             work_items=self.work_items,
+            model_routing=self.model_routing,
         )
         self.runtime = TaskRuntime(
             self.tasks,
@@ -112,6 +124,7 @@ class Bridge:
             self.scope,
             slots,
             model,
+            model_routing=self.model_routing,
         )
         self.diagnostics = Diagnostics(self)
         self.review_runs = ReviewRuns(

@@ -1199,6 +1199,7 @@ The compact review scenario is the default entry for changes review; `tandem_wor
 | `tandem_continue` | `conversation_id`, `prompt` or `contract`, timeouts, execution/context binding, `continuation`, `handoff`, `preflight` | Resume history or explicitly start a fresh bounded context |
 | `tandem_result` | `task_id`, `wait_seconds`, `details` | Read answer, outcome, question, artifacts, and diagnostics |
 | `tandem_audit` | `task_id`, `offset=0`, `limit=5` (1–10) | Opt-in Jev triage of reported evidence; advisory only, never acceptance |
+| `tandem_recommend` (unreleased) | `request`, `preview=true`, `expected_input_sha256` | Advisory choice from supplied skills or review directions; no discovery or execution |
 | `tandem_wait` | `task_ids`, `wait_seconds` | Wait for any selected result/question |
 | `tandem_list` | `limit` | Recent tasks in this namespace without large bodies |
 | `tandem_reply` | `task_id`, `question_id`, `answer` | Answer the exact pending question |
@@ -1287,6 +1288,206 @@ advice is unavailable; do not vary pagination merely to bypass the reservation.
 Changed or overlapping pages are different requests and may incur another charge.
 Usage/cost are reported only when observed from the provider, otherwise unknown.
 Ordinary `tandem_result`, waiting and report submission never invoke Jev.
+
+### Optional Jev candidate recommendation (unreleased)
+
+This checkout adds `tandem_recommend`; published 3.11.0 has evidence audit only.
+Inspect `tandem_scope.jev_recommend` in the actual runtime before using it. Do not
+restart an active session or change configuration merely to obtain this tool.
+
+Unlike evidence audit, recommendation works **before any task exists**. The
+coordinator supplies a goal and a small catalog it actually knows. Tandem does
+not scan host skills, hydrate task context, read files/artifacts/history, or
+create a task to store a recommendation. Candidate IDs are labels, not paths or
+proof of runtime availability.
+
+```json
+{
+  "request": {
+    "kind": "review_direction",
+    "goal": "Review cancellation and duplicate-send behavior",
+    "candidates": [
+      {"id": "lifecycle", "description": "Cancellation, concurrency and uncertain completion"},
+      {"id": "api", "description": "Schemas and caller compatibility"},
+      {"id": "privacy", "description": "Export consent and access boundaries"}
+    ]
+  }
+}
+```
+
+`kind` is `skill` or `review_direction`; there are 1–20 candidates with unique
+simple IDs (up to 64 characters) and descriptions (up to 2,000 characters).
+The goal is bounded to 4,000 characters. The complete canonical UTF-8 payload,
+including fixed questions, must fit 32,000 bytes; oversized input is refused,
+not truncated or silently split into additional provider calls.
+
+The default `preview=true` returns the exact payload, endpoint, byte count and
+`input_sha256`, without a provider request, retained request or reservation.
+Ordinary runtime/database initialization may still create infrastructure.
+Review the actual export and obtain explicit approval. Text in the goal and
+descriptions may contain secrets; a bounded request is **not redaction**.
+
+Sending requires all of:
+
+- Separate operator `--jev-recommend` or `OMP_TANDEM_JEV_RECOMMEND=1` enablement,
+  plus `OPENROUTER_API_KEY` in the MCP process. `--jev-audit` alone does not
+  authorize this export, and recommendation enablement does not enable audit.
+- The same `request`, `preview=false`, and the approved preview's exact
+  `expected_input_sha256`. Missing/changed hashes refuse before reservation or
+  network access. The hash binds bytes; it does not prove human consent.
+
+The fixed destination/model are the same OpenRouter Jev endpoint as audit.
+Input identity includes the goal, kind, candidate IDs/descriptions/order, fixed
+question and model. Sending retains the complete request and result/failure in
+this project's private `jev_recommendations` journal. Exact duplicates reuse
+the same terminal result, including failures. In-flight/crashed/cancelled
+reservations stay unresolved across restart and never resend. There is no reset,
+TTL, automatic retry or fallback. A different input may incur a new charge;
+never vary it merely to evade an unresolved attempt.
+
+`recommendation.decision` is `candidate`, `none`, or `unclear`. Only `candidate`
+has a `candidate_id`; probability entries for candidate IDs are separate from
+the `none`/`unclear` entries. Provider/protocol failure is an unavailable result,
+not abstention. Confidence/probabilities are model judgments, not calibrated
+proof or execution thresholds. Actual recommendation accuracy remains unmeasured
+by synthetic protocol tests.
+
+The coordinator may inspect the suggestion, then make its own normal choice.
+Nothing is launched, no required checks are dropped, and no task outcome,
+acceptance, finding or grant changes. Restricted workers and native independent
+reviewers do not receive this tool. Do not inject its advice or author-derived
+descriptions into an independent snapshot-review stage.
+
+### Task-start shadow model routing (unreleased)
+
+This checkout also integrates a **shadow-only** model router into ordinary new
+task startup. It is not another standalone recommendation tool and does not
+switch the actual model. There is no active-routing mode in this feature.
+Read `tandem_scope.model_routing` from the loaded runtime, not the checkout alone.
+
+The operator supplies a strict JSON policy with **two or three unique, exact**
+`provider/model` identities:
+
+```json
+{
+  "mode": "shadow",
+  "allow_external_summary": true,
+  "budget_seconds": 10,
+  "routes": [
+    {
+      "id": "fast",
+      "model": "provider/fast-model",
+      "description": "Short, bounded tasks",
+      "tool_calling": true,
+      "thinking_levels": ["high"]
+    },
+    {
+      "id": "reasoning",
+      "model": "provider/reasoning-model",
+      "description": "Complex investigation and cross-component reasoning",
+      "tool_calling": true,
+      "thinking_levels": ["high"]
+    }
+  ]
+}
+```
+
+These model names are placeholders, not a working pool or capability claim.
+Supply actual identities and honest operator capability declarations. Load the
+file through `--jev-routing-policy /absolute/policy.json` or
+`OMP_TANDEM_JEV_ROUTING_POLICY`; absence leaves routing off. `mode` only accepts
+`shadow`. Policy files are bounded to 32,000 UTF-8 bytes and cannot silently gain
+additional routes or fields.
+
+`allow_external_summary` defaults to false. Setting it true authorizes the fixed
+export schema below, **not arbitrary task content**. Neither audit nor ordinary
+recommendation enablement enables routing. Jev additionally requires
+`OPENROUTER_API_KEY` in the runtime; a missing key records a bypass, not an
+invented recommendation.
+
+The caller must separately provide and approve a bounded routing summary in
+the new task's `execution`:
+
+```json
+{
+  "routing": {
+    "summary": "Review cancellation and duplicate-send behavior",
+    "allow_external_summary": true,
+    "input_token_estimate": 2000,
+    "output_token_estimate": 500,
+    "input_modalities": ["text"],
+    "max_candidate_cost_usd": 0.02
+  }
+}
+```
+
+Both export flags must be true. Missing input is a bypass; the system never
+derives a summary from the prompt, goal, source, history, handoff or product
+capsule. The supplied text can itself contain secrets; this is not redaction.
+This explicit shadow-routing consent is separate from `tandem_recommend`'s
+preview/hash workflow, whose behavior is unchanged.
+
+The estimates are positive caller declarations, **not measured token counts**.
+They and the optional cost ceiling constrain only the hypothetical candidate;
+they neither cap nor certify the unchanged baseline task's actual context,
+privacy, token usage or bill. Effective thinking is preserved, not lowered to
+admit a cheaper model. Every mode still needs essential host-tool support.
+
+At admission, the task and its frozen policy/input routing record are inserted
+atomically. Preflight exposes intent only: no native probe, Jev request or
+reservation. Explicit task-level or process/default model overrides bypass
+routing. So do both continuation modes, all snapshot/review-run tasks and
+managed work attempts; old grants and native tools remain unchanged.
+
+After ordinary native startup/model validation and before the first prompt, a
+separate metadata-only OMP process observes the catalog under matching
+executable/cwd/model/worker configuration. It has no session, prompt, tools,
+custom tools, extensions, skills or rules. It makes one raw catalog request and
+is stopped before Jev or the original prompt proceeds. It may perform normal
+startup I/O and catalog refresh; “no inference prompt” is not “no network.”
+
+Code intersects the exact pool/catalog identities and checks advertised input
+modalities, positive context/output capacities, thinking compatibility, and
+operator-declared tool support. Missing metadata remains unknown rather than
+SDK-normalized zero. Known incompatibilities cannot be overridden by operator
+claims. With a cost ceiling, missing prices cannot pass. The estimated input/
+output cost uses explicit catalog per-million-token prices; caches, future tool
+rounds, account adjustments and other charges remain outside that estimate.
+Catalog presence is not authentication, quota, health or successful inference.
+
+Fewer than two eligible models produces `no_comparison` without Jev. Otherwise
+one Choice sees only the approved summary, permitted declared requirements and
+safe eligible model facts/descriptions. It receives no task/conversation IDs,
+workspace paths, complete prompts, grants, headers, base URLs or raw catalog.
+The exact sanitized request is reserved before POST. Candidate, `none`,
+`unclear`, unavailable and unresolved are distinct; no confidence threshold
+changes execution authority.
+
+The default routing **work budget** is 10 seconds, configurable up to 30 and
+capped by remaining task time. Native readiness/response waits use short public
+SDK limits, with nominal teardown allowance. Cancellation is cooperative around
+these calls and during the async HTTP wait. Process creation and pathological
+OS teardown have no strict public-SDK wall-clock bound; elapsed time and overruns
+remain visible. `probe.stop_returned` means the SDK returned from cleanup,
+**not universal proof that every descendant exited**. A raised teardown error
+is a host lifecycle failure, never a claimed clean fallback.
+
+Ordinary router failure leaves the original model available to run if the task
+is still active and within its deadline. Cancellation/whole-task expiry prevents
+the prompt. No probe or Jev call is replayed after uncertain observation or send.
+Result reads/restarts do not rerun routing; terminal observations are immutable.
+
+`tandem_result` exposes `execution.routing`: proposal, startup baseline, reason,
+probe facts, routing duration/overrun, and separate Jev provenance/usage.
+`details=true` adds safe eligibility evidence. Existing requested/effective/
+startup-observed and response-accounting model facts retain their meanings;
+the proposed model did **not** execute merely because it was recommended.
+Jev advice is never added to the worker prompt, independent-review material,
+acceptance calculations or native usage totals.
+
+Shadow records permit later evaluation; they do not establish that another model
+would have succeeded, saved money or been faster. Live Jev quality and savings
+remain unmeasured until separately authorized, credentialed evaluation.
 
 ## Results, questions, and artifacts
 

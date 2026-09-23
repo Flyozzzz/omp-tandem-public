@@ -58,6 +58,7 @@ class NativeWorker:
         executable: str,
         *,
         work_items=None,
+        model_routing=None,
     ):
         self.tasks = tasks
         self.artifacts = artifacts
@@ -65,6 +66,7 @@ class NativeWorker:
         self.messages = messages
         self.executable = executable
         self.work_items = work_items
+        self.model_routing = model_routing
 
     def worker_tools(self, task):
         task_id = task["task_id"]
@@ -327,11 +329,12 @@ class NativeWorker:
                 raise Cancelled()
             if remaining <= 0:
                 raise TimeoutError("Task deadline reached before startup")
+            worker_config = str(Path(__file__).parent / "resources" / "worker.yml")
             args = [
                 "--no-extensions",
                 "--no-title",
                 "--config",
-                str(Path(__file__).parent / "resources" / "worker.yml"),
+                worker_config,
             ]
             if task["session_file"]:
                 args += ["--resume", task["session_file"]]
@@ -460,6 +463,22 @@ class NativeWorker:
                     )
             elif settings["requested"].get("model"):
                 raise ValueError("OMP did not report the requested model selection")
+            if self.model_routing is not None:
+                self.model_routing.observe(
+                    task_id,
+                    baseline={
+                        "model": f"{state.model.provider}/{state.model.id}"
+                        if state.model
+                        else None,
+                        "thinking": state.thinking_level,
+                        "source": "native_get_state",
+                    },
+                    executable=self.executable,
+                    cwd=task["cwd"],
+                    worker_config=worker_config,
+                    thinking=expected_thinking,
+                    deadline=deadline,
+                )
             listeners.extend(
                 (
                     client.on_message_end(usage.message_end),

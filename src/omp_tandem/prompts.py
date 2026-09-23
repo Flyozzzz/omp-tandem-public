@@ -22,8 +22,13 @@ Think: context; analyze: reads; work: edits/runs. Reports/checks are claims; art
 For low-level truncated answers read answer_artifact_id; details=true gives full results.
 The optional jev-audit skill can preview tandem_audit's exact export without a key or request.
 Sending still requires operator opt-in/key; expected_input_sha256 refuses changed input.
+Optional tandem_recommend suggests one caller-supplied skill or review direction, without discovery or launch.
+Preview is the default; sending needs separate recommendation opt-in and the approved exact preview hash.
 Never self-enable, poll, or retry unavailable advice; it is not verification/acceptance
 and must not enter independent review.
+Optional execution.routing supplies an explicitly approved bounded summary for shadow model routing.
+It needs a separate operator pool/export policy; no prompt/history is inferred. Read execution.routing
+observations separately from actual model facts. Shadow proposals never change selection or permissions.
 Follow CURRENT delivery_instructions/next_action. Finish owned work unless user pauses.
 Shared complex work: tandem_work stores an agreed versioned plan, role-bound checklist and dependencies.
 Both participants agree; claim eligible steps, submit evidence, distinct reviewer accepts exact output.

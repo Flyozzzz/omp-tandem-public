@@ -65,6 +65,8 @@ def initialize_database(scope: ProjectScope) -> Path:
                 "work_events",
                 "work_attempts",
                 "work_operations",
+                "jev_recommendations",
+                "task_model_routing",
             }
             if any(
                 db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
@@ -137,6 +139,22 @@ def initialize_database(scope: ProjectScope) -> Path:
         db.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS one_pending_question ON questions(task_id) WHERE state='pending'"
         )
+        db.execute("""CREATE TABLE IF NOT EXISTS jev_recommendations (
+            input_sha256 TEXT PRIMARY KEY,
+            attempt_id TEXT NOT NULL UNIQUE,
+            request_json TEXT NOT NULL,
+            reserved_at REAL NOT NULL,
+            result_json TEXT,
+            finished_at REAL,
+            CHECK (
+                (result_json IS NULL AND finished_at IS NULL)
+                OR (result_json IS NOT NULL AND finished_at IS NOT NULL)
+            )
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS task_model_routing (
+            task_id TEXT PRIMARY KEY,
+            record_json TEXT NOT NULL
+        )""")
         db.commit()
     path.chmod(0o600)
     return path
@@ -369,7 +387,7 @@ class TaskStore:
                         f"Files already assigned to active work: {sorted(map(str, overlap))}"
                     )
 
-    def insert(self, record, owned):
+    def insert(self, record, owned, *, routing=None):
         """Check overlapping work and admit the task in one transaction."""
         # Source leases are held by TaskRuntime for both fresh and resume.
         with closing(self.connect()) as db:
@@ -383,6 +401,14 @@ class TaskStore:
                 f"INSERT INTO tasks ({columns}) VALUES ({placeholders})",
                 list(record.values()),
             )
+            if routing is not None:
+                db.execute(
+                    "INSERT INTO task_model_routing (task_id, record_json) VALUES (?, ?)",
+                    (
+                        record["task_id"],
+                        json.dumps(routing, ensure_ascii=False, allow_nan=False),
+                    ),
+                )
             db.commit()
 
     def validate_review_reservation(self, record, db=None):

@@ -10,7 +10,7 @@ Consult, design, implement, and review together through [Oh My Pi](https://githu
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](pyproject.toml)
 
-[Quick start](#quick-start) · [Full guide](docs/guide.md) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Contributing](CONTRIBUTING.md)
+[Quick start](#quick-start) · [Jev assistance](#jev) · [Full guide](docs/guide.md) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Contributing](CONTRIBUTING.md)
 
 ## Why OMP Tandem?
 
@@ -24,6 +24,7 @@ A second agent should do more than approve the first agent's work. OMP Tandem le
 - **Version-bound reviews.** Choose worktree or staged-only material, then use independent-first comparison, stale-result detection and finding history. [Review workflow](docs/guide.md#immutable-review-bundles).
 - **Bounded waiting and visible usage.** Claude watchdog with polling fallback, explicit live diagnostics, and depth/budget settings separate from permissions. [Profiles and usage](docs/guide.md#computation-profiles-and-usage).
 - **Portable integration.** Claude Code plugin, Agent Plugins package for Codex, and ordinary local stdio MCP for other hosts.
+- **Optional Jev assistance.** Report audits, candidate suggestions and task-start shadow model routing. Explicit export approval; no automatic acceptance or model switching. [Availability and setup](#jev).
 
 No company-specific policies or hardcoded project paths are bundled.
 
@@ -91,9 +92,50 @@ The agent uses `tandem_review_run`: a saved staged/index snapshot, one independe
 
 See [compact views, runtime identity and recovery](docs/guide.md#compact-contracts) and [operator blocker resolution](docs/guide.md#operator-unblock). Hints and notifications grant no authority; resolving a blocker never resumes or authorizes work. Independent acceptance is separate from operator application and publication.
 
-Optional [Jev evidence audits](docs/guide.md#optional-jev-evidence-audit) flag possible gaps between a completed task's criteria and its reported checks. The `jev-audit` skill starts with a keyless exact-payload preview; sending remains opt-in and requires an OpenRouter key. It is advice, not source inspection or independent acceptance.
+Latest published release: **[3.11.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.11.0)**. Managed submission checks ownership before recording intent; current views distinguish intent from committed output. Explicitly authorized [supervisor review checks](docs/guide.md#controlled-review-checks) use a prepared, immutable Linux Docker image and a separate exact-commit copy inside the existing product step, without reviewer shell tools. Network defaults to none; confirmed container removal is required, with no host fallback. Old grants are not upgraded. See the [changelog](CHANGELOG.md). Updating the repository does not restart existing work or authorize new execution.
 
-Current package: **3.11.0**. Managed submission checks ownership before recording intent; current views distinguish intent from committed output. Explicitly authorized [supervisor review checks](docs/guide.md#controlled-review-checks) use a prepared, immutable Linux Docker image and a separate exact-commit copy inside the existing product step, without reviewer shell tools. Network defaults to none; confirmed container removal is required, with no host fallback. Old grants are not upgraded. See the [changelog](CHANGELOG.md). Publishing or installing an update never restarts existing work or authorizes new execution.
+<a id="jev"></a>
+## Optional Jev assistance and shadow routing
+
+Jev is a separate, optional structured-decision service—not the model that performs
+the coding task. **The recommendation and shadow-routing additions on `main` are
+not included in the published 3.11.0 release.** Inspect the loaded runtime's
+`tandem_scope` capabilities before using them.
+
+| Capability | Purpose | Availability |
+|---|---|---|
+| `tandem_audit` | Flag gaps between acceptance criteria and reported evidence | 3.11.0 and `main` |
+| `tandem_recommend` | Suggest one caller-supplied skill or review direction before task creation | `main`, unreleased |
+| `execution.routing` | Compare a task-start model suggestion with the unchanged execution model | `main`, **shadow-only** |
+
+Audits and recommendations support exact keyless previews. Sending requires an
+OpenRouter key and separate enablement: `--jev-audit` or `--jev-recommend`.
+Recommendation sends additionally require the approved preview's matching hash.
+They return advice and explicit uncertainty, not verified correctness or permission.
+
+For **shadow model routing**:
+
+1. The operator provides two or three exact models in a policy file through
+   `--jev-routing-policy PATH` or `OMP_TANDEM_JEV_ROUTING_POLICY`.
+2. Both the policy and the task's `execution.routing` must explicitly approve
+   export of a short summary. No summary is inferred from prompts, files or history.
+3. Code checks the catalog, capabilities, declared context/output estimates and
+   optional estimated cost ceiling. An isolated metadata-only probe keeps catalog
+   stalls separate from the execution process.
+4. Jev may suggest an eligible model, `none`, or `unclear`. The task still uses its
+   original model; `tandem_result.execution.routing` records the proposal, reason,
+   routing time and separate Jev usage.
+
+Explicit model choices, continuations, snapshot reviews and managed work bypass
+the router. It never changes thinking, tools, roles, grants or acceptance. An
+ordinary routing failure preserves the original selection; uncertain sends are
+not retried. Missing `OPENROUTER_API_KEY` produces an explicit bypass.
+
+Local RPC/HTTP checks verify the integration and safety boundaries. **Live Jev
+recommendation accuracy, latency improvements and cost savings are not yet measured.**
+See the [audit guide](docs/guide.md#optional-jev-evidence-audit),
+[candidate recommendation guide](docs/guide.md#optional-jev-candidate-recommendation-unreleased)
+and [shadow policy/configuration example](docs/guide.md#task-start-shadow-model-routing-unreleased).
 
 ## Plan changes and repository handover
 
@@ -148,6 +190,7 @@ Read the [security policy](SECURITY.md) before reporting a vulnerability. Never 
 | Product rules and decisions | [Product knowledge](docs/guide.md#product-knowledge-and-decisions) |
 | Workspace isolation and explicit sharing | [Project isolation](docs/guide.md#project-isolation) |
 | All MCP tools and limits | [API reference](docs/guide.md#mcp-tools) |
+| Jev audits, candidate advice and shadow model routing | [Jev assistance](#jev) |
 | Local data upgrades and migration | [Upgrades and legacy history](docs/guide.md#upgrades-and-legacy-history) |
 | Claude Channels, webhook protocol, and managed setups | [Channels reference](docs/channels.md) |
 | Development and contributions | [Contributing](CONTRIBUTING.md) |

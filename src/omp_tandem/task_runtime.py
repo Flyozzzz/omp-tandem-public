@@ -44,6 +44,8 @@ class TaskRuntime:
         scope: ProjectScope,
         slots: WorkerSlots,
         model: str | None,
+        *,
+        model_routing=None,
     ):
         self.tasks = tasks
         self.worker = worker
@@ -53,6 +55,7 @@ class TaskRuntime:
         self.scope = scope
         self.slots = slots
         self.model = model or ""
+        self.model_routing = model_routing
         self.threads: dict[str, threading.Thread] = {}
         self.guard = threading.Lock()
         self.closing = False
@@ -127,7 +130,9 @@ class TaskRuntime:
                 record = prepared["record"]
                 record.update(task_id=task_id, conversation_id=destination)
                 slot = self.slots.acquire()
-                self.tasks.insert(record, prepared["owned"])
+                self.tasks.insert(
+                    record, prepared["owned"], routing=prepared["routing"]
+                )
                 if work_attempt_id is not None:
                     try:
                         self.worker.work_items.started(
@@ -165,7 +170,7 @@ class TaskRuntime:
             "status": "starting",
             "next_action": "wait",
             "execution": {
-                **prepared["settings"],
+                **prepared["preflight"]["execution"],
                 "actual": {"model": None, "thinking": None},
             },
             "continuation": continuation,
@@ -472,6 +477,16 @@ class TaskRuntime:
         self.tasks.check_admission(record, owned)
         if self.closing:
             raise ValueError("MCP server is shutting down")
+        routing = (
+            self.model_routing.prepare(
+                record,
+                settings,
+                process_model=self.model or None,
+                managed=attempt is not None,
+            )
+            if self.model_routing is not None
+            else None
+        )
         result = {
             "admissible": True,
             "reservation": False,
@@ -490,6 +505,21 @@ class TaskRuntime:
             },
             "diagnostics": diagnostics,
         }
+        if routing is not None:
+            result["execution"] = {
+                **settings,
+                "routing": {
+                    key: routing.get(key)
+                    for key in (
+                        "mode",
+                        "state",
+                        "status",
+                        "reason",
+                        "applied",
+                        "policy_sha256",
+                    )
+                },
+            }
         if snapshot is not None:
             result["project_context"] = {
                 key: value for key, value in snapshot.items() if key != "context"
@@ -500,6 +530,7 @@ class TaskRuntime:
             "settings": settings,
             "snapshot": snapshot,
             "preflight": result,
+            "routing": routing,
         }
 
     def _check_continuation(self, history, *, fresh):

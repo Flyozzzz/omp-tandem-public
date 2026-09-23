@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Added coordinator-only `tandem_recommend` for advisory selection of one skill or review direction from a caller-supplied bounded catalog, including distinct `none` and `unclear` results. It works before task creation and never discovers skills, reads project context, launches candidates or changes authority.
+- Recommendation preview is the default and requires no key or provider request. Sending requires separate `--jev-recommend` / `OMP_TANDEM_JEV_RECOMMEND` enablement and the approved preview's matching input hash. Project-owned durable reservations cache exact outcomes and refuse replay after uncertain execution; existing audit enablement and behavior remain separate.
+- Audit and recommendation share the bounded Jev transport and strict Choice parser. Protocol tests and local synthetic responses are not evidence of Jev recommendation accuracy.
+- Added opt-in task-start shadow model routing over a frozen operator pool of two or three exact models. Deterministic catalog/constraint checks precede one Jev suggestion; the requested, effective and actually running model remain unchanged, including on abstention or ordinary router failure.
+- Shadow routing requires separate policy and per-task summary export approval. Explicit model selections, continuations, reviews and managed work bypass it. A metadata-only native probe isolates catalog stalls from the execution process; routing records, latency and Jev usage are separate from native execution and never replay uncertain sends.
+
 ## 3.11.0 — 2026-09-22
 
 ### Changes

@@ -12,7 +12,8 @@ from . import migration
 from .api import build_server
 from .binding import RuntimeOptions
 from .bridge import Bridge
-from .jev_audit import JevConfig
+from .jev_client import JevConfig
+from .model_routing_state import load_routing_policy
 from .prompts import INSTRUCTIONS
 from .workspace import resolve_scope
 
@@ -87,6 +88,17 @@ def main(argv=None):
         "--jev-audit",
         action="store_true",
         help="Enable explicit Jev report audits; sends selected report prose to OpenRouter using OPENROUTER_API_KEY",
+    )
+    parser.add_argument(
+        "--jev-recommend",
+        action="store_true",
+        help="Enable explicit advisory Jev recommendations from supplied goals and candidates; separate from report audits",
+    )
+    parser.add_argument(
+        "--jev-routing-policy",
+        type=Path,
+        default=os.environ.get("OMP_TANDEM_JEV_ROUTING_POLICY"),
+        help="Operator JSON pool for shadow-only task-start routing; external summary export also requires policy and per-task consent",
     )
     parser.add_argument(
         "--disable-channel",
@@ -168,9 +180,22 @@ def main(argv=None):
     )
     webhook_enabled = not args.no_webhook and enabled_setting("OMP_TANDEM_WEBHOOK", "1")
     jev_enabled = args.jev_audit or enabled_setting("OMP_TANDEM_JEV_AUDIT", "0")
+    recommend_enabled = args.jev_recommend or enabled_setting(
+        "OMP_TANDEM_JEV_RECOMMEND", "0"
+    )
+    routing_policy = (
+        load_routing_policy(args.jev_routing_policy)
+        if args.jev_routing_policy is not None
+        else None
+    )
     jev_config = JevConfig(
         enabled=jev_enabled,
-        api_key=os.environ.get("OPENROUTER_API_KEY") if jev_enabled else None,
+        api_key=os.environ.get("OPENROUTER_API_KEY")
+        if jev_enabled
+        or recommend_enabled
+        or (routing_policy is not None and routing_policy.allow_external_summary)
+        else None,
+        recommend_enabled=recommend_enabled,
     )
     options = RuntimeOptions(
         args.state_dir,
@@ -184,6 +209,7 @@ def main(argv=None):
         work_participant=args.work_participant,
         work_token_file=args.work_token_file,
         jev_config=jev_config,
+        routing_policy=routing_policy,
     )
     if args.candidate_smoke:
         bridge = Bridge(
@@ -195,6 +221,7 @@ def main(argv=None):
             webhook_enabled=False,
             migrate_legacy=False,
             jev_config=jev_config,
+            routing_policy=routing_policy,
         )
         print(
             json.dumps(

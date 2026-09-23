@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](pyproject.toml)
 
-[快速开始](#快速开始) · [完整指南](docs/guide.zh-CN.md) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [参与贡献](CONTRIBUTING.md)
+[快速开始](#快速开始) · [Jev 与路由](#jev) · [完整指南](docs/guide.zh-CN.md) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [参与贡献](CONTRIBUTING.md)
 
 ## 为什么选择 OMP Tandem？
 
@@ -26,6 +26,7 @@
 - **可选择来源的快照审查。** [选择 worktree 或仅 staged，先独立判断再比较作者方案](docs/guide.zh-CN.md#snapshot-reviews)，并[追踪问题的确认与修复验证](docs/guide.zh-CN.md#finding-lifecycle)。
 - **可解释的执行。** [逐轮选择计算配置，分别查看实际模型、令牌与已知费用](docs/guide.zh-CN.md#execution-and-accounting)。
 - **可靠接收。** [可选看门狗与有界轮询](docs/guide.zh-CN.md#polling-channels-and-webhooks)、[结果处理凭据](docs/guide.zh-CN.md#result-receipts)和[当前客户端诊断](docs/guide.zh-CN.md#live-diagnostics)明确区分投递、处理与验证。
+- **可选 Jev 辅助。** 报告审计、候选技能建议及任务启动时的影子模型路由；需明确批准导出，不自动验收或切换模型。[功能状态与配置](#jev)。
 
 软件包不包含特定公司的规则或硬编码项目路径。
 
@@ -93,7 +94,45 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 
 参见[精简视图、运行身份与恢复](docs/guide.zh-CN.md#compact-contracts)、[操作者解除阻塞](docs/guide.zh-CN.md#operator-unblock)。提示与通知不授予权限；解除阻塞不会恢复或授权工作。验收、应用和发布是各自独立的决定。
 
-当前软件包版本为 **3.11.0**。受管 submit 在记录意图前检查文件归属，明确区分提交意图与已保存的提交。[监督器审查检查](docs/guide.zh-CN.md#controlled-review-checks) 需要单独授权及预先准备、绑定不可变 ID 的 Linux Docker 镜像，在同一产品步骤的精确提交副本上执行，不向审查模型授予 shell。网络默认关闭，成功要求确认容器已删除，不回退到主机执行。旧授权不会升级。可选 `jev-audit` skill 可先无密钥预览精确请求，发送仍需明确启用。详见[变更日志](CHANGELOG.md)。
+最新已发布版本为 **[3.11.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.11.0)**。受管 submit 在记录意图前检查文件归属，明确区分提交意图与已保存的提交。[监督器审查检查](docs/guide.zh-CN.md#controlled-review-checks) 需要单独授权及预先准备、绑定不可变 ID 的 Linux Docker 镜像，在同一产品步骤的精确提交副本上执行，不向审查模型授予 shell。网络默认关闭，成功要求确认容器已删除，不回退到主机执行。旧授权不会升级；更新仓库不会重启活跃工作或授予新权限。详见[变更日志](CHANGELOG.md)。
+
+<a id="jev"></a>
+## Jev：建议与影子模型路由
+
+Jev 是可选的结构化决策模型，不替代实际执行任务的模型。
+**`main` 分支中的候选建议和 shadow-routing 尚未包含在已发布的 3.11.0 中。**
+请通过 `tandem_scope` 检查实际加载 runtime 的能力。
+
+| 功能 | 用途 | 可用状态 |
+|---|---|---|
+| `tandem_audit` | 查找验收条件与报告证据之间的缺口 | 3.11.0 与 `main` |
+| `tandem_recommend` | 在创建任务前，从明确提供的列表建议一个技能或审查方向 | `main`，未发布 |
+| `execution.routing` | 将任务启动时的模型建议与保持不变的实际模型对照 | `main`，**仅影子模式** |
+
+审计和候选建议支持无需密钥的精确预览。发送需要 OpenRouter 密钥及独立启用：
+`--jev-audit` 或 `--jev-recommend`；候选建议发送还必须携带获批预览的匹配哈希。
+建议与模型置信度不是正确性验证，也不授予操作权限。
+
+**影子模型路由流程：**
+
+1. 操作者在策略文件中指定两个或三个精确模型，通过
+   `--jev-routing-policy PATH` 或 `OMP_TANDEM_JEV_ROUTING_POLICY` 加载。
+2. 策略与任务的 `execution.routing` 分别批准导出简短摘要；
+   不从完整提示、文件或历史自动生成摘要。
+3. 代码检查目录、能力、声明的上下文/输出估计和可选的估计费用上限。
+   独立元数据进程将目录停滞与任务执行通道隔离。
+4. Jev 可以建议一个合格模型、`none` 或 `unclear`。实际模型保持不变；
+   `tandem_result.execution.routing` 显示建议、原因、路由耗时及单独的 Jev 用量。
+
+显式模型选择、续接、快照审查和受管尝试均绕过路由。
+它不改变 thinking、工具、角色、grant 或验收。普通路由故障保留原选择；
+不确定的发送不会重放。缺少 `OPENROUTER_API_KEY` 会明确记录为绕过原因。
+
+本地 RPC/HTTP 检查验证集成及安全边界。
+**真实 Jev 的推荐准确率、速度提升和费用节省尚未测量。**
+参见[审计说明](docs/guide.zh-CN.md#mcp-tools)、
+[候选建议](docs/guide.md#optional-jev-candidate-recommendation-unreleased)和
+[影子路由配置示例](docs/guide.md#task-start-shadow-model-routing-unreleased)。
 
 ## 计划变更与仓库交接
 
@@ -149,6 +188,7 @@ flowchart LR
 | 产品规则和决策 | [产品知识](docs/guide.zh-CN.md#product-knowledge-and-decisions) |
 | 工作区隔离和显式共享 | [项目隔离](docs/guide.zh-CN.md#project-isolation) |
 | 全部 MCP 工具和限制 | [API 参考](docs/guide.zh-CN.md#mcp-tools) |
+| Jev 审计、候选建议与影子模型路由 | [Jev 与路由](#jev) |
 | 本地数据升级和迁移 | [升级与旧历史](docs/guide.zh-CN.md#upgrades-and-legacy-history) |
 | Claude Channels、Webhook 协议和受管部署 | [Channels 参考](docs/channels.md) |
 | 开发与贡献 | [贡献指南](CONTRIBUTING.md) |

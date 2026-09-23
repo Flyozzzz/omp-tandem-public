@@ -1431,6 +1431,22 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 
 `jev-audit` skill 建议先以 `preview:true` 查看完整有界 payload、目的地、字节数和哈希，无需密钥、网络或保留尝试。发送仍需明确启用与密钥；`expected_input_sha256` 在输入变化时于收费前拒绝。预览不是同意，也不会清除已有失败。
 
+**此工作副本的未发布功能：** `tandem_recommend` 可在创建任务前建议一个技能或审查方向。已发布的 3.11.0 只有证据审计；先检查实际 runtime 的 `tandem_scope.jev_recommend`，不要仅为新工具重启活跃任务。
+
+传入 `request`：`kind` 为 `skill` 或 `review_direction`，`goal` 最多 4000 字符，1–20 个 `{id, description}` 候选项；简单 ID 唯一且最多 64 字符，描述最多 2000。目录由协调者明确提供，不自动扫描技能、上下文、历史或产物。默认 `preview:true` 返回完整精确请求，无需密钥、网络或尝试保留；完整 UTF-8 载荷最多 32000 字节，超限拒绝而不截断。普通 runtime/数据库初始化仍可建立基础结构。
+
+对具体导出取得明确同意后，发送需要独立的 `--jev-recommend` / `OMP_TANDEM_JEV_RECOMMEND=1`、密钥、`preview:false` 和匹配的 `expected_input_sha256`。审计与推荐不会互相启用。哈希绑定目标、类型、候选 ID/描述/顺序、固定问题及模型，但不证明人的同意；输入文本仍可能含秘密，这不是脱敏。请求及结果/失败保留在项目私有日志中；相同输入复用原结果，未知执行不会在重启后重发。
+
+结果区分带精确 `candidate_id` 的 `candidate`、`none` 和 `unclear`；提供商故障属于单独的不可用状态。ID 与模型概率不证明技能存在或代码正确，不触发执行、权限变更、丢弃必需检查或验收。建议不得进入独立快照审查阶段。合成协议测试没有测量真实 Jev 的推荐准确率。[完整契约与示例](guide.md#optional-jev-candidate-recommendation-unreleased)。
+
+**任务启动时的影子模型路由（未发布）** 接入普通新任务启动。操作者通过 `--jev-routing-policy /absolute/policy.json` 或 `OMP_TANDEM_JEV_ROUTING_POLICY` 提供仅 `shadow` 模式的策略，包含 2–3 个精确唯一 `provider/model`、描述和明确能力声明。实际模型不切换；显式任务/进程模型、所有续接、快照审查及受管尝试均绕过路由。
+
+导出同时要求策略 `allow_external_summary=true`、密钥，以及 `execution.routing` 中明确批准的 `summary`（最多 4000 字符）与 `allow_external_summary=true`。另需正数 `input_token_estimate` / `output_token_estimate`，输入 `input_modalities` 默认 `["text"]`，可选 `max_candidate_cost_usd`。不从提示、历史或文件自动生成摘要。这些只约束假设候选，不保证实际任务的费用、隐私或上下文。策略/输入与任务原子保存；preflight 不启动探测、请求或保留尝试。
+
+独立的原生元数据进程不带会话、提示、工具、扩展、技能或规则，读取目录并在 Jev/原始提示前停止。目录成员不证明认证、健康或成功执行。代码检查精确候选、模态、容量、thinking 和操作者工具能力声明；未知价格不算零。少于两个合格模型时为 `no_comparison`，不调用 Jev；否则只导出已批准摘要与允许的候选事实，不发送路径、凭据、headers、base URL 或完整上下文。
+
+`execution.routing` 将建议、原始模型、原因、耗时及 Jev 用量与实际执行区分。工作预算默认 10 秒、最多 30 秒且受任务剩余时间约束；异常 OS 停止没有严格墙钟保证。`stop_returned` 仅表示 SDK 返回，不证明所有后代退出。普通路由故障保留原选择；任务取消/总期限禁止后续提示，teardown 错误不伪装成健康回退。未知请求不重放，建议不进入提示或验收。真实准确率与节约尚未测量。[策略示例与完整契约](guide.md#task-start-shadow-model-routing-unreleased)。
+
 | 工具 | 主要输入 | 用途 |
 |---|---|---|
 | `tandem_scope` | 无 | 检查不可变的项目边界和启动迁移结果 |
@@ -1439,6 +1455,7 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 | `tandem_continue` | `conversation_id`、`prompt` 或 `contract`、超时、execution/context、`continuation`、`handoff`、`preflight` | 继续历史或显式新建有限上下文 |
 | `tandem_result` | `task_id`、`wait_seconds`、`details` | 读取回答、结果判定、问题、产物和诊断信息 |
 | `tandem_audit` | `task_id`、`offset=0`、`limit=5`（1–10） | 显式启用的 Jev 证据声明审计；仅提供建议，不是验证或验收 |
+| `tandem_recommend`（未发布） | `request`、`preview=true`、`expected_input_sha256` | 对明确提供的候选项给出建议；不发现技能、不执行 |
 | `tandem_wait` | `task_ids`、`wait_seconds` | 等待任意选定结果／问题 |
 | `tandem_list` | `limit` | 列出本命名空间中的近期任务，不包含大段正文 |
 | `tandem_reply` | `task_id`、`question_id`、`answer` | 回答准确匹配的待处理问题 |

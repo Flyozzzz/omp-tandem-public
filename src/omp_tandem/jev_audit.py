@@ -3,28 +3,22 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
-import math
 import re
 from contextlib import closing
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from uuid import uuid4
 
-import httpx
-
+from . import jev_client
 from .acceptance import evidence_units
 from .artifacts import ArtifactStore
+from .jev_client import ENDPOINT, MAX_REQUEST_BYTES, MODEL, JevClient, canonical_json
 from .models import AcceptanceSet, assess_checks, parse_outcome, run_applies
 from .runtime_models import RESERVED_ARTIFACT_PREFIX
 from .task_contracts import current_task
 from .task_results import TaskResults
 from .task_store import TaskStore
 
-ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
-MODEL = "typesafe/jev-1.13"
-MAX_REQUEST_BYTES = 32000
-MAX_RESPONSE_BYTES = 65536
 _BASIS = "reported_evidence_claims_not_test_inspection"
 _CHOICES = {
     "no_obvious_mismatch": "The reported evidence explicitly addresses this entire unit; no obvious mismatch in those claims. This does not verify implementation or tests.",
@@ -32,65 +26,6 @@ _CHOICES = {
     "contradiction": "The report or recorded results explicitly contradict satisfaction of this unit.",
     "unclear": "The supplied claims are too ambiguous to classify reliably.",
 }
-
-
-@dataclass(frozen=True)
-class JevConfig:
-    enabled: bool = False
-    api_key: str | None = field(default=None, repr=False)
-    timeout_seconds: float = 10.0
-
-    def __post_init__(self):
-        if type(self.enabled) is not bool:
-            raise TypeError("enabled must be a boolean")
-        if self.api_key is not None and not isinstance(self.api_key, str):
-            raise TypeError("api_key must be text or None")
-        if (
-            type(self.timeout_seconds) not in (int, float)
-            or not math.isfinite(self.timeout_seconds)
-            or not 0 < self.timeout_seconds <= 10
-        ):
-            raise ValueError("timeout_seconds must be finite and between 0 and 10")
-
-
-def _json(value) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def _object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("Duplicate JSON key")
-        result[key] = value
-    return result
-
-
-def _constant(value):
-    raise ValueError("Nonfinite JSON constant")
-
-
-def _number(value, *, maximum=None):
-    return (
-        type(value) in (int, float)
-        and (type(value) is int or math.isfinite(value))
-        and value >= 0
-        and (maximum is None or value <= maximum)
-    )
-
-
-def _identifier(value):
-    return (
-        value
-        if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,200}", value)
-        else None
-    )
 
 
 @dataclass(frozen=True)
@@ -106,37 +41,26 @@ class JevAudit:
         tasks: TaskStore,
         artifacts: ArtifactStore,
         results: TaskResults,
-        config: JevConfig | None = None,
+        config: jev_client.JevConfig | None = None,
         *,
         endpoint: str = ENDPOINT,
     ):
         self.tasks = tasks
         self.artifacts = artifacts
         self.results = results
-        self.config = config or JevConfig()
-        # This override is deliberately not an operator/MCP setting.
-        self._endpoint = endpoint
-        self._client: httpx.AsyncClient | None = None
-        self._closed = False
+        self._client = JevClient(config, endpoint=endpoint)
+        self.config = self._client.config
 
     def status(self) -> dict:
         return {
             "enabled": self.config.enabled,
-            "configured": bool(self.config.api_key and self.config.api_key.strip()),
-            "model": MODEL,
-            "provider": "OpenRouter / TypeSafe",
-            "max_request_bytes": MAX_REQUEST_BYTES,
-            "max_response_bytes": MAX_RESPONSE_BYTES,
-            "timeout_seconds": self.config.timeout_seconds,
+            **self._client.status(),
             "advisory": True,
             "basis": _BASIS,
         }
 
     async def close(self):
-        self._closed = True
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        await self._client.close()
 
     @staticmethod
     def _base(task_id, offset):
@@ -284,7 +208,7 @@ class JevAudit:
             self.artifacts.publish_in_transaction(
                 db,
                 name,
-                _json(
+                canonical_json(
                     {
                         "state": "reserved",
                         "input_sha256": digest,
@@ -304,120 +228,13 @@ class JevAudit:
             self.artifacts.publish_in_transaction(
                 db,
                 name,
-                _json({"state": "finished", "result": result}),
+                canonical_json({"state": "finished", "result": result}),
                 "application/json",
                 conversation_id=task["conversation_id"],
                 task_id=task["task_id"],
                 artifact_id=result["artifact_id"],
             )
         return result
-
-    async def _request(self, payload):
-        if self._closed:
-            return None, "service_closed"
-        if self._client is None:
-            self._client = httpx.AsyncClient(
-                transport=httpx.AsyncHTTPTransport(retries=0, trust_env=False),
-                trust_env=False,
-                follow_redirects=False,
-                timeout=self.config.timeout_seconds,
-            )
-        async with asyncio.timeout(self.config.timeout_seconds):
-            async with self._client.stream(
-                "POST",
-                self._endpoint,
-                content=payload,
-                headers={
-                    "Authorization": f"Bearer {self.config.api_key}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                    "Accept-Encoding": "identity",
-                },
-            ) as response:
-                if response.status_code != 200:
-                    return {"http_status": response.status_code}, "http_error"
-                if (
-                    response.headers.get("content-encoding", "identity").lower()
-                    != "identity"
-                ):
-                    return None, "unsupported_response_encoding"
-                body = bytearray()
-                async for chunk in response.aiter_raw():
-                    if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
-                        return None, "response_too_large"
-                    body.extend(chunk)
-        try:
-            return json.loads(
-                body, object_pairs_hook=_object, parse_constant=_constant
-            ), None
-        except (ValueError, UnicodeError, RecursionError):
-            return None, "malformed_response"
-
-    @staticmethod
-    def _decode(response, questions, selected):
-        if not isinstance(response, dict):
-            raise TypeError("Response must be an object")
-        answers = response.get("answers")
-        if not isinstance(answers, dict) or answers.keys() != questions.keys():
-            raise ValueError("Unexpected question keys")
-        items = []
-        for key, unit in zip(questions, selected, strict=True):
-            answer = answers[key]
-            if not isinstance(answer, dict) or answer.keys() != {
-                "type",
-                "choice",
-                "confidence",
-                "probabilities",
-            }:
-                raise ValueError("Malformed choice")
-            probabilities = answer["probabilities"]
-            choice = answer["choice"]
-            if (
-                answer["type"] != "choice"
-                or not isinstance(choice, str)
-                or choice not in _CHOICES
-                or not isinstance(probabilities, dict)
-                or probabilities.keys() != _CHOICES.keys()
-                or not all(
-                    _number(value, maximum=1) for value in probabilities.values()
-                )
-                or not math.isclose(
-                    sum(probabilities.values()), 1, rel_tol=0, abs_tol=0.020000001
-                )
-                or probabilities[choice] < max(probabilities.values()) - 1e-9
-                or not _number(answer["confidence"], maximum=1)
-            ):
-                raise ValueError("Invalid choice distribution")
-            items.append(
-                {
-                    **unit,
-                    "choice": choice,
-                    "probabilities": probabilities,
-                    "confidence": answer["confidence"],
-                }
-            )
-        return items
-
-    @staticmethod
-    def _provenance(response):
-        response = response if isinstance(response, dict) else {}
-        usage = response.get("usage")
-        usage = usage if isinstance(usage, dict) else {}
-        return {
-            "model": {
-                "requested": MODEL,
-                "observed": _identifier(response.get("model")),
-            },
-            "provider": _identifier(response.get("provider")),
-            "response_id": _identifier(response.get("id")),
-            "usage": {
-                key: usage[key]
-                if type(usage.get(key)) is int and usage[key] >= 0
-                else None
-                for key in ("input_tokens", "output_tokens")
-            }
-            | {"cost": usage.get("cost") if _number(usage.get("cost")) else None},
-        }
 
     def _prepare(self, task, offset, limit):
         base = self._base(task["task_id"], offset)
@@ -458,16 +275,13 @@ class JevAudit:
             for index, unit in enumerate(selected)
         }
         body = {"model": MODEL, "state": state, "questions": questions}
-        payload = _json(body).encode("utf-8")
+        payload, digest = self._client.prepare(body)
         if len(payload) > MAX_REQUEST_BYTES:
             return {**base, "reason": "input_too_large", "sent": False}, None
-        identity = hashlib.sha256(self._endpoint.encode("utf-8"))
-        identity.update(b"\0")
-        identity.update(payload)
         base.update(
-            endpoint=self._endpoint,
+            endpoint=self._client.endpoint,
             request_bytes=len(payload),
-            input_sha256=identity.hexdigest(),
+            input_sha256=digest,
         )
         return base, _PreparedRequest(body, payload, selected)
 
@@ -511,7 +325,7 @@ class JevAudit:
                     "reason": "missing_api_key",
                     "sent": False,
                 }
-        if self._closed:
+        if self._client.closed:
             return {
                 **base,
                 "status": "unavailable",
@@ -536,27 +350,18 @@ class JevAudit:
         )
         if cached is not None:
             return cached
-        result = {**base, "status": "unavailable", "input_sha256": digest}
         # Cancellation deliberately leaves the committed reservation unresolved.
         # Nothing, including another instance or a restart, may automatically resend.
-        try:
-            response, reason = await self._request(prepared.payload)
-            if reason == "http_error":
-                result["http_status"] = response["http_status"]
-            if reason is None:
-                result.update(self._provenance(response))
-                try:
-                    items = self._decode(
-                        response, prepared.body["questions"], prepared.selected
-                    )
-                except (ValueError, TypeError, OverflowError):
-                    reason = "malformed_response"
-                else:
-                    result.update(items=items, status="completed")
-        except (TimeoutError, httpx.TimeoutException):
-            reason = "timeout"
-        except (httpx.HTTPError, OSError, ValueError):
-            reason = "transport_error"
-        if reason is not None:
-            result["reason"] = reason
+        decision = await self._client.decide(
+            prepared.payload, prepared.body["questions"]
+        )
+        answers = decision.pop("answers", None)
+        result = {**base, **decision}
+        if answers is not None:
+            result["items"] = [
+                {**unit, **answers[key]}
+                for key, unit in zip(
+                    prepared.body["questions"], prepared.selected, strict=True
+                )
+            ]
         return await asyncio.to_thread(self._finish, task, name, result)

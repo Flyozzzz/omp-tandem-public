@@ -12,6 +12,8 @@ from typing import Literal
 from omp_rpc import ThinkingLevel
 from pydantic import BaseModel, ConfigDict, Field
 
+from .model_routing_state import RoutingInput
+
 PROFILES = {
     "quick": {"thinking": "low", "timeout_seconds": 600},
     "balanced": {"thinking": "high", "timeout_seconds": 1800},
@@ -64,6 +66,10 @@ class ExecutionOptions(BaseModel):
     model: str | None = Field(default=None, min_length=1, pattern=r"\S")
     thinking: ThinkingLevel | None = None
     timeout_seconds: int | None = Field(default=None, ge=1, le=7200, strict=True)
+    routing: RoutingInput | None = Field(
+        default=None,
+        description="Explicit export-approved input for optional shadow routing; never inherited or applied to execution.",
+    )
 
 
 # OMP's provider layer terminates a native turn with an assistant message whose
@@ -145,11 +151,17 @@ def resolve_execution(options=None, *, previous=None, model=None, timeout_second
         **PROFILES["balanced"],
     }
     if previous:
-        effective.update(previous)
+        effective.update(
+            {key: value for key, value in previous.items() if key != "routing"}
+        )
     if "profile" in requested:
         effective.update(profile=options.profile, **PROFILES[options.profile])
     effective.update(
-        {key: value for key, value in requested.items() if key != "profile"}
+        {
+            key: value
+            for key, value in requested.items()
+            if key not in {"profile", "routing"}
+        }
     )
     if timeout_seconds is not None:
         explicit = ExecutionOptions(timeout_seconds=timeout_seconds).timeout_seconds

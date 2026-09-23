@@ -14,7 +14,8 @@ from fastmcp import Client
 
 from omp_tandem.api import build_server
 from omp_tandem.bridge import Bridge
-from omp_tandem.jev_audit import JevAudit, JevConfig
+from omp_tandem.jev_audit import JevAudit
+from omp_tandem.jev_client import JevClient, JevConfig
 from omp_tandem.models import acceptance_revision
 from omp_tandem.task_interaction import CHECK_RUN_ARTIFACT
 from tests.helpers import RpcHarness, make_peer
@@ -174,6 +175,52 @@ class JevAuditTests(RpcHarness):
 
     async def audit(self, task_id, **page):
         return await self.call("tandem_audit", task_id=task_id, **page)
+
+    async def test_choice_decoding_uses_each_questions_declared_criteria(self):
+        client = JevClient(self.config, endpoint=self.endpoint)
+        self.addAsyncCleanup(client.close)
+        questions = {
+            "first": {
+                "type": "choice",
+                "criteria": {"alpha": "First option", "other": "Another option"},
+            },
+            "second": {
+                "type": "choice",
+                "criteria": {"beta": "Second option", "unknown": "Insufficient data"},
+            },
+        }
+        self.provider.body = {
+            "answers": {
+                "first": {
+                    "type": "choice",
+                    "choice": "alpha",
+                    "confidence": 0.8,
+                    "probabilities": {"alpha": 0.8, "other": 0.2},
+                },
+                "second": {
+                    "type": "choice",
+                    "choice": "beta",
+                    "confidence": 0.7,
+                    "probabilities": {"beta": 0.7, "unknown": 0.3},
+                },
+            }
+        }
+        payload, _ = client.prepare({"questions": questions})
+        result = await client.decide(payload, questions)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(
+            {key: answer["choice"] for key, answer in result["answers"].items()},
+            {"first": "alpha", "second": "beta"},
+        )
+        self.provider.body["answers"]["second"]["probabilities"] = {
+            "beta": 0.6,
+            "unknown": 0.2,
+            "alpha": 0.2,
+        }
+        rejected = await client.decide(payload, questions)
+        self.assertEqual(rejected["status"], "unavailable")
+        self.assertEqual(rejected["reason"], "malformed_response")
+        self.assertNotIn("answers", rejected)
 
     async def test_plain_acceptance_audit_is_advisory_and_excludes_private_sources(
         self,

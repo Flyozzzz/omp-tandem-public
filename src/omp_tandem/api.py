@@ -13,6 +13,7 @@ from .bridge import Bridge
 from .channel import ChannelFastMCP
 from .execution import ExecutionOptions, profile_catalog
 from .findings import FindingChange, FindingDraft
+from .jev_recommend import JevRecommendationRequest
 from .models import ArtifactInfo, ConversationHandoff, TaskContract, TurnContract
 from .observation import MAX_WAIT_SECONDS, Observation
 from .project_context import ContextReadRequest, ProjectContext, read_task_context
@@ -216,6 +217,8 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 "runtime_identity": runtime_identity(),
                 "host_owner": bridge.channel.owner,
                 "jev_audit": bridge.jev.status(),
+                "jev_recommend": bridge.jev_recommend.status(),
+                "model_routing": bridge.model_routing.status(),
                 "review_checks": {
                     "available": True,
                     "policy": "supervisor_checks_v1",
@@ -288,6 +291,37 @@ def build_server(configuration: Bridge | RuntimeOptions):
             task_id,
             offset=offset,
             limit=limit,
+            preview=preview,
+            expected_input_sha256=expected_input_sha256,
+        )
+
+    @mcp.tool()
+    async def tandem_recommend(
+        request: JevRecommendationRequest,
+        ctx: Context,
+        preview: bool = True,
+        expected_input_sha256: Annotated[
+            str | None, Field(pattern=r"^[0-9a-f]{64}$")
+        ] = None,
+    ) -> dict:
+        """Suggest one skill or review direction from an explicit small candidate list.
+
+        Coordinator-only advisory operation, available before any task exists.
+        No skill discovery, file/context/history reads, launches or permission changes.
+        Preview is the default: exact bounded payload without a key or provider call.
+        Sending needs separate recommendation enablement, an OpenRouter key,
+        preview=false and the approved preview's matching expected_input_sha256.
+        The hash binds input; it does not establish human approval. Supplied goal
+        and candidate descriptions may contain secrets; this is not redaction.
+        Send retains the exact request and result/failure in this project's journal.
+        Exact duplicates reuse the attempt; uncertainty never authorizes replay.
+        Candidate, none and unclear are distinct from provider/protocol failure.
+        Advice and confidence never authorize execution or alter required checks.
+        Do not inject this advice into an independent snapshot-review stage.
+        """
+        bridge = await runtime.get(ctx)
+        return await bridge.jev_recommend.recommend(
+            request,
             preview=preview,
             expected_input_sha256=expected_input_sha256,
         )

@@ -1861,6 +1861,19 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
             with self.assertRaises(ToolError):
                 await client.call_tool("tandem_review_read", {"section": "manifest"})
+            with self.assertRaises(ToolError):
+                await client.call_tool(
+                    "tandem_recommend",
+                    {
+                        "request": {
+                            "kind": "skill",
+                            "goal": "Choose a relevant skill without executing it",
+                            "candidates": [
+                                {"id": "review", "description": "Review code changes"}
+                            ],
+                        }
+                    },
+                )
             observed = await self.call(client, {"action": "get", "work_id": identifier})
             self.assertEqual(observed["participant"], "claude")
             with self.assertRaises(ToolError):

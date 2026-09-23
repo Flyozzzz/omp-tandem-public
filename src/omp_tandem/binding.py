@@ -9,7 +9,8 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from .bridge import Bridge
-from .jev_audit import JevConfig
+from .jev_client import JevConfig
+from .model_routing_state import RoutingPolicy
 from .work_notifications import WorkNotifications
 from .workspace import client_root_paths
 
@@ -55,6 +56,7 @@ class RuntimeOptions:
     work_participant: str = "claude"
     work_token_file: Path | None = None
     jev_config: JevConfig | None = None
+    routing_policy: RoutingPolicy | None = None
 
 
 class BridgeBinding:
@@ -101,6 +103,7 @@ class BridgeBinding:
             work_participant=options.work_participant,
             work_token_file=options.work_token_file,
             jev_config=options.jev_config,
+            routing_policy=options.routing_policy,
         )
         self.bridge = bridge
         self.source = source
@@ -194,4 +197,7 @@ class BridgeBinding:
                     try:
                         await self.bridge.jev.close()
                     finally:
-                        await self.bridge.channel.close()
+                        try:
+                            await self.bridge.jev_recommend.close()
+                        finally:
+                            await self.bridge.channel.close()
