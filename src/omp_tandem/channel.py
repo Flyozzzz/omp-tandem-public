@@ -379,8 +379,22 @@ class ChannelDelivery:
                     if run_id:
                         meta["review_run_id"] = run_id
                         content = f"OMP review scenario update: {event['kind']}. Call tandem_review_run(action='status', run_id='{run_id}') for the complete scenario, not a new start. The update is not approval to apply changes."
+                    elif team_id := event["payload"].get("team_run_id"):
+                        meta["team_run_id"] = team_id
+                        content = f"OMP team update: {event['kind']}. Call tandem_team(action='status', run_id='{team_id}', wait_seconds=0) for the team's current state. Reply to worker questions with tandem_reply; do not restart the team. Completion is not independent acceptance."
                     else:
                         content = f"OMP task event: {event['kind']}. Call tandem_result(task_id='{event['task_id']}', wait_seconds=0) once for authoritative state and answer. Do not restart the task."
+                elif event["kind"] == "desktop_test_finished":
+                    job_id = event["payload"]["job_id"]
+                    meta["job_id"] = job_id
+                    request = json.dumps(
+                        {"action": "get", "job_id": job_id, "wait_seconds": 0}
+                    )
+                    content = (
+                        f"Desktop QA result is available. Read tandem_desktop(request={request}) "
+                        "for the actual report and evidence. Do not resubmit or repeat the UI "
+                        "actions; a terminal report is not independent acceptance."
+                    )
                 elif event["kind"] == "work_changed":
                     work_id = event["payload"]["work_id"]
                     meta["work_id"] = work_id

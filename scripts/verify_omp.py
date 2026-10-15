@@ -330,6 +330,38 @@ def isolated_environment(root):
         os.environ.update(previous)
 
 
+def wire_sizes(raw):
+    """Count actual UTF-8 JSON field bytes, not tokens or reserialized estimates."""
+    text = raw.decode("utf-8")
+    decoder = json.JSONDecoder()
+    sizes = {"request_bytes": len(raw), "schema_bytes": 0, "message_bytes": 0}
+    index = text.index("{") + 1
+    while True:
+        while text[index].isspace():
+            index += 1
+        if text[index] == "}":
+            return sizes
+        key, index = decoder.raw_decode(text, index)
+        while text[index].isspace():
+            index += 1
+        require(text[index] == ":", "Invalid fixture request object")
+        index += 1
+        while text[index].isspace():
+            index += 1
+        start = index
+        _, index = decoder.raw_decode(text, index)
+        field = {"tools": "schema_bytes", "messages": "message_bytes"}.get(key)
+        if field:
+            sizes[field] = len(text[start:index].encode("utf-8"))
+        while text[index].isspace():
+            index += 1
+        if text[index] == ",":
+            index += 1
+        else:
+            require(text[index] == "}", "Invalid fixture request object ending")
+            return sizes
+
+
 class Provider:
     """Sequential scripts with real tool results collected from the next HTTP call."""
 
@@ -337,6 +369,7 @@ class Provider:
         self.lock = threading.Lock()
         self.steps = []
         self.requests = []
+        self.wire_bytes = []
         self.errors = []
         self.entered = threading.Event()
         self.release = threading.Event()
@@ -359,7 +392,8 @@ class Provider:
                     )
                     length = int(self.headers.get("Content-Length", "0"))
                     require(0 < length <= 2 * 1024 * 1024, "Invalid HTTP request size")
-                    body = json.loads(self.rfile.read(length))
+                    raw = self.rfile.read(length)
+                    body = json.loads(raw)
                     require(
                         body.get("model") in FIXTURE_MODELS,
                         "Unexpected paid/non-fixture model",
@@ -378,6 +412,7 @@ class Provider:
                             "Unexpected model request loop",
                         )
                         provider.requests.append(body)
+                        provider.wire_bytes.append(wire_sizes(raw))
                         if provider.lenient and not body.get("tools"):
                             # OMP generates a subagent label with an extra tool-less
                             # model call; answer it without consuming the script.
@@ -486,6 +521,7 @@ class Provider:
             require(not self.steps, "Previous HTTP script was not consumed")
             self.steps = list(steps)
             self.requests = []
+            self.wire_bytes = []
             self.overflow = 0
             self.label_requests = 0
             self.entered.clear()
@@ -994,6 +1030,385 @@ def exercise(executable, root, provider, report):
         "credentials": "none",
         "usage": "synthetic fixture tokens; not a cost or performance benchmark",
     }
+
+
+class FocusDecisions:
+    """Local deterministic Choice replies; no external account or accuracy claim."""
+
+    def __init__(self):
+        self.requests = []
+        self.errors = []
+        fixture = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_POST(self):
+                try:
+                    self.connection.settimeout(10)
+                    require(self.path == "/decisions", "Unexpected focus endpoint")
+                    require(
+                        self.headers.get("Authorization")
+                        == "Bearer local-focus-fixture",
+                        "Focus fixture received unexpected credentials",
+                    )
+                    size = int(self.headers.get("Content-Length", "0"))
+                    require(0 < size <= 32000, "Focus request exceeds transport bound")
+                    request = json.loads(self.rfile.read(size))
+                    require(
+                        request["state"]["goal"]
+                        == "Inspect the synthetic focus fixture.",
+                        "Focus exported an unexpected goal",
+                    )
+                    require(
+                        all(
+                            item["kind"] == "tool"
+                            for item in request["state"]["items"].values()
+                        ),
+                        "Tool-only focus exported another data class",
+                    )
+                    response = {
+                        "model": "typesafe/jev-1.13-local",
+                        "answers": {
+                            key: {
+                                "type": "choice",
+                                "choice": "irrelevant",
+                                "confidence": 1,
+                                "probabilities": {
+                                    label: int(label == "irrelevant")
+                                    for label in question["criteria"]
+                                },
+                            }
+                            for key, question in request["questions"].items()
+                        },
+                    }
+                    payload = json.dumps(response).encode("utf-8")
+                    fixture.requests.append(
+                        {
+                            "request_bytes": size,
+                            "response_bytes": len(payload),
+                            "candidates": len(request["questions"]),
+                        }
+                    )
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                    fixture.errors.append(f"{type(exc).__name__}: {exc}")
+                    self.send_error(500, "Invalid local focus request")
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = False
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.endpoint = f"http://127.0.0.1:{self.server.server_port}/decisions"
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_args):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        require(not self.thread.is_alive(), "Local focus fixture did not stop")
+
+
+def exercise_focus_transport(executable, root, agent, report):
+    """Production Bridge -> FocusEngine -> NativeWorker -> pinned OMP -> callbacks."""
+    from unittest.mock import patch
+
+    from omp_rpc import RpcClient
+
+    from omp_tandem import native_worker
+    from omp_tandem.bridge import Bridge
+    from omp_tandem.focus import FocusPolicy
+    from omp_tandem.focus_tools import CORE_ESSENTIAL
+    from omp_tandem.jev_client import JevConfig
+
+    project = root / "focus-project"
+    project.mkdir()
+    read_path = project / "focus-read.txt"
+    read_path.write_text(READ_TOKEN)
+    write_path = project / "focus-write.txt"
+    shell_path = project / "focus-shell.txt"
+    # Native discovery reads .omp/mcp.json (pinned builtin.ts loadMCPServers).
+    # If the base worker safety config is lost, merely launching this disposable
+    # command leaves evidence; it never connects to a real MCP service.
+    mcp_sentinel = project / "project-mcp-was-started"
+    project_config = project / ".omp"
+    project_config.mkdir()
+    (project_config / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "focus-safety-sentinel": {
+                        "command": "/usr/bin/touch",
+                        "args": [str(mcp_sentinel)],
+                        "timeout": 1000,
+                    }
+                }
+            }
+        )
+    )
+    resources = Path(native_worker.__file__).parent / "resources"
+    base_config = resources / "worker.yml"
+    base_digest = digest(base_config)
+    launches = []
+
+    def observe_client(*args, **kwargs):
+        # Observe the public constructor only; return the actual SDK client and
+        # leave registration, callbacks, configuration and prompting untouched.
+        launches.append(
+            {"extra_args": list(kwargs["extra_args"]), "tools": kwargs.get("tools")}
+        )
+        return RpcClient(*args, **kwargs)
+
+    with Provider() as provider, FocusDecisions() as decisions:
+        provider.configure(agent)
+        bridge = Bridge(
+            root / "focus-state",
+            str(executable),
+            MODEL,
+            project_root=project,
+            channel_enabled=False,
+            webhook_enabled=False,
+            migrate_legacy=False,
+            focus_policy=FocusPolicy(
+                allow_external=True, data_classes=["tool_catalog"]
+            ),
+            jev_config=JevConfig(api_key="local-focus-fixture"),
+        )
+        bridge.focus.endpoint = decisions.endpoint
+        measurements = {}
+        try:
+            with patch.object(native_worker, "RpcClient", side_effect=observe_client):
+                for label, mode, consent in (
+                    ("baseline", "analyze", False),
+                    ("focused", "analyze", True),
+                    ("think_fallback", "think", True),
+                    ("focused_work", "work", True),
+                ):
+                    with check(report, f"focus_transport_{label}") as evidence:
+                        deferred = consent and mode != "think"
+                        prior_requests = len(decisions.requests)
+                        steps = []
+                        publications = {
+                            "name": "focus-callback-proof",
+                            "content": "exact-focus-callback-body-91473",
+                            "media_type": "text/plain",
+                        }
+                        for name, arguments in (
+                            ("tandem_work", {"request": {"action": "list"}}),
+                            ("tandem_publish_artifact", publications),
+                        ):
+                            if deferred:
+                                steps.extend(
+                                    [
+                                        ("read", {"path": f"xd://{name}"}),
+                                        (
+                                            "write",
+                                            {
+                                                "path": f"xd://{name}",
+                                                "content": json.dumps(arguments),
+                                            },
+                                        ),
+                                    ]
+                                )
+                            else:
+                                steps.append((name, arguments))
+                        steps.extend(
+                            [
+                                ("read", {"path": str(read_path)}),
+                                (
+                                    "write",
+                                    {"path": str(write_path), "content": WRITE_TOKEN},
+                                ),
+                                (
+                                    "bash",
+                                    {
+                                        "command": f"/usr/bin/touch {shlex.quote(str(shell_path))}",
+                                        "timeout": 5,
+                                    },
+                                ),
+                                finish("focus-transport-completed"),
+                                "Turn ended.",
+                            ]
+                        )
+                        provider.prepare(steps)
+                        execution = {"thinking": "off", "timeout_seconds": 60}
+                        if consent:
+                            execution["focus"] = {
+                                "goal": "Inspect the synthetic focus fixture.",
+                                "allow_external": True,
+                                "surfaces": ["tools"],
+                            }
+                        started = bridge.start(
+                            prompt="Inspect the synthetic focus fixture.",
+                            cwd=str(project),
+                            mode=mode,
+                            execution=execution,
+                        )
+                        result = await_task(bridge, started["task_id"])
+                        completed(result, "focus-transport-completed")
+                        require(
+                            not provider.steps, "Focus provider script not consumed"
+                        )
+                        require(
+                            not decisions.errors,
+                            f"Focus fixture errors: {decisions.errors}",
+                        )
+                        names = request_tools(provider.requests[0])
+                        require(
+                            (CORE_ESSENTIAL - {"tandem_review_read"}) <= names,
+                            "A core invariant callback was removed from the first request",
+                        )
+                        optional = {"tandem_work", "tandem_publish_artifact"}
+                        require(
+                            not optional.intersection(names)
+                            if deferred
+                            else optional <= names,
+                            f"Incorrect optional schema presentation: {names}",
+                        )
+                        require(
+                            ("after_revision" in json.dumps(provider.requests[0]))
+                            != deferred,
+                            "Deferred work schema leaked into the first request or baseline lost it",
+                        )
+                        require(
+                            len(decisions.requests) - prior_requests == int(deferred),
+                            "Focus consent/think bypass or startup request count changed",
+                        )
+                        observed = list(tool_results(provider.requests[-1]).values())
+                        if deferred:
+                            docs = [text for name, text in observed if name == "read"][
+                                :2
+                            ]
+                            require(
+                                len(docs) == 2
+                                and "request" in docs[0]
+                                and "action" in docs[0]
+                                and "after_revision" in docs[0]
+                                and "content" in docs[1]
+                                and "media_type" in docs[1],
+                                f"Deferred schema documentation was not retrieved: {docs}",
+                            )
+                            work_result = next(
+                                text for name, text in observed if name == "write"
+                            )
+                        else:
+                            work_result = provider.results()["tandem_work"]
+                        require(
+                            '"items"' in str(work_result),
+                            f"Permitted work list callback did not execute: {work_result}",
+                        )
+                        published = [
+                            item
+                            for item in bridge.artifacts.for_task(started["task_id"])
+                            if item["name"] == publications["name"]
+                        ]
+                        require(
+                            len(published) == 1
+                            and bridge.artifacts.read(published[0]["artifact_id"])[
+                                "content"
+                            ]
+                            == publications["content"],
+                            "Deferred publication did not reach the real guarded callback",
+                        )
+                        if mode == "work":
+                            require(
+                                write_path.read_text() == WRITE_TOKEN
+                                and shell_path.is_file(),
+                                "Focus work transport lost ordinary permitted writes",
+                            )
+                        else:
+                            require(
+                                not write_path.exists() and not shell_path.exists(),
+                                f"{mode} focus transport granted a filesystem mutation",
+                            )
+                            denied = provider.results()["write"]
+                            require(
+                                re.search(
+                                    r"not found|unknown tool|not available|not enabled|disabled|denied|not allowed|only.*xd",
+                                    str(denied),
+                                    re.I,
+                                ),
+                                f"Missing native write-denial result: {denied}",
+                            )
+                        read_result = provider.results()["read"]
+                        require(
+                            (READ_TOKEN in str(read_result)) == (mode != "think"),
+                            "Focus transport changed native read permissions",
+                        )
+                        launch = launches[-1]
+                        argv = launch["extra_args"]
+                        configs = [
+                            argv[index + 1]
+                            for index, arg in enumerate(argv)
+                            if arg == "--config"
+                        ]
+                        require(
+                            configs
+                            == [str(base_config)]
+                            + (
+                                [str(resources / "focus-tools.yml")] if deferred else []
+                            ),
+                            f"Base safety config missing, replaced or reordered: {configs}",
+                        )
+                        require(
+                            digest(base_config) == base_digest,
+                            "Base safety config changed",
+                        )
+                        require(
+                            not mcp_sentinel.exists(),
+                            "Worker auto-loaded project MCP despite the base safety config",
+                        )
+                        if mode != "work":
+                            require(
+                                not {"write", "bash"}.intersection(
+                                    launch["tools"] or ()
+                                ),
+                                "Presentation widened the native permission allowlist",
+                            )
+                        sizes = provider.wire_bytes
+                        measurements[label] = {
+                            "first": sizes[0],
+                            "total": {
+                                field: sum(row[field] for row in sizes)
+                                for field in sizes[0]
+                            },
+                            "requests": len(sizes),
+                        }
+                        evidence.update(
+                            task_id=started["task_id"],
+                            first_tools=sorted(names),
+                            deferred_callbacks_executed=deferred,
+                            native_filesystem_write=mode == "work",
+                            project_mcp_auto_loaded=mcp_sentinel.exists(),
+                            config_order=[Path(path).name for path in configs],
+                            base_config_sha256=base_digest,
+                            byte_measurements=measurements[label],
+                            focus_summary=bridge.focus.summary(started["task_id"]),
+                        )
+            require(
+                measurements["focused"]["first"]["schema_bytes"]
+                < measurements["baseline"]["first"]["schema_bytes"],
+                "Deferred catalog did not reduce real first-request schema bytes",
+            )
+            report["focus_transport"] = {
+                "route": "Bridge -> real FocusEngine/consent/journal -> NativeWorker -> pinned OMP",
+                "measurements": measurements,
+                "measurement_unit": "Actual UTF-8 JSON field and complete request bytes received on localhost",
+                "comparison": "Same fixture and callback catalog; focused interaction includes docs retrieval overhead",
+                "classifier_overhead": decisions.requests,
+                "model_usage": "Synthetic fixture only; no token, cache, price or universal savings inference",
+                "scope": "Pinned runtime and openai-completions only; unknown runtime versions stay essential",
+            }
+        finally:
+            provider.release.set()
+            bridge.shutdown()
 
 
 # --- Native helper (task subagent) capability probes -----------------------------
@@ -2363,6 +2778,8 @@ def main():
                     exercise_schema_callbacks(executable, root, agent, report)
                     provider.configure(agent)
                     exercise(executable, root, provider, report)
+                    exercise_focus_transport(executable, root, agent, report)
+                    provider.configure(agent)
                     helper_probe(executable, root, agent, provider, report)
                 if installed_python:
                     with check(report, "installed_runtime_shared_flow") as evidence:

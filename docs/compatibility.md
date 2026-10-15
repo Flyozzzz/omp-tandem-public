@@ -66,6 +66,18 @@ directory. Explicit refresh selected the new generation; the old interpreter
 still reported its unchanged exact build. No user pin, credentials or active
 session was modified.
 
+The current verifier additionally exercises optional focus through the production
+Bridge and native worker: baseline/eager, analyze/discoverable, think/eager
+fallback and work/discoverable. It reads deferred `xd://` documentation, executes
+the unchanged permitted callbacks, checks that analyze cannot write files or run
+shell, and checks that the original worker config still prevents project MCP
+auto-loading. It records actual first-request and whole-interaction schema,
+message and request bytes; documentation retrieval overhead is included.
+These checks cover the pinned runtime and localhost `openai-completions` fixture,
+not arbitrary provider APIs, token/cache savings or live Jev classification
+quality. They are newer than the checked-in 3.8.0 report above. See the
+[focus guide](guide.md#optional-jev-context-tools-and-output-focus-unreleased).
+
 ## Reproduce without provider credentials
 
 From the repository, after `uv sync --frozen --group dev`:

@@ -12,6 +12,8 @@ from . import migration
 from .api import build_server
 from .binding import RuntimeOptions
 from .bridge import Bridge
+from .desktop import load_desktop_config
+from .focus import load_focus_policy
 from .jev_client import JevConfig
 from .model_routing_state import load_routing_policy
 from .prompts import INSTRUCTIONS
@@ -85,6 +87,11 @@ def main(argv=None):
         help="Provider/model override; otherwise use the model configured in OMP.",
     )
     parser.add_argument(
+        "--jev",
+        choices=("auto", "on", "off"),
+        help="Jev advice: auto enables team classification and recommendations with OPENROUTER_API_KEY; off disables all Jev calls. Defaults to OMP_TANDEM_JEV or auto.",
+    )
+    parser.add_argument(
         "--jev-audit",
         action="store_true",
         help="Enable explicit Jev report audits; sends selected report prose to OpenRouter using OPENROUTER_API_KEY",
@@ -99,6 +106,18 @@ def main(argv=None):
         type=Path,
         default=os.environ.get("OMP_TANDEM_JEV_ROUTING_POLICY"),
         help="Operator JSON pool for shadow-only task-start routing; external summary export also requires policy and per-task consent",
+    )
+    parser.add_argument(
+        "--jev-focus-policy",
+        type=Path,
+        default=os.environ.get("OMP_TANDEM_JEV_FOCUS_POLICY"),
+        help="Operator policy for optional context, permitted tool presentation and focused readers; explicit per-task export consent is also required",
+    )
+    parser.add_argument(
+        "--desktop-qa-config",
+        type=Path,
+        default=os.environ.get("OMP_TANDEM_DESKTOP_QA_CONFIG"),
+        help="Opt-in desktop-qa MCP command JSON; executes the configured backend, not a GUI worker",
     )
     parser.add_argument(
         "--disable-channel",
@@ -150,9 +169,10 @@ def main(argv=None):
             or args.legacy_cwd
             or args.legacy_context
             or args.work_token_file
+            or args.desktop_qa_config
         ):
             parser.error(
-                "--candidate cannot import history or inherit managed work authority"
+                "--candidate cannot import history, inherit managed authority or connect a desktop queue"
             )
         args.state_dir = Path(tempfile.mkdtemp(prefix="omp-tandem-candidate-"))
         args.no_legacy_import = True
@@ -179,24 +199,27 @@ def main(argv=None):
         "OMP_TANDEM_CHANNEL", "auto"
     )
     webhook_enabled = not args.no_webhook and enabled_setting("OMP_TANDEM_WEBHOOK", "1")
-    jev_enabled = args.jev_audit or enabled_setting("OMP_TANDEM_JEV_AUDIT", "0")
-    recommend_enabled = args.jev_recommend or enabled_setting(
-        "OMP_TANDEM_JEV_RECOMMEND", "0"
-    )
     routing_policy = (
         load_routing_policy(args.jev_routing_policy)
         if args.jev_routing_policy is not None
         else None
     )
-    jev_config = JevConfig(
-        enabled=jev_enabled,
-        api_key=os.environ.get("OPENROUTER_API_KEY")
-        if jev_enabled
-        or recommend_enabled
-        or (routing_policy is not None and routing_policy.allow_external_summary)
-        else None,
-        recommend_enabled=recommend_enabled,
+    focus_policy = (
+        load_focus_policy(args.jev_focus_policy)
+        if args.jev_focus_policy is not None
+        else None
     )
+    desktop_config = (
+        load_desktop_config(args.desktop_qa_config)
+        if not args.work_token_file and not args.migrate_only
+        else None
+    )
+    try:
+        jev_config = JevConfig.from_environment(
+            mode=args.jev, audit=args.jev_audit, recommend=args.jev_recommend
+        )
+    except ValueError as error:
+        parser.error(str(error))
     options = RuntimeOptions(
         args.state_dir,
         args.omp,
@@ -210,6 +233,8 @@ def main(argv=None):
         work_token_file=args.work_token_file,
         jev_config=jev_config,
         routing_policy=routing_policy,
+        focus_policy=focus_policy,
+        desktop_config=desktop_config,
     )
     if args.candidate_smoke:
         bridge = Bridge(
@@ -222,6 +247,7 @@ def main(argv=None):
             migrate_legacy=False,
             jev_config=jev_config,
             routing_policy=routing_policy,
+            focus_policy=focus_policy,
         )
         print(
             json.dumps(

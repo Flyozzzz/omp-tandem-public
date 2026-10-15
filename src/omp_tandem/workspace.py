@@ -152,6 +152,10 @@ def client_root_paths(roots) -> tuple[Path, ...]:
     return tuple(sorted(paths))
 
 
+class TaskAdmissionBusy(ValueError):
+    """No task was admitted; capacity or declared file ownership can be retried."""
+
+
 class WorkerSlots:
     """Four kernel-held leases shared across projects, without exposing their tasks."""
 
@@ -171,6 +175,6 @@ class WorkerSlots:
                 raise
             else:
                 return handle
-        raise ValueError(
+        raise TaskAdmissionBusy(
             "All four shared OMP worker slots are busy; try again after work finishes"
         )

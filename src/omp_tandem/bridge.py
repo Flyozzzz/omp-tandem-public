@@ -9,8 +9,10 @@ from . import migration
 from .artifacts import ArtifactStore
 from .channel import ChannelDelivery
 from .context_transfer import ContextTransfer
+from .desktop import DesktopQA, DesktopQAConfig
 from .diagnostics import Diagnostics
 from .findings import FindingStore
+from .focus import FocusEngine, FocusPolicy
 from .jev_audit import JevAudit
 from .jev_client import JevConfig
 from .jev_recommend import JevRecommendations
@@ -27,6 +29,8 @@ from .task_interaction import TaskInteraction
 from .task_results import TaskResults
 from .task_runtime import TaskRuntime
 from .task_store import TaskStore, initialize_database
+from .team_runs import TeamRuns
+from .team_selection import TeamSelection
 from .work_access import perform_work, read_work_token
 from .work_items import WorkStore
 from .workspace import WorkerSlots, resolve_scope
@@ -49,7 +53,10 @@ class Bridge:
         work_token_file: Path | None = None,
         jev_config: JevConfig | None = None,
         routing_policy: RoutingPolicy | None = None,
+        focus_policy: FocusPolicy | None = None,
+        desktop_config: DesktopQAConfig | None = None,
     ):
+        jev_config = JevConfig.from_environment() if jev_config is None else jev_config
         self.scope = resolve_scope(state_dir, project_root, source=project_source)
         slots = WorkerSlots(self.scope.base)
         # Identity validation must precede every store that can write to the DB.
@@ -64,6 +71,7 @@ class Bridge:
             webhook_port=webhook_port,
             project_root=self.scope.root,
         )
+        self.desktop = DesktopQA(desktop_config, self.scope.key, self.channel)
         self.migration = (
             migration.migrate_legacy(self.scope, database)
             if migrate_legacy
@@ -97,12 +105,21 @@ class Bridge:
             self.tasks, self.artifacts, self.projects, self.findings, self.work_items
         )
         self.model_routing = ModelRouter(self.tasks, routing_policy, jev_config)
+        self.focus = FocusEngine(
+            self.tasks,
+            self.projects,
+            self.artifacts,
+            self.work_items,
+            policy=focus_policy,
+            config=jev_config,
+        )
         self.results = TaskResults(
             self.tasks,
             self.artifacts,
             self.projects,
             self.work_items,
             model_routing=self.model_routing,
+            focus=self.focus,
         )
         self.jev = JevAudit(self.tasks, self.artifacts, self.results, jev_config)
         self.jev_recommend = JevRecommendations(self.tasks, jev_config)
@@ -114,6 +131,7 @@ class Bridge:
             executable,
             work_items=self.work_items,
             model_routing=self.model_routing,
+            focus=self.focus,
         )
         self.runtime = TaskRuntime(
             self.tasks,
@@ -125,6 +143,7 @@ class Bridge:
             slots,
             model,
             model_routing=self.model_routing,
+            focus=self.focus,
         )
         self.diagnostics = Diagnostics(self)
         self.review_runs = ReviewRuns(
@@ -134,6 +153,16 @@ class Bridge:
             self.view,
             self.reply,
             self.cancel,
+            self.channel.owner,
+        )
+        self.team_selection = TeamSelection(self.scope, executable, model, jev_config)
+        self.team_runs = TeamRuns(
+            self.tasks,
+            self.scope,
+            self.start,
+            self.view,
+            self.cancel,
+            self.team_selection,
             self.channel.owner,
         )
 
@@ -202,6 +231,7 @@ class Bridge:
         review_stage=None,
         reserved_task_id=None,
         review_run_id=None,
+        team_run_id=None,
         work_attempt_id=None,
         continuation="resume",
         handoff=None,
@@ -211,6 +241,10 @@ class Bridge:
             self.tasks.latest(conversation_id) if conversation_id is not None else None
         )
         if previous is not None:
+            if previous.get("team_run_id"):
+                raise ValueError(
+                    "Team steps cannot be continued outside their run; start a new explicit plan"
+                )
             with closing(self.tasks.connect()) as db:
                 run_binding = db.execute(
                     "SELECT review_run_id FROM tasks WHERE conversation_id=? "
@@ -271,6 +305,7 @@ class Bridge:
             review_stage=effective_stage,
             reserved_task_id=reserved_task_id,
             review_run_id=review_run_id,
+            team_run_id=team_run_id,
             work_attempt_id=work_attempt_id,
             continuation=continuation,
             handoff=handoff,
@@ -321,6 +356,9 @@ class Bridge:
 
     def shutdown(self):
         try:
-            self.review_runs.close()
+            self.team_runs.close()
         finally:
-            self.runtime.shutdown()
+            try:
+                self.review_runs.close()
+            finally:
+                self.runtime.shutdown()

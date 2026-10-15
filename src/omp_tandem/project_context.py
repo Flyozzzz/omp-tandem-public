@@ -135,6 +135,7 @@ class ContextReadRequest(_ContextModel):
     pointer: str = Field(default="", max_length=2000)
     offset_bytes: int = Field(default=0, ge=0, strict=True)
     max_bytes: int = Field(default=8192, ge=4, le=16384, strict=True)
+    view: Literal["raw", "focused"] = "raw"
 
 
 def _json_bytes(value) -> bytes:

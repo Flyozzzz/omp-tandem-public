@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -23,12 +24,44 @@ class JevConfig:
     api_key: str | None = field(default=None, repr=False)
     timeout_seconds: float = 10.0
     recommend_enabled: bool = False
+    classifier_enabled: bool = False
+
+    @classmethod
+    def from_environment(cls, *, mode=None, audit=False, recommend=False):
+        """Auto-enable advice with a key; report/context export keeps its own policy."""
+        selected = (mode or os.environ.get("OMP_TANDEM_JEV", "auto")).strip().lower()
+        if selected not in ("auto", "on", "off", "1", "0", "true", "false"):
+            raise ValueError("OMP_TANDEM_JEV must be auto, on or off")
+        if selected in ("off", "0", "false"):
+            return cls()
+        key = os.environ.get("OPENROUTER_API_KEY", "").strip() or None
+        automatic = bool(key) if selected == "auto" else True
+
+        def setting(name, default):
+            value = os.environ.get(name, "auto").strip().lower()
+            if value == "auto":
+                return default
+            if value in ("1", "true", "yes", "on"):
+                return True
+            if value in ("0", "false", "no", "off"):
+                return False
+            raise ValueError(f"{name} must be auto, 1 or 0")
+
+        return cls(
+            enabled=audit or setting("OMP_TANDEM_JEV_AUDIT", False),
+            recommend_enabled=recommend
+            or setting("OMP_TANDEM_JEV_RECOMMEND", automatic),
+            classifier_enabled=automatic,
+            api_key=key,
+        )
 
     def __post_init__(self):
         if type(self.enabled) is not bool:
             raise TypeError("enabled must be a boolean")
         if type(self.recommend_enabled) is not bool:
             raise TypeError("recommend_enabled must be a boolean")
+        if type(self.classifier_enabled) is not bool:
+            raise TypeError("classifier_enabled must be a boolean")
         if self.api_key is not None and not isinstance(self.api_key, str):
             raise TypeError("api_key must be text or None")
         if (

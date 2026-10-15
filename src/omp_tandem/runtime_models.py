@@ -51,6 +51,7 @@ class ArtifactReadRequest(BaseModel):
     artifact_id: str
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=16000, ge=1, le=50000)
+    view: Literal["raw", "focused"] = "raw"
 
 
 class ReviewReadRequest(BaseModel):

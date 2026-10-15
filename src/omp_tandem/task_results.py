@@ -39,12 +39,14 @@ class TaskResults:
         work_items=None,
         *,
         model_routing=None,
+        focus=None,
     ):
         self.tasks = tasks
         self.artifacts = artifacts
         self.projects = projects
         self.work_items = work_items
         self.model_routing = model_routing
+        self.focus = focus
 
     def view(self, task_id, details=False, *, refresh=True):
         task = self.tasks.get(task_id, refresh=refresh)
@@ -72,6 +74,8 @@ class TaskResults:
         result["runtime_identity"] = runtime_identity()
         if task.get("review_run_id"):
             result["review_run_id"] = task["review_run_id"]
+        if task.get("team_run_id"):
+            result["team_run_id"] = task["team_run_id"]
         if task.get("review_id"):
             result["review"] = {
                 "review_id": task["review_id"],
@@ -117,6 +121,10 @@ class TaskResults:
             routing = self.model_routing.view(task, details=details)
             if routing is not None:
                 result["execution"]["routing"] = routing
+        if self.focus is not None:
+            focus = self.focus.summary(task_id)
+            if focus is not None:
+                result["execution"]["focus"] = focus
         attempt, attempt_context = self._attempt_context(task_id, task)
         result["execution"]["attempt"] = attempt_context
         with closing(self.tasks.connect()) as db:

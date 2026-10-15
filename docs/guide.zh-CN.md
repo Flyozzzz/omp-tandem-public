@@ -1422,6 +1422,63 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 
 此机制仅限于同一个状态基目录内的本地共享。传递包会一直保留到操作者删除，没有自动过期机制。应将包内容和传递 ID 视为敏感信息，而不是公开下载链接。
 
+<a id="team-mode"></a>
+## 交互式团队模式（未发布）
+
+`tandem_team` 执行开发、研究、写作或审查计划，不替代 `tandem_work` 的版本化验收、
+worktree 或独立后台授权。检查已加载 runtime 的 `tandem_scope.team`；已发布的 3.11.0 不含此功能。
+
+计划包含 2–16 个使用现有 `TaskContract` 的步骤；依赖必须无环，并且唯一最终整合步骤
+直接或间接依赖所有其他步骤。`max_parallel` 默认 3、最多 4 个共享 OMP 槽位。
+`budget_seconds=1800` 覆盖分类、启动、执行及等待决策；它是时间上限，不是硬性账单上限。
+
+模型池**仅保留 OMP `get_available_models` 返回的 `openai-codex` 订阅模型**。
+OpenRouter、普通 `openai` API 及其他提供商在 Jev 或协调者看到目录前已被排除。
+`action="models"` 只运行元数据探测，不发送推理提示；目录不证明剩余配额或模型质量。
+没有可用订阅模型会阻止执行，而不会回退到另一个提供商。
+
+存在 `OPENROUTER_API_KEY` 时，Jev 自动可用。默认 `--jev auto`，也可使用
+`OMP_TANDEM_JEV=auto`；`--jev off` / `OMP_TANDEM_JEV=off` 关闭所有 Jev 访问。
+该密钥用于 Jev 顾问，不用于工作模型。自动分类仅发送团队目标、步骤标题/目标及公开模型
+事实，不读取契约上下文、约束、源码、产物或历史用于导出。目标文本仍可能含秘密；
+这不是自动脱敏。使用 `model_selection="coordinator"` 禁止该团队向 Jev 导出。
+
+显式选择优先级：步骤 `execution.model` → 计划 `execution.model` → 进程
+`--model` / `OMP_TANDEM_MODEL`。不合格的显式选择需修正计划，不会暗中替换。
+Jev 的 confidence 与所选概率都需至少 0.7；这些不是校准后的正确率。
+未确定的分配通过 `pending_models` 单独显示；已分配且依赖就绪的工作者可以先运行。
+协调者读取 `readers.selection` 中的 `eligible_assignments`，取得一次 OMP 咨询并比较，
+再为**当前全部可操作待定步骤**提交 `assignments={step_id:{model,thinking,reason}}`。
+依赖变化后的旧分配请求会被拒绝；重新读取动作，不能复活已阻塞步骤。
+问题优先，但模型分配动作仍可见。`waiting_models` 仅表示因模型而停等，不是全队启动屏障。
+已接受的分配及原始 Jev 决策保留。
+
+当前集成使用 Jev **Choice**，尚未接入 Noul/Score。每个问题明确引用
+`steps.step_N.goal/title/preference`，不依赖问题 ID。模型概率不是执行证据或权限。
+
+请求字段与[英文示例](guide.md#team-mode)相同。开发需要 `allow_work=true`、
+`work` 模式及精确 `contract.scope.owned_files`。重叠文件串行；没有声明文件的 work
+步骤独占项目执行，因为 shell 效果不受文件声明约束。当前 workspace 不是 OS 沙箱或盲快照审查。
+
+保留 `run_id`；所有团队响应（包括 `details=true`）最多 **16,384 UTF-8 字节**。
+通过 `readers` 和 `action="read"` 恢复 `run`、`plan`、`selection`、`step`。
+原样跟随 `next_request`，拼接 `content` 后解析 JSON；偏移按 UTF-8 字节计算，
+后续页必须绑定 `expected_sha256`。内容变化会要求重新开始，不能混合不同快照。
+`models` 采用相同的保存目录分页协议，后续页不会再次探测；`list` 是带游标的元数据列表。
+步骤 reader 区分保存结果与当前问题；完整回答可通过 `answer_artifact_id` 读取。
+
+默认 `dependency_policy="success"` 仍要求成功。只有完全只读团队的唯一最终
+`think` 步骤可显式使用 `reported_evidence`，接受原生已完成的结构化 success/partial。
+完整 outcome 产物保留检查、阻塞项和来源；失败、blocked、取消、中断或缺失报告仍被拒绝。
+成功汇总部分输入时整体为 `completed/partial`，明确列出 `incomplete_steps`，不改写历史。
+完成不等于独立验收。执行前后验证模型与 `thinking`。订阅工作者及显式订阅咨询
+禁用 prewalk、advisor 和模型回退，`smol`/`slow`/`plan` 固定为所选订阅模型。
+
+`request_key` 在项目内去重；同键不同计划冲突。原生任务结束前保持 `cancelling`。
+所有者关闭/丢失会中断且不重放；新所有者可读取，不能接管执行。取消不回滚文件或外部效果。
+工作者用量保留在步骤的完整保存结果中，Jev 用量在 selection 节。
+协调者/咨询费用及总费用保持未知，除非另行测量。
+
 <a id="mcp-tools"></a>
 ## MCP 工具
 
@@ -1435,7 +1492,7 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 
 传入 `request`：`kind` 为 `skill` 或 `review_direction`，`goal` 最多 4000 字符，1–20 个 `{id, description}` 候选项；简单 ID 唯一且最多 64 字符，描述最多 2000。目录由协调者明确提供，不自动扫描技能、上下文、历史或产物。默认 `preview:true` 返回完整精确请求，无需密钥、网络或尝试保留；完整 UTF-8 载荷最多 32000 字节，超限拒绝而不截断。普通 runtime/数据库初始化仍可建立基础结构。
 
-对具体导出取得明确同意后，发送需要独立的 `--jev-recommend` / `OMP_TANDEM_JEV_RECOMMEND=1`、密钥、`preview:false` 和匹配的 `expected_input_sha256`。审计与推荐不会互相启用。哈希绑定目标、类型、候选 ID/描述/顺序、固定问题及模型，但不证明人的同意；输入文本仍可能含秘密，这不是脱敏。请求及结果/失败保留在项目私有日志中；相同输入复用原结果，未知执行不会在重启后重发。
+对具体导出取得同意后，发送需要密钥、推荐功能可用、`preview:false` 及匹配的 `expected_input_sha256`。有密钥时自动提供推荐，除非关闭；`--jev-recommend` / `OMP_TANDEM_JEV_RECOMMEND` 仍可显式配置，`--jev off` 优先关闭所有 Jev 访问。报告审计仍需独立启用。哈希绑定精确字节，但不证明人的同意；文本仍可能含秘密。请求及结果保留在项目私有日志中，相同输入复用原结果，未知执行不会在重启后重发。
 
 结果区分带精确 `candidate_id` 的 `candidate`、`none` 和 `unclear`；提供商故障属于单独的不可用状态。ID 与模型概率不证明技能存在或代码正确，不触发执行、权限变更、丢弃必需检查或验收。建议不得进入独立快照审查阶段。合成协议测试没有测量真实 Jev 的推荐准确率。[完整契约与示例](guide.md#optional-jev-candidate-recommendation-unreleased)。
 
@@ -1447,9 +1504,18 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 
 `execution.routing` 将建议、原始模型、原因、耗时及 Jev 用量与实际执行区分。工作预算默认 10 秒、最多 30 秒且受任务剩余时间约束；异常 OS 停止没有严格墙钟保证。`stop_returned` 仅表示 SDK 返回，不证明所有后代退出。普通路由故障保留原选择；任务取消/总期限禁止后续提示，teardown 错误不伪装成健康回退。未知请求不重放，建议不进入提示或验收。真实准确率与节约尚未测量。[策略示例与完整契约](guide.md#task-start-shadow-model-routing-unreleased)。
 
+**Jev 上下文、工具与输出聚焦（未发布）** 单独通过 `--jev-focus-policy PATH` / `OMP_TANDEM_JEV_FOCUS_POLICY`、OpenRouter 密钥、策略允许的数据类别以及当前任务明确提供的 `execution.focus.goal`、`allow_external:true`、`surfaces` 启用。同意不随续接继承；审查与受管尝试绕过该功能。Preflight 和结果读取不调用 Jev。
+
+`context` 只补充固定快照中的可选材料，不改变必需规则、当前决定、显式选择与验收条件。`tools` 仅改变已获准的原生 `tandem_work` / `tandem_publish_artifact` 的展示方式：通过 `read xd://TOOL` 获取完整 schema，再向同一路径 `write` JSON 调用；这不授予文件写权限，也不选择外部 Claude/Codex 工具。`outputs` 在绑定任务的产物／上下文 reader 中提供显式 `view:"focused"`；普通协调者产物 reader 保持 raw。
+
+返回原文片段，不生成摘要；保留冲突证据、受保护诊断行及相邻行、未评估的输出。聚焦视图不是完整内容：使用原始坐标与 `raw_request`，不要拼接重排后的片段。Raw 分页游标不变。混合／必需上下文、不支持的格式、普通故障或 `unclear` 保留原始展示；访问错误、取消和总期限不是回退。
+
+默认每任务 4 次保留尝试，每次最多 20 个完整候选／32,000 请求字节、3 秒。精确重复读取复用持久记录，不重放未知发送。`execution.focus` 单独显示用量与实际展示信息。它不压缩原生会话历史，也不保证节省费用；按需读取 schema 可能增加总交换量。[策略、启用示例、限制及测量](guide.md#optional-jev-context-tools-and-output-focus-unreleased)。
+
 | 工具 | 主要输入 | 用途 |
 |---|---|---|
 | `tandem_scope` | 无 | 检查不可变的项目边界和启动迁移结果 |
+| `tandem_team`（未发布） | `action=models/start/status/list/assign/cancel/read`、`plan`、`run_id`、`assignments`、分节/游标 | 有界团队响应、订阅模型分配及完整证据恢复 |
 | `tandem_work` | `request: WorkCommand`、`wait_seconds=0..1200` | [共享计划、CAS 更新、领取、提交与独立验收](#shared-work)；自主授权及不确定执行恢复仅限操作者 CLI |
 | `tandem_start` | `cwd`、`prompt` 或 `contract`、`mode`、超时、execution/review/context、`preflight` | 检查准入或显式启动任务 |
 | `tandem_continue` | `conversation_id`、`prompt` 或 `contract`、超时、execution/context、`continuation`、`handoff`、`preflight` | 继续历史或显式新建有限上下文 |
@@ -1463,7 +1529,7 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 | `tandem_publish_artifact` | `conversation_id`、`name`、`content`、`media_type` | 发布不可变的材料版本 |
 | `tandem_read_artifact` | `artifact_id`、`offset`、`limit` | 分页读取材料 |
 | `tandem_project_context` | `action=publish/get/list`、快照／ID、`expected_revision`、`limit` | 管理有来源的产品快照 |
-| `tandem_context_read` | `task_id`、`pointer`、`offset_bytes`、`max_bytes` | 仅分页读取任务固定的产品快照；独立审查使用自己的 reader |
+| `tandem_context_read` | `task_id`、`pointer`、`offset_bytes`、`max_bytes`、`view=raw/focused` | 读取任务固定快照；focus 需要当前任务同意；独立审查使用自己的 reader |
 | `tandem_export_context` | `context_id`、`target_project_root` | 向特定接收方提供快照 |
 | `tandem_import_context` | `transfer_id`、`expected_revision` | 接收定向发送的快照 |
 | `tandem_channel` | `action=status/probe/ack/pending/recover`、相关 ID／令牌、`include_previous`、`limit` | 管理可选投递机制 |
@@ -1635,6 +1701,44 @@ uv run --no-project --python '>=3.12' python -I \
 
 请求格式、接收方选择、确认、恢复和企业配置，请参阅 [Channels 与 Webhook（英文）](channels.md)。
 
+<a id="desktop-session-qa-handoff"></a>
+## 将 GUI 测试交给 Desktop 会话
+
+尚未领取的过期任务可通过 `tandem_desktop(request={"action":"cancel","job_id":"ID","reason":"原因"})` 取消。该事务只接受绑定范围内的 `queued` 任务，保留 ID 并记录未执行 GUI 的 `cancelled` 状态。完全相同的重试幂等；不同原因冲突。运行中或已报告的任务不能这样取消。`cancelled` 会结束结果等待，但执行器的 `finish` 报告不能使用此结果。
+
+可选的 `tandem_desktop` 连接到实现 `desktop-qa/2` 协议的外部 MCP 后端。后端仍是唯一任务账本；Tandem 传入已绑定的项目范围并观察终态结果。这**不是**自主 GUI 启动器。用户须打开具有授权原生 Computer Use 的独立会话，验证实际应用访问能力，再调用 `next`。发现工具或连接 app-server 并不能证明 GUI 权限。
+
+操作者通过 `--desktop-qa-config /absolute/backend.json` 或 `OMP_TANDEM_DESKTOP_QA_CONFIG` 指定配置。这明确允许启动配置的本地队列后端，而非模型或 GUI 执行器：
+
+```json
+{
+  "command": "/absolute/desktop-qa/.venv/bin/python",
+  "args": ["/absolute/desktop-qa/server.py"],
+  "cwd": "/absolute/desktop-qa",
+  "env": {}
+}
+```
+
+两个 Tandem 客户端须使用相同项目根目录和后端。模型请求不能选择命令或项目范围。默认禁用此集成，受限托管执行器不可使用，candidate 模式拒绝连接；集成检查须明确配置临时后端数据库和状态目录。
+
+`request` 参数示例：
+
+```json
+{"action":"submit","request_id":"build-42-settings","app":"Example","scenario":"打开设置，保存更改，再次打开","expected":"保存的值仍然存在","build":"build-42"}
+{"action":"next","worker_id":"desktop-session","claim_id":"attempt-42","apps":["Example"],"wait_seconds":null}
+{"action":"get","job_id":"RETURNED_JOB_ID","wait_seconds":null}
+```
+
+`next` 精确匹配应用字符串。`next` 或 `get` 挂起期间仅由普通服务器代码等待，不需要模型轮询。`wait_seconds: 0` 立即读取；有限等待超时不允许重新提交任务。客户端工具超时、取消、机器休眠和会话生命周期仍然适用。实际任务结束后，执行器调用新的 `next`；关闭的 Desktop 会话须由用户重新打开，不承诺自动唤醒。
+
+仅执行新的 `execute: true` 领取结果，并遵守用户批准的应用和操作范围。完成请求包含 `action: "finish"`、`job_id`、领取时返回的私密 `claim_token`，以及含 `outcome`（`passed`、`failed`、`blocked`）、非空 `observations` 和字符串数组 `steps_performed`/`evidence` 的 `report`。passed/failed 必须有实际执行步骤。令牌不得放入日志或命令参数；报告是客户端提供的证据，不是独立验证的 GUI 成功。
+
+相同 `request_id` 只能重发完全相同的内容。重复领取不授权再次执行。领取回复丢失或 GUI 操作中断后，须由操作者确认停止并协调恢复，不自动重新排队。观察连接断开不会丢失后端结果；重连后显式 `get`。已确认的 Claude Channels 可发送终态通知；heartbeat/progress 不唤醒模型。终态 `get` 只确认确切读到的结果，不确认其他事件，也不授权应用更改。
+
+取消通知无法发送时，适配器会关闭并停用后端连接；`status` 返回 `connection: "retired"` 和 `reconciliation_required: true`，不会自动重连或重放。事件库争用不会隐藏已获得的报告：`get.notification_bookkeeping` 标明延迟或失败，`status.notification_errors` 显示问题。busy/locked 事务由普通服务器代码按确切结果键重试，不产生空闲模型唤醒。
+
+在授权 Desktop 会话完成真实测试并验证其等待行为之前，保留原有计划任务。仅通过本地协议 smoke、blocked 报告或通知写入并不能证明端到端就绪。
+
 <a id="configuration-and-limits"></a>
 ## 配置与限制
 
@@ -1648,6 +1752,9 @@ uv run --no-project --python '>=3.12' python -I \
 | `--scope-info` | 供操作者以 JSON 检查信息，不启动 MCP 或导入历史 |
 | `--omp` | OMP 可执行文件；默认在 `PATH` 中查找 |
 | `--model` | 覆盖 OMP 模型；否则使用 `OMP_TANDEM_MODEL` 或 OMP 配置 |
+| `--jev` | `auto`（默认）、`on`、`off`；也可用 `OMP_TANDEM_JEV`。有密钥时自动提供分类/推荐，off 关闭所有 Jev 访问 |
+| `--jev-recommend` | 显式启用推荐；仍须批准精确预览及哈希 |
+| `--desktop-qa-config` | 外部 `desktop-qa/2` 后端的操作者 JSON；也可用 `OMP_TANDEM_DESKTOP_QA_CONFIG` |
 | `--disable-channel` | 强制轮询，不启用探测／Webhook |
 | `--no-webhook` | 禁用 HTTP 监听器 |
 | `--webhook-port` | 回环端口；`0` 为每个会话选择一个空闲端口 |
@@ -1667,7 +1774,8 @@ uv run --no-project --python '>=3.12' python -I \
 | 每个对话的活动轮次 | 1 |
 | 单轮时限 | `balanced` 默认 1800 秒；`quick` 600 秒；`deep` 3600 秒；显式覆盖 1–7200 |
 | 问题截止时间 | 默认 300 秒；1–1800，同时受该轮截止时间限制 |
-| 单次 MCP 等待 | 服务端最多 1200 秒；请求尚未完成时客户端如何处理属于客户端自身行为（在一次实测中，Claude Code 在 120 秒时将其转为后台任务）。`tandem_diagnose` 的上限仍为 25 秒 |
+| 任务/审查 MCP 等待 | 服务端最多 1200 秒；请求尚未完成时客户端如何处理属于客户端自身行为（在一次实测中，Claude Code 在 120 秒时将其转为后台任务）。`tandem_diagnose` 的上限仍为 25 秒 |
+| Desktop QA 等待 | `wait_seconds: null` 无服务端截止时间；客户端超时、取消与会话生命周期仍适用 |
 | `tandem_wait` 选定任务 | 1–32 个 ID |
 | 诊断用 RPC 事件历史 | 200,000 个事件；并非无限内存，也不能取代原生历史 |
 | 解析后的任务输入 | 最多 200,000 UTF-8 字节，包含上下文 |

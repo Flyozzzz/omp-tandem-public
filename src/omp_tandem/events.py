@@ -216,6 +216,47 @@ class EventStore:
                 (time.time(), owner, dedupe_key),
             ).rowcount
 
+    def record_desktop_result(
+        self, owner: str, job_id: str, status: str, *, publish: bool, acknowledge: bool
+    ) -> dict:
+        """Atomically record one exact external result without waiting for writers."""
+        owner = _canonical_id(owner, "owner")
+        if not isinstance(job_id, str) or not job_id:
+            raise ValueError("job_id must be nonblank")
+        if status not in ("passed", "failed", "blocked", "cancelled"):
+            raise ValueError("Desktop result must be terminal")
+        key = _key(f"desktop:{job_id}:{status}")
+        acknowledged = 0
+        with closing(self._connect()) as db:
+            db.execute("PRAGMA busy_timeout=0")
+            try:
+                with db:
+                    db.execute("BEGIN IMMEDIATE")
+                    if publish:
+                        self.enqueue(
+                            owner,
+                            "desktop_test_finished",
+                            {"job_id": job_id, "status": status},
+                            dedupe_key=key,
+                            connection=db,
+                        )
+                    if acknowledge:
+                        acknowledged = db.execute(
+                            "UPDATE channel_events SET acknowledged_at=? "
+                            "WHERE owner=? AND dedupe_key=? AND acknowledged_at IS NULL",
+                            (time.time(), owner, key),
+                        ).rowcount
+            except sqlite3.OperationalError as exc:
+                code = exc.sqlite_errorcode & 0xFF
+                if code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                    raise
+                return {
+                    "outcome": "deferred",
+                    "acknowledged": 0,
+                    "reason": "busy" if code == sqlite3.SQLITE_BUSY else "locked",
+                }
+        return {"outcome": "recorded", "acknowledged": acknowledged, "reason": None}
+
     def acknowledge_work(self, owner: str, work_id: str, revision: int) -> dict:
         """Best-effort acknowledgement of the exact shared state already observed."""
         owner = _canonical_id(owner, "owner")

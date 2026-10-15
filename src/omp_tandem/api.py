@@ -11,6 +11,7 @@ from pydantic import Field
 from .binding import BridgeBinding, RuntimeOptions
 from .bridge import Bridge
 from .channel import ChannelFastMCP
+from .desktop import DesktopRequest
 from .execution import ExecutionOptions, profile_catalog
 from .findings import FindingChange, FindingDraft
 from .jev_recommend import JevRecommendationRequest
@@ -21,6 +22,9 @@ from .prompts import coordinator_instructions
 from .reviews import PublicationBusy, ReviewRequest, publication_lock
 from .runtime_identity import register_schemas, runtime_identity
 from .runtime_models import ACTIVE, Mode, TaskSummary
+from .team_models import TeamAssignment, TeamPlan
+from .team_presentation import MAX_READ_BYTES, TeamPresentation
+from .team_runs import ACTIVE_TEAM
 from .work_items import WorkCommand, WorkPresentation
 from .workspace import client_root_paths
 
@@ -200,6 +204,183 @@ def build_server(configuration: Bridge | RuntimeOptions):
         return mcp
 
     @mcp.tool()
+    async def tandem_team(
+        ctx: Context,
+        action: Literal[
+            "models", "start", "status", "list", "assign", "cancel", "read"
+        ],
+        request_key: str | None = None,
+        plan: TeamPlan | None = None,
+        run_id: str | None = None,
+        assignments: dict[str, TeamAssignment] | None = None,
+        wait_seconds: Annotated[int, Field(ge=0, le=MAX_WAIT_SECONDS)] = 25,
+        details: bool = False,
+        limit: Annotated[int, Field(ge=1, le=100)] = 20,
+        section: Literal["run", "plan", "selection", "step"] | None = None,
+        step_id: str | None = None,
+        offset_bytes: Annotated[int, Field(ge=0)] = 0,
+        max_bytes: Annotated[int, Field(ge=4, le=MAX_READ_BYTES)] = MAX_READ_BYTES,
+        expected_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None = None,
+        cursor: Annotated[str, Field(max_length=2048)] | None = None,
+    ) -> dict:
+        """Run a bounded team for development, research, analysis or review.
+
+        models reads only OMP-available openai-codex subscription models, excluding
+        OpenRouter, ordinary OpenAI API and other providers, without a model turn. start
+        requires a stable request_key and a complete plan with one final integration
+        step. Independent steps run concurrently; declared file conflicts serialize.
+        Work requires plan.allow_work; this is a live workspace, NOT an OS sandbox.
+        The whole run owns one deadline and stops with its MCP owner, not detached.
+        Auto selection uses Jev when configured, exporting goal/title summaries and
+        public model facts only. Choose a model/thinking pair per step; explicit
+        model and thinking choices win. Unassigned actionable steps are returned as
+        pending_models, even while assigned workers run. Read selection for frozen
+        eligible pairs, consult the OMP partner, compare once, then assign exactly
+        every current pending step's model, thinking and reason. Never ask the user
+        to route routine subtasks or invent model/reasoning availability.
+        status observes the same run; never start again to wait. Worker questions use
+        tandem_reply(task_id, question_id, answer). Cancel stops pending and active
+        steps. Partial evidence unlocks only an explicitly opted-in read-only final
+        synthesis. Completed reports are claims, not independent acceptance.
+        Every response is bounded, including details. Follow readers for complete
+        plan, selection, run errors, questions and structured results. read returns
+        digest-bound UTF-8 byte pages; send next_request unchanged. models returns
+        UTF-8 catalog pages from one immutable metadata observation; cursor pages
+        never probe again. list has complete cursor continuation over run metadata.
+        """
+        bridge = await runtime.get(ctx)
+        await bridge.channel.bind(ctx)
+        presentation = TeamPresentation(bridge.tasks, bridge.team_runs)
+        if action != "read" and (
+            section is not None
+            or step_id is not None
+            or offset_bytes
+            or expected_sha256 is not None
+        ):
+            raise ValueError("Section and digest paging fields are only valid for read")
+        if cursor is not None and action not in ("models", "list"):
+            raise ValueError("cursor is only valid for models/list")
+        if action in ("models", "list"):
+            if any(
+                value is not None for value in (request_key, plan, run_id, assignments)
+            ):
+                raise ValueError("models/list do not accept run or creation fields")
+            if action == "models":
+                return await asyncio.to_thread(
+                    presentation.models,
+                    bridge.channel,
+                    cursor=cursor,
+                    max_bytes=max_bytes,
+                )
+            return await asyncio.to_thread(
+                presentation.recent, bridge.channel, limit=limit, cursor=cursor
+            )
+        if action == "start":
+            if (
+                plan is None
+                or request_key is None
+                or run_id is not None
+                or assignments is not None
+            ):
+                raise ValueError(
+                    "start requires request_key and plan, without run_id or assignments"
+                )
+            result = await asyncio.to_thread(bridge.team_runs.start, request_key, plan)
+            return presentation.present(result, bridge.channel, details=details)
+        if run_id is None or plan is not None or request_key is not None:
+            raise ValueError(
+                "status/assign/cancel/read require run_id, without creation fields"
+            )
+        if action == "read":
+            if assignments is not None or section is None:
+                raise ValueError("read requires section, without assignments")
+            return await asyncio.to_thread(
+                presentation.read,
+                run_id,
+                section,
+                bridge.channel,
+                step_id=step_id,
+                offset_bytes=offset_bytes,
+                max_bytes=max_bytes,
+                expected_sha256=expected_sha256,
+            )
+        if action == "assign":
+            if not assignments:
+                raise ValueError("assign requires model assignments with reasons")
+            result = await asyncio.to_thread(
+                bridge.team_runs.assign,
+                run_id,
+                {
+                    key: value.model_dump(mode="json")
+                    for key, value in assignments.items()
+                },
+            )
+            return presentation.present(result, bridge.channel, details=details)
+        if assignments is not None:
+            raise ValueError("Model assignments are only valid for assign")
+        if action == "cancel":
+            result = await asyncio.to_thread(bridge.team_runs.cancel, run_id)
+            return presentation.present(result, bridge.channel, details=details)
+        observation = Observation(wait_seconds)
+        while True:
+            state = await asyncio.to_thread(bridge.team_runs.observation, run_id)
+            observation.observed()
+            if not (
+                state["questions"]
+                or state["pending_models"]
+                or state["status"] not in ACTIVE_TEAM
+                or observation.expired
+            ):
+                await observation.pause()
+                continue
+            result = await asyncio.to_thread(bridge.team_runs.view, run_id, details)
+            observation.observed()
+            # The full view may follow a concurrent answer, assignment or completion.
+            # Resolve the reason from that final observation, not the earlier trigger.
+            if any(item["action"] == "reply" for item in result.get("actions", [])):
+                reason = "question"
+            elif result.get("pending_models"):
+                reason = "model_agreement"
+            elif result["status"] not in ACTIVE_TEAM:
+                reason = "terminal"
+            elif observation.expired:
+                reason = "deadline_elapsed"
+            else:
+                await observation.pause()
+                continue
+            break
+        for step in result.get("steps", []):
+            if step.get("task_id"):
+                question = step.get("question") or {}
+                bridge.channel.seen(
+                    step["task_id"], step["status"], question.get("question_id")
+                )
+        observation.record(result, reason)
+        return presentation.present(result, bridge.channel, details=details)
+
+    @mcp.tool()
+    async def tandem_desktop(request: DesktopRequest, ctx: Context) -> dict | list:
+        """Hand off live UI tests to an already authorized desktop client.
+
+        The operator configures the external desktop-qa queue; the bound project
+        selects its scope. This tool neither launches a model nor grants GUI access.
+        Submit uses a stable request_id. An available native GUI worker calls next
+        with worker_id, a fresh claim_id and exact eligible apps; wait_seconds=null
+        holds the MCP call until work arrives without model polling. Only execute=true
+        authorizes the returned claim, within the user's existing test permissions.
+        Repeated/lost claims never authorize replay. Finish requires its claim_token
+        and a real passed/failed/blocked report. Cancel requires job_id and a nonblank
+        reason and only retires queued work before execution; running and completed
+        tests cannot be cancelled. Cancelled is an administrative record, not a GUI
+        result. Get waits for the result by default; wait_seconds=0 peeks.
+        Claude Channels can announce terminal results when confirmed. Host tool
+        timeouts still apply; keep the desktop session open, do not promise auto-wake.
+        """
+        bridge = await runtime.get(ctx)
+        await bridge.channel.bind(ctx)
+        return await bridge.desktop.perform(request)
+
+    @mcp.tool()
     async def tandem_scope(ctx: Context) -> dict:
         """Inspect the immutable project boundary and available computation profile defaults.
 
@@ -219,6 +400,15 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 "jev_audit": bridge.jev.status(),
                 "jev_recommend": bridge.jev_recommend.status(),
                 "model_routing": bridge.model_routing.status(),
+                "focus": bridge.focus.status(),
+                "team": {
+                    "available": True,
+                    "max_parallel": 4,
+                    "max_steps": 16,
+                    "lifecycle": "mcp_owner",
+                    "model_selection": bridge.team_selection.status(),
+                    "os_sandbox": False,
+                },
                 "review_checks": {
                     "available": True,
                     "policy": "supervisor_checks_v1",
@@ -241,12 +431,15 @@ def build_server(configuration: Bridge | RuntimeOptions):
         pointer: str = "",
         offset_bytes: Annotated[int, Field(ge=0)] = 0,
         max_bytes: Annotated[int, Field(ge=4, le=16384)] = 8192,
+        view: Literal["raw", "focused"] = "raw",
     ) -> dict:
         """Page omitted product data from this task's immutable pinned snapshot.
 
         Follow capsule pointers rather than repeatedly loading the whole product.
         This does not select another context, read files, or grant execution rights.
         Independent review uses its pinned review reader instead.
+        Focused view is optional, task-bound, nonexhaustive and export-consented;
+        mixed/required context retains the raw view. Raw paging remains unchanged.
         """
         bridge = await runtime.get(ctx)
         task = await asyncio.to_thread(bridge.tasks.get, task_id, refresh=False)
@@ -256,8 +449,12 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 "generic product-context expansion is withheld"
             )
         request = ContextReadRequest(
-            pointer=pointer, offset_bytes=offset_bytes, max_bytes=max_bytes
+            pointer=pointer, offset_bytes=offset_bytes, max_bytes=max_bytes, view=view
         )
+        if view == "focused":
+            return await asyncio.to_thread(
+                bridge.runtime.worker._read_context, task_id, request
+            )
         return await asyncio.to_thread(
             read_task_context, task, bridge.projects, request
         )

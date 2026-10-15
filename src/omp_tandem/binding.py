@@ -9,6 +9,8 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from .bridge import Bridge
+from .desktop import DesktopQAConfig
+from .focus import FocusPolicy
 from .jev_client import JevConfig
 from .model_routing_state import RoutingPolicy
 from .work_notifications import WorkNotifications
@@ -57,6 +59,8 @@ class RuntimeOptions:
     work_token_file: Path | None = None
     jev_config: JevConfig | None = None
     routing_policy: RoutingPolicy | None = None
+    focus_policy: FocusPolicy | None = None
+    desktop_config: DesktopQAConfig | None = None
 
 
 class BridgeBinding:
@@ -104,6 +108,8 @@ class BridgeBinding:
             work_token_file=options.work_token_file,
             jev_config=options.jev_config,
             routing_policy=options.routing_policy,
+            focus_policy=options.focus_policy,
+            desktop_config=options.desktop_config,
         )
         self.bridge = bridge
         self.source = source
@@ -192,7 +198,10 @@ class BridgeBinding:
                 await self.work_notifications.close()
             if self.bridge is not None:
                 try:
-                    await asyncio.to_thread(self.bridge.shutdown)
+                    try:
+                        await self.bridge.desktop.close()
+                    finally:
+                        await asyncio.to_thread(self.bridge.shutdown)
                 finally:
                     try:
                         await self.bridge.jev.close()

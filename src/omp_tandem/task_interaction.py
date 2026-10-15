@@ -268,6 +268,11 @@ class TaskInteraction:
                         if task["review_run_id"]
                         else {}
                     ),
+                    **(
+                        {"team_run_id": task["team_run_id"]}
+                        if task["team_run_id"]
+                        else {}
+                    ),
                 },
                 task_id=task_id,
                 dedupe_key=f"question:{question_id}",

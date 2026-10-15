@@ -1,0 +1,7 @@
+# Team assignments are exact; a provider failure must not silently choose another model.
+retry:
+  modelFallback: false
+prewalk:
+  enabled: false
+advisor:
+  enabled: false

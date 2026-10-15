@@ -13,7 +13,8 @@ from .models import parse_outcome
 from .runtime_guard import guard_database
 from .runtime_models import ACTIVE_SQL
 from .task_contracts import owned_paths, work_policy
-from .workspace import ProjectScope
+from .team_models import TEAM_MODEL_PROVIDER, team_dependency_ready
+from .workspace import ProjectScope, TaskAdmissionBusy
 
 
 def _connect(path):
@@ -67,6 +68,8 @@ def initialize_database(scope: ProjectScope) -> Path:
                 "work_operations",
                 "jev_recommendations",
                 "task_model_routing",
+                "task_focus",
+                "task_focus_attempts",
             }
             if any(
                 db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
@@ -104,6 +107,7 @@ def initialize_database(scope: ProjectScope) -> Path:
             "review_id": "TEXT",
             "review_stage": "TEXT",
             "review_run_id": "TEXT",
+            "team_run_id": "TEXT",
             "execution_json": "TEXT",
             "actual_model": "TEXT",
             "actual_thinking": "TEXT",
@@ -125,6 +129,10 @@ def initialize_database(scope: ProjectScope) -> Path:
         db.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS review_run_stage ON tasks(review_run_id, review_stage) "
             "WHERE review_run_id IS NOT NULL"
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS tasks_team_run ON tasks(team_run_id) "
+            "WHERE team_run_id IS NOT NULL"
         )
         db.execute("DROP INDEX IF EXISTS one_active_turn")
         db.execute(
@@ -155,6 +163,20 @@ def initialize_database(scope: ProjectScope) -> Path:
             task_id TEXT PRIMARY KEY,
             record_json TEXT NOT NULL
         )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS task_focus (
+            task_id TEXT PRIMARY KEY, record_json TEXT NOT NULL
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS task_focus_attempts (
+            task_id TEXT NOT NULL, purpose TEXT NOT NULL, input_sha256 TEXT NOT NULL,
+            attempt_id TEXT NOT NULL UNIQUE, request_json TEXT NOT NULL,
+            reserved_at REAL NOT NULL, timeout_seconds REAL NOT NULL,
+            result_json TEXT, finished_at REAL,
+            PRIMARY KEY(task_id, purpose, input_sha256),
+            CHECK (
+                (result_json IS NULL AND finished_at IS NULL)
+                OR (result_json IS NOT NULL AND finished_at IS NOT NULL)
+            )
+        )""")
         db.commit()
     path.chmod(0o600)
     return path
@@ -162,6 +184,7 @@ def initialize_database(scope: ProjectScope) -> Path:
 
 class TaskStore:
     def __init__(self, scope: ProjectScope, channel: ChannelDelivery):
+        self.scope = scope
         self.root = scope.directory
         self.path = self.root / "tasks.sqlite3"
         self.channel = channel
@@ -196,7 +219,7 @@ class TaskStore:
 
     def _terminal_event(self, db, task_id, status):
         task = db.execute(
-            "SELECT conversation_id, report_json, review_run_id FROM tasks WHERE task_id=?",
+            "SELECT conversation_id, report_json, review_run_id, team_run_id FROM tasks WHERE task_id=?",
             (task_id,),
         ).fetchone()
         report = json.loads(task["report_json"]) if task["report_json"] else None
@@ -210,6 +233,7 @@ class TaskStore:
                     if task["review_run_id"]
                     else {}
                 ),
+                **({"team_run_id": task["team_run_id"]} if task["team_run_id"] else {}),
                 "status": status,
                 "outcome": report["outcome"]
                 if report and status == "completed"
@@ -377,23 +401,48 @@ class TaskStore:
                 raise ValueError(
                     "Source conversation has active claims or recovery-required work; use report-only reconciliation"
                 )
-        if record["mode"] == "work" and owned:
-            for other in db.execute(
-                f"SELECT cwd, contract_json, policy_json FROM tasks WHERE mode='work' AND status IN {ACTIVE_SQL}"
+        exclusive = bool(
+            record.get("team_run_id") and record["mode"] == "work" and not owned
+        )
+        for other in db.execute(
+            f"SELECT cwd, mode, contract_json, policy_json, team_run_id FROM tasks WHERE status IN {ACTIVE_SQL}"
+        ):
+            other_owned = (
+                owned_paths(other["cwd"], work_policy(other))
+                if other["mode"] == "work"
+                else set()
+            )
+            if exclusive or (
+                other["team_run_id"] and other["mode"] == "work" and not other_owned
             ):
-                overlap = owned & owned_paths(other["cwd"], work_policy(other))
+                raise TaskAdmissionBusy(
+                    "Unscoped team work requires exclusive project execution"
+                )
+            if record["mode"] == "work" and owned:
+                overlap = {
+                    path
+                    for path in owned
+                    if any(
+                        path == candidate
+                        or path.is_relative_to(candidate)
+                        or candidate.is_relative_to(path)
+                        for candidate in other_owned
+                    )
+                }
                 if overlap:
-                    raise ValueError(
+                    raise TaskAdmissionBusy(
                         f"Files already assigned to active work: {sorted(map(str, overlap))}"
                     )
 
-    def insert(self, record, owned, *, routing=None):
+    def insert(self, record, owned, *, routing=None, focus=None):
         """Check overlapping work and admit the task in one transaction."""
         # Source leases are held by TaskRuntime for both fresh and resume.
         with closing(self.connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             if record.get("review_run_id"):
                 self.validate_review_reservation(record, db)
+            if record.get("team_run_id"):
+                self.validate_team_reservation(record, db)
             self.check_admission(record, owned, db)
             columns = ", ".join(record)
             placeholders = ", ".join("?" for _ in record)
@@ -407,6 +456,14 @@ class TaskStore:
                     (
                         record["task_id"],
                         json.dumps(routing, ensure_ascii=False, allow_nan=False),
+                    ),
+                )
+            if focus is not None:
+                db.execute(
+                    "INSERT INTO task_focus (task_id, record_json) VALUES (?, ?)",
+                    (
+                        record["task_id"],
+                        json.dumps(focus, ensure_ascii=False, allow_nan=False),
                     ),
                 )
             db.commit()
@@ -458,6 +515,122 @@ class TaskStore:
             ):
                 raise ValueError(
                     "Comparison requires the saved successful independent result"
+                )
+        record["deadline"] = min(record["deadline"], run["deadline"])
+
+    def validate_team_reservation(self, record, db=None):
+        """Consume only a live owner's exact step, model and declared permissions."""
+        if db is None:
+            with closing(self.connect()) as connection:
+                return self.validate_team_reservation(record, connection)
+        run = db.execute(
+            "SELECT * FROM team_runs WHERE run_id=?", (record["team_run_id"],)
+        ).fetchone()
+        step = db.execute(
+            "SELECT * FROM team_steps WHERE run_id=? AND task_id=?",
+            (record["team_run_id"], record["task_id"]),
+        ).fetchone()
+        if (
+            run is None
+            or step is None
+            or run["owner"] != self.channel.owner
+            or run["status"] not in ("running", "waiting_input")
+            or run["cancel_requested"]
+            or run["deadline"] <= time.time()
+            or step["status"] != "reserved"
+        ):
+            raise ValueError("Invalid, expired, cancelled or foreign team reservation")
+        if db.execute(
+            "SELECT 1 FROM tasks WHERE task_id=?", (record["task_id"],)
+        ).fetchone():
+            raise ValueError("Team reservation already dispatched")
+        plan = json.loads(run["plan_json"])
+        declared = next(
+            (item for item in plan["steps"] if item["id"] == step["step_id"]), None
+        )
+        selection = json.loads(run["selection_json"] or "{}")
+        assignment = selection.get("assignments", {}).get(step["step_id"], {})
+        effective = json.loads(record["execution_json"])["effective"]
+        if (
+            declared is None
+            or selection.get("status") not in {"ready", "needs_assignment"}
+            or record["model"] != assignment.get("model")
+            or not record["model"].startswith(TEAM_MODEL_PROVIDER + "/")
+            or effective["thinking"] != assignment.get("thinking")
+            or not any(
+                pair.get("model") == record["model"]
+                and pair.get("thinking") == effective["thinking"]
+                for pair in selection.get("eligible_assignments", {}).get(
+                    step["step_id"], []
+                )
+            )
+            or record["mode"] != declared["mode"]
+            or (record["mode"] == "work" and not plan["allow_work"])
+            or record["cwd"] != str(self.scope.validate_cwd(plan.get("cwd")))
+            or record.get("project_context_id") != plan.get("project_context_id")
+        ):
+            raise ValueError("Team reservation cannot change its execution contract")
+        dependency_policy = declared.get("dependency_policy", "success")
+        if dependency_policy not in {"success", "reported_evidence"}:
+            raise ValueError("Unknown team dependency policy")
+        if dependency_policy == "reported_evidence":
+            prerequisites = {
+                identifier
+                for item in plan["steps"]
+                for identifier in item["depends_on"]
+            }
+            final_ids = {item["id"] for item in plan["steps"]} - prerequisites
+            if (
+                final_ids != {step["step_id"]}
+                or record["mode"] != "think"
+                or any(item["mode"] == "work" for item in plan["steps"])
+            ):
+                raise ValueError(
+                    "Partial evidence can only enter the final read-only think synthesis"
+                )
+        for dependency in declared["depends_on"]:
+            predecessor = db.execute(
+                "SELECT s.status, t.status AS native_status, "
+                "t.team_run_id AS native_run_id, "
+                "json_extract(s.result_json,'$.status') AS saved_native_status, "
+                "json_extract(s.result_json,'$.outcome') AS outcome, "
+                "json_extract(s.result_json,'$.report.outcome') AS saved_report_outcome, "
+                "json_extract(t.report_json,'$.outcome') AS report_outcome "
+                "FROM team_steps s LEFT JOIN tasks t ON t.task_id=s.task_id "
+                "WHERE s.run_id=? AND s.step_id=?",
+                (record["team_run_id"], dependency),
+            ).fetchone()
+            if (
+                predecessor is None
+                or predecessor["native_run_id"] != record["team_run_id"]
+                or predecessor["saved_native_status"] != predecessor["native_status"]
+                or predecessor["saved_report_outcome"] != predecessor["report_outcome"]
+                or not team_dependency_ready(
+                    dependency_policy,
+                    step_status=predecessor["status"],
+                    native_status=predecessor["native_status"],
+                    outcome=predecessor["outcome"],
+                    report_outcome=predecessor["report_outcome"],
+                )
+            ):
+                raise ValueError("Team dependency does not satisfy its declared policy")
+        original = declared["contract"]
+        actual = json.loads(record["contract_json"] or "{}")
+        for field in (
+            "goal",
+            "scope",
+            "acceptance",
+            "requirements",
+            "verification",
+            "acceptance_set",
+            "context_options",
+        ):
+            if original.get(field) != actual.get(field):
+                raise ValueError("Team dispatch changed a declared task contract")
+        for field in ("constraints", "artifact_ids"):
+            if not set(original.get(field) or ()).issubset(actual.get(field) or ()):
+                raise ValueError(
+                    "Team dispatch dropped a declared constraint or artifact"
                 )
         record["deadline"] = min(record["deadline"], run["deadline"])
 

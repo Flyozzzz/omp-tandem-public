@@ -68,6 +68,12 @@ class Diagnostics:
                 "short_task": "not_run",
             },
             "channel": channel,
+            "team": {
+                "available": True,
+                "model_selection": bridge.team_selection.status(),
+                "models": "not_probed",
+                "max_parallel": 4,
+            },
             "issues": issues,
             "next_step": issues[0]["next_step"]
             if issues

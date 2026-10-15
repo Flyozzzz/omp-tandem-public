@@ -159,9 +159,15 @@ class CandidateStateTests(unittest.TestCase):
             ["--state-dir", "/unsafe"],
             ["--migrate-only"],
             ["--work-token-file", "/unsafe"],
+            ["--desktop-qa-config", "/unsafe"],
         ):
             with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
                 main(["--candidate", *arguments])
+        with (
+            patch.dict(os.environ, {"OMP_TANDEM_DESKTOP_QA_CONFIG": "/unsafe"}),
+            self.assertRaises(SystemExit),
+        ):
+            main(["--candidate"])
 
     def test_newer_schema_is_rejected_before_any_database_mutation(self):
         with tempfile.TemporaryDirectory() as temporary:

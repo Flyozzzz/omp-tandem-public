@@ -1188,6 +1188,118 @@ Exports are recipient-bound. A third project cannot import one instead of B; sou
 
 This mechanism is local to the same state-base. Transfer packages persist until operator removal; there is no automatic expiry. Treat package contents and transfer IDs as sensitive, not public download links.
 
+<a id="team-mode"></a>
+## Interactive team mode (unreleased)
+
+`tandem_team` runs a complete bounded plan for development, investigation, writing or review.
+It complements ordinary peer consultation; it does not replace `tandem_work` grants,
+revisioned acceptance, worktrees or detached supervision. Inspect `tandem_scope.team`
+in the loaded runtime; this feature is not part of published 3.11.0.
+
+The coordinator supplies 2–16 steps with existing `TaskContract` declarations.
+`depends_on` must form an acyclic graph with one final integration sink covering
+every step. `max_parallel` defaults to three and is capped at four shared OMP slots.
+The default `budget_seconds=1800` covers classification, startup, execution and waiting
+for decisions; it is a time bound, not an invoice-hard spending ceiling.
+
+Only models returned by OMP `get_available_models` under **`openai-codex`** are eligible.
+OpenRouter, ordinary `openai` API models and other providers are excluded before
+either Jev or the coordinator sees the pool. `action="models"` uses a metadata-only
+native process, with no inference prompt. Catalog membership does not prove remaining
+quota, successful authentication of a future request or relative model quality.
+No eligible subscription model is an explicit blocker, never a provider fallback.
+
+Jev automatically becomes available with `OPENROUTER_API_KEY`. `--jev auto` is the
+default (`OMP_TANDEM_JEV` is the environment equivalent); `--jev off` disables all
+Jev access, including separately enabled features. The OpenRouter key is for the
+Jev adviser, not for worker selection. Auto classification sends the team goal,
+step titles/goals and sanitized public model facts. It never reads contract context,
+constraints, files, artifacts or histories for export. Goals can still contain secrets;
+this is not redaction. Set `model_selection="coordinator"` to avoid team export.
+
+Explicit model precedence is step `execution.model`, then plan `execution.model`,
+then process `--model`/`OMP_TANDEM_MODEL`. An unsupported explicit choice blocks,
+rather than being replaced. Jev choices require confidence and choice probability
+of at least 0.7; these are model-reported signals, not calibrated correctness.
+Missing or uncertain choices appear in `pending_models` independently of lifecycle
+status. Already assigned, dependency-ready workers may run while the coordinator
+reads `readers.selection`, considers `eligible_assignments`, obtains one OMP
+consultation and assigns **exactly the current actionable set** using
+`assignments={step_id:{model,thinking,reason}}`. If dependencies changed, refresh
+the action set after a stale-assignment refusal; do not revive blocked steps.
+Questions have priority, but model actions remain visible. `waiting_models` means
+quiescent model blockage, not a run-wide startup barrier. Accepted assignments and
+the original Jev decisions remain unchanged. One eligible pair may be selected
+deterministically; explicit thinking constraints take precedence.
+
+This integration currently uses Jev **Choice**. Noul and Score are not implemented
+here; probabilities are not execution evidence or permission. Each batched question
+names its full `steps.step_N.goal/title/preference` paths rather than relying on its ID.
+
+Example read-only team request:
+
+```json
+{
+  "action": "start",
+  "request_key": "review-team-001",
+  "plan": {
+    "goal": "Assess correctness and security, then reconcile the evidence",
+    "max_parallel": 2,
+    "steps": [
+      {"id": "correctness", "title": "Correctness analysis", "mode": "analyze",
+       "contract": {"goal": "Inspect correctness risks and report exact source evidence"}},
+      {"id": "security", "title": "Security analysis", "mode": "analyze",
+       "contract": {"goal": "Inspect trust boundaries and report evidence-backed security risks"}},
+      {"id": "integrate", "title": "Reconcile findings", "mode": "think",
+       "depends_on": ["correctness", "security"],
+       "dependency_policy": "reported_evidence",
+       "contract": {"goal": "Read full predecessor outcome artifacts, including checks and blockers; reconcile disagreements and distinguish confirmed facts from hypotheses"}}
+    ]
+  }
+}
+```
+
+For development, use `allow_work=true`, work-mode steps and exact
+`contract.scope.owned_files` for writes. Shared files serialize; work with no owned
+files is an exclusive project barrier because shell effects cannot be bounded by
+file declarations. This is the live workspace, not an OS sandbox or immutable
+independent review. Shell/write permissions are not inferred from Jev advice.
+
+Retain `run_id`; use `status` with positive `wait_seconds`, `list` for recent teams
+and `cancel` for the whole team. All decorated team responses are at most **16,384
+UTF-8 bytes**, including `details=true`; details is a projection, not unrestricted
+nesting. `readers` recover `run`, `plan`, `selection` and per-`step` sections through
+`action="read"`. Follow `next_request` unchanged, concatenate `content` and then
+JSON-decode. Offsets count UTF-8 bytes; nonzero offsets require the returned digest.
+A changed digest returns a restart descriptor instead of mixing snapshots.
+
+`models` returns the same paged-content protocol over one saved catalog observation;
+cursor pages do not launch another probe. `list` uses metadata-only rows and cursor
+continuation. A step reader distinguishes `saved_result` from `current_question`.
+Read the full question before replying with exact worker task/question IDs.
+Use `answer_artifact_id` for complete final prose; the step reader also preserves
+the full structured report, errors and checks. No cut string is the full evidence.
+
+Default `dependency_policy="success"` still requires successful dependencies.
+Only the unique final **think** step of a wholly read-only team may opt into
+`reported_evidence`, accepting native-completed structured `success` or `partial`
+reports. Full native `outcome` artifacts preserve checks, blockers and source links.
+Blocked, failed, cancelled, interrupted and unreported work remain ineligible.
+A successful synthesis with partial inputs finishes `completed/partial`, exposes
+`incomplete_steps` and never upgrades the original reports. A partial/blocked final
+report does not enter the successful-synthesis branch. Completion is not acceptance.
+Requested/actual models and thinking remain visible; a startup mismatch refuses
+the prompt and an execution-time change rejects the report. Subscription workers
+and explicitly selected subscription consultations disable prewalk, advisor and
+model fallback, and pin `smol`/`slow`/`plan` to the selected subscription model.
+
+`request_key` is project-scoped: exact retries return the original run; different
+plans under one key conflict. `cancelling` remains active until native stop is observed.
+Owner shutdown/loss interrupts work without replay; a new owner can inspect, not
+take over execution. Cancellation does not undo files or external effects.
+Worker usage remains in each step's full saved result; Jev usage is in the selection
+section. Coordinator/consultation cost and total cost remain unknown unless measured separately.
+
 ## MCP tools
 
 The compact review scenario is the default entry for changes review; `tandem_work` coordinates longer shared tasks, while the other tools remain explicit low-level controls. Host prefixes vary; `Context` is injected, not a user argument.
@@ -1195,6 +1307,7 @@ The compact review scenario is the default entry for changes review; `tandem_wor
 | Tool | Main inputs | Purpose |
 |---|---|---|
 | `tandem_scope` | None | Inspect project binding, migration and computation-profile defaults |
+| `tandem_team` (unreleased) | `action=models/start/status/list/assign/cancel/read`, `plan`, `run_id`, `assignments`, section/cursor paging | Bounded team execution, subscription assignments and lossless evidence recovery |
 | `tandem_start` | `cwd`, `prompt` or `contract`, `mode`, timeouts, `execution`, review/context binding, `preflight` | Inspect admission or explicitly start a task |
 | `tandem_continue` | `conversation_id`, `prompt` or `contract`, timeouts, execution/context binding, `continuation`, `handoff`, `preflight` | Resume history or explicitly start a fresh bounded context |
 | `tandem_result` | `task_id`, `wait_seconds`, `details` | Read answer, outcome, question, artifacts, and diagnostics |
@@ -1207,7 +1320,7 @@ The compact review scenario is the default entry for changes review; `tandem_wor
 | `tandem_publish_artifact` | `conversation_id`, `name`, `content`, `media_type` | Publish an immutable material version |
 | `tandem_read_artifact` | `artifact_id`, `offset`, `limit` | Read material in pages |
 | `tandem_project_context` | `action=publish/get/list`, snapshot/IDs, `expected_revision`, `limit` | Manage sourced product snapshots |
-| `tandem_context_read` | `task_id`, `pointer`, `offset_bytes`, `max_bytes` | Page only this task's pinned product snapshot; independent review uses its own reader |
+| `tandem_context_read` | `task_id`, `pointer`, `offset_bytes`, `max_bytes`, `view=raw/focused` | Page only this task's pinned product snapshot; optional focus requires current-task consent; independent review uses its own reader |
 | `tandem_export_context` | `context_id`, `target_project_root` | Offer a snapshot to a specific recipient |
 | `tandem_import_context` | `transfer_id`, `expected_revision` | Accept an addressed snapshot |
 | `tandem_channel` | `action=status/probe/ack/pending/recover`, relevant IDs/token, `include_previous`, `limit` | Manage optional delivery |
@@ -1329,9 +1442,10 @@ descriptions may contain secrets; a bounded request is **not redaction**.
 
 Sending requires all of:
 
-- Separate operator `--jev-recommend` or `OMP_TANDEM_JEV_RECOMMEND=1` enablement,
-  plus `OPENROUTER_API_KEY` in the MCP process. `--jev-audit` alone does not
-  authorize this export, and recommendation enablement does not enable audit.
+- `OPENROUTER_API_KEY` in the MCP process and enabled recommendations. Availability
+  is automatic with a key unless disabled; `--jev-recommend` /
+  `OMP_TANDEM_JEV_RECOMMEND` remain explicit controls. `--jev off` overrides them.
+  Recommendation availability does not enable report audit.
 - The same `request`, `preview=false`, and the approved preview's exact
   `expected_input_sha256`. Missing/changed hashes refuse before reservation or
   network access. The hash binds bytes; it does not prove human consent.
@@ -1489,6 +1603,113 @@ Shadow records permit later evaluation; they do not establish that another model
 would have succeeded, saved money or been faster. Live Jev quality and savings
 remain unmeasured until separately authorized, credentialed evaluation.
 
+### Optional Jev context, tools and output focus (unreleased)
+
+`execution.focus` uses one task-bound selector for three presentation surfaces.
+Inspect `tandem_scope.focus` in the loaded runtime; this checkout's feature is
+not in published 3.11.0. It neither replaces the coding model nor compacts native
+conversation history.
+
+The operator loads a bounded JSON policy using `--jev-focus-policy PATH` or
+`OMP_TANDEM_JEV_FOCUS_POLICY`. No policy means off. For example:
+
+```json
+{
+  "allow_external": true,
+  "data_classes": [
+    "optional_project_context",
+    "declared_or_own_artifacts",
+    "tool_catalog"
+  ],
+  "max_requests": 4,
+  "request_timeout_seconds": 3.0,
+  "max_candidates": 20,
+  "max_optional_bytes": 8192,
+  "max_output_bytes": 8192
+}
+```
+
+This requires `OPENROUTER_API_KEY` in the MCP process environment, separately
+from audit/recommendation enablement. Enable only data classes whose candidate
+text may be exported. This is not automatic secret redaction. The current task
+also supplies its approved bounded goal and surfaces explicitly:
+
+```json
+{
+  "execution": {
+    "focus": {
+      "goal": "Investigate parser rejection of empty input.",
+      "allow_external": true,
+      "surfaces": ["context", "tools", "outputs"]
+    }
+  }
+}
+```
+
+The goal is never inferred from the prompt or history. Consent is not inherited
+on continuation. Snapshot reviews and managed attempts bypass focus. Preflight
+and result reads perform no selection or provider request.
+
+- **Context:** at startup, rank whole optional advisory bodies, examples and
+  superseded decisions from the exact pinned snapshot. Required/current bodies,
+  explicit selectors, constraints and acceptance stay unchanged. Selected
+  material enriches the existing capsule within the additional-byte budget;
+  it can increase a sparse capsule's size. All original pointers remain readable.
+- **Tools:** classify only the already-permitted native `tandem_work` and
+  `tandem_publish_artifact` callbacks. Supporting/irrelevant entries can become
+  discoverable: read `xd://TOOL` for its exact schema, then write JSON to the same
+  path. Finish, questions and source readers remain essential. All callbacks
+  remain registered, with unchanged schemas and permissions. Presentation is
+  fixed for the turn. Think/no-transport and unsupported runtimes stay eager;
+  this is not selection of arbitrary Claude/Codex/MCP tools or filesystem grants.
+- **Outputs:** the native task-bound `tandem_read_artifact` and
+  `tandem_context_read` accept `view:"focused"`; default `raw` is unchanged.
+  The coordinator's task-bound context reader also accepts it. The ordinary
+  coordinator artifact reader remains raw: an artifact ID alone is not task
+  export authority. Only explicitly declared/own text artifacts and pure optional
+  context-string pointers qualify. JSON artifacts and mixed/required context
+  pointers return raw without classification. Native Bash output is not intercepted.
+
+Jev labels candidates `relevant`, `supporting`, `conflicting`, `irrelevant` or
+`unclear`; it generates no replacement prose. Relevant and conflicting excerpts
+share the first attention tier. Protected diagnostic lines and their neighbors,
+and unassessed output blocks, are retained. Partial artifact pages conservatively
+protect their uncertain edge lines and neighbors without reading outside the
+requested window. Optional context strings containing protected markers remain
+raw: JSON escaping never removes their protection. Pattern protection is only a
+floor, not proof of diagnostic completeness or prompt-injection safety.
+
+Focused readers return **nonexhaustive** exact excerpts, source identity,
+examined/unexamined coverage and a `raw_request`. Use original coordinates:
+artifact offsets count Unicode code points; context offsets count canonical
+JSON UTF-8 bytes. Excerpt order may change; do not concatenate ranked excerpts
+as the source. Original pagination cursors are unchanged. Retrieve raw pages
+before making completeness or evidence claims.
+
+Missing consent/key, ordinary provider failure, unclear classification, quota
+or output-budget failure preserves the original capsule/raw/eager presentation
+as appropriate. Source/access violations remain errors; cancellation and the
+whole-task deadline stop work rather than masquerading as fallback.
+
+The policy permits 1–8 durable request reservations per task, at most 20 whole
+candidates and 32,000 request bytes per call. The per-request timeout is bounded
+by the remaining task deadline (maximum 10 seconds). Failed and unresolved sends
+consume quota; exact completed repeats reuse their record after current guards.
+Uncertain sends are never replayed. These are request/wait bounds, not an invoice
+or OS wall-clock guarantee. Startup messages still obey the 200,000-byte cap.
+`tandem_result.execution.focus` separates request counts, observed Jev usage and
+actual startup/presentation bytes from the coding model's accounting.
+
+Verification used real pinned OMP 18.1.13 with a localhost primary-model fixture.
+Analyze-mode filesystem writes remained denied while deferred callbacks worked.
+For that short scenario, first-request schema bytes fell from 36,793 to 26,031,
+but total request bytes grew from 396,650 to 486,005 including documentation
+retrieval. A separate integrated synthetic run made three live Jev requests
+(0.534–0.686 seconds each; provider-reported total $0.000209454), preserved
+required context and conflicting evidence, and recovered exact raw content.
+These are bounded observations, not general quality, token-cache or cost savings
+claims. The verifier measures wire bytes, not tokens.
+
 ## Results, questions, and artifacts
 
 `task_id` identifies one turn; `conversation_id` identifies its persistent OMP conversation. `question_id`, `artifact_id`, and `context_id` identify a specific question, immutable material version, and product snapshot respectively.
@@ -1590,6 +1811,43 @@ The optional webhook starts only after confirmation, binds to `127.0.0.1`, and r
 
 See [Channels and webhooks](channels.md) for request format, recipient selection, acknowledgments, recovery, and corporate setup.
 
+## Desktop-session QA handoff
+
+Retire an unclaimed test with `tandem_desktop(request={"action":"cancel","job_id":"ID","reason":"Why it is obsolete"})`. Cancellation atomically accepts only `queued` work in the bound scope, preserves its ID and records `cancelled` without GUI execution. Exact retries are idempotent; changed reasons conflict. Running or already reported work cannot be cancelled this way. `cancelled` ends result waiting but is never an allowed worker `finish` outcome.
+
+`tandem_desktop` optionally connects to an external `desktop-qa/2` MCP backend. That backend remains the only job ledger; Tandem supplies the bound project scope and observes terminal results. This is **not** an autonomous GUI launcher. Open a dedicated client session with authorized native Computer Use, verify its actual app access, then arm `next`. Tool discovery or an app-server connection does not prove GUI access.
+
+The operator passes `--desktop-qa-config /absolute/backend.json` or `OMP_TANDEM_DESKTOP_QA_CONFIG`. This explicitly authorizes launching the configured local backend, not a model or GUI executor:
+
+```json
+{
+  "command": "/absolute/desktop-qa/.venv/bin/python",
+  "args": ["/absolute/desktop-qa/server.py"],
+  "cwd": "/absolute/desktop-qa",
+  "env": {}
+}
+```
+
+Both Tandem clients must use the same project root and backend. The command/configuration cannot be supplied by a tool request. The integration is disabled by default, unavailable to restricted managed workers, and refused in candidate mode; use an explicitly disposable backend database and state directory for integration checks.
+
+Examples of the `request` argument:
+
+```json
+{"action":"submit","request_id":"build-42-settings","app":"Example","scenario":"Open settings, save a change, reopen","expected":"The saved value remains","build":"build-42"}
+{"action":"next","worker_id":"desktop-session","claim_id":"attempt-42","apps":["Example"],"wait_seconds":null}
+{"action":"get","job_id":"RETURNED_JOB_ID","wait_seconds":null}
+```
+
+`next` matches exact app strings. While `next` or `get` is pending, ordinary server code waits; no model needs to poll. `wait_seconds: 0` peeks; a finite expiration does not authorize resubmission. The client's tool timeout, cancellation, sleep and session lifetime still apply. After an actual result the worker arms a new `next`; reopening a closed Desktop session is a user action, not a promised automatic wake.
+
+Execute only a fresh `execute: true` claim within the user's allowed apps/actions. Finish with `action: "finish"`, `job_id`, the returned private `claim_token`, and `report` containing `outcome` (`passed`, `failed`, `blocked`), nonblank `observations`, and `steps_performed`/`evidence` string arrays. Passed/failed reports require performed steps. Keep tokens out of logs and command arguments. Reports remain client-supplied evidence, not independently verified GUI success.
+
+Repeated submission IDs must retain the exact payload. Repeated claims never authorize a second execution. Lost claim replies and interrupted GUI actions require operator reconciliation after confirmed stop, never automatic requeue. A disconnected observer does not lose the backend result: explicitly `get` it after reconnecting. Confirmed Claude Channels can announce terminal results; there are no heartbeat/progress model wakes. A terminal `get` acknowledges only that exact observed result, not other events or permission to apply changes.
+
+If cancellation cannot be sent, the adapter retires and closes its backend connection; `status` reports `connection: "retired"` and `reconciliation_required: true`. It does not reconnect or replay. Event-store contention does not hide an available report: `get.notification_bookkeeping` reports deferred/failed bookkeeping, while `status.notification_errors` exposes pending issues. Busy/locked event transactions are retried by ordinary server code, with exact result keys and no model wake until an event is actually available.
+
+Keep the old schedule until a real authorized Desktop session has completed a test through the new route and demonstrated idle waiting. A local protocol smoke, a blocked report, or a successful notification write does not establish that end-to-end acceptance.
+
 ## Configuration and limits
 
 ### Runtime arguments
@@ -1601,7 +1859,10 @@ See [Channels and webhooks](channels.md) for request format, recipient selection
 | `--scope-info` | Operator JSON inspection without starting MCP or importing history |
 | `--omp` | OMP executable; default lookup on `PATH` |
 | `--model` | Override OMP model; otherwise `OMP_TANDEM_MODEL` or OMP configuration |
+| `--jev` | `auto` (default), `on`, or `off`; alternatively `OMP_TANDEM_JEV`. Auto enables team classification/recommendations with a key; off disables all Jev access |
+| `--jev-recommend` | Explicit recommendation enablement; exact preview approval/hash still required |
 | `--jev-audit` | Enable explicit Jev audits; alternatively `OMP_TANDEM_JEV_AUDIT=1`; requires `OPENROUTER_API_KEY` |
+| `--desktop-qa-config` | Operator JSON for an external `desktop-qa/2` backend; alternatively `OMP_TANDEM_DESKTOP_QA_CONFIG` |
 | `--disable-channel` | Force polling without probes/webhook |
 | `--no-webhook` | Disable the HTTP listener |
 | `--webhook-port` | Loopback port; `0` selects a free per-session port |
@@ -1620,7 +1881,8 @@ The bootstrap additionally handles `--doctor` and `--prepare`. Runtime options c
 | Active turns per conversation | 1 |
 | Turn budget | Default 1800 seconds; 1–7200 |
 | Question deadline | Default 300 seconds; 1–1800, also bounded by the turn deadline |
-| One MCP wait | Up to 1200 seconds server-side; what a client does with a still-outstanding request is its own behaviour (one measured Claude Code run moved it to a background task at 120 seconds) |
+| Task/review MCP wait | Up to 1200 seconds server-side; what a client does with a still-outstanding request is its own behaviour (one measured Claude Code run moved it to a background task at 120 seconds) |
+| Desktop QA wait | `wait_seconds: null` has no server deadline; client timeout/cancellation and session lifetime still apply |
 | Selected `tandem_wait` tasks | 1–32 IDs |
 | Diagnostic RPC event history | 200,000 events; not unlimited memory or a substitute for native history |
 | Resolved task input | Up to 200,000 UTF-8 bytes including context |

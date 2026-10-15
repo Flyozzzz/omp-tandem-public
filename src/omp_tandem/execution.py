@@ -12,6 +12,7 @@ from typing import Literal
 from omp_rpc import ThinkingLevel
 from pydantic import BaseModel, ConfigDict, Field
 
+from .focus import FocusInput
 from .model_routing_state import RoutingInput
 
 PROFILES = {
@@ -69,6 +70,10 @@ class ExecutionOptions(BaseModel):
     routing: RoutingInput | None = Field(
         default=None,
         description="Explicit export-approved input for optional shadow routing; never inherited or applied to execution.",
+    )
+    focus: FocusInput | None = Field(
+        default=None,
+        description="Explicit goal and export consent for optional context, tool presentation and focused readers; never inherited.",
     )
 
 
@@ -152,7 +157,11 @@ def resolve_execution(options=None, *, previous=None, model=None, timeout_second
     }
     if previous:
         effective.update(
-            {key: value for key, value in previous.items() if key != "routing"}
+            {
+                key: value
+                for key, value in previous.items()
+                if key not in {"routing", "focus"}
+            }
         )
     if "profile" in requested:
         effective.update(profile=options.profile, **PROFILES[options.profile])
@@ -160,7 +169,7 @@ def resolve_execution(options=None, *, previous=None, model=None, timeout_second
         {
             key: value
             for key, value in requested.items()
-            if key not in {"profile", "routing"}
+            if key not in {"profile", "routing", "focus"}
         }
     )
     if timeout_seconds is not None:

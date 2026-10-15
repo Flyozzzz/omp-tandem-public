@@ -46,6 +46,7 @@ class TaskRuntime:
         model: str | None,
         *,
         model_routing=None,
+        focus=None,
     ):
         self.tasks = tasks
         self.worker = worker
@@ -56,6 +57,7 @@ class TaskRuntime:
         self.slots = slots
         self.model = model or ""
         self.model_routing = model_routing
+        self.focus = focus
         self.threads: dict[str, threading.Thread] = {}
         self.guard = threading.Lock()
         self.closing = False
@@ -77,6 +79,7 @@ class TaskRuntime:
         review_stage=None,
         reserved_task_id=None,
         review_run_id=None,
+        team_run_id=None,
         work_attempt_id=None,
         continuation="resume",
         handoff=None,
@@ -103,6 +106,7 @@ class TaskRuntime:
         review_stage=None,
         reserved_task_id=None,
         review_run_id=None,
+        team_run_id=None,
         work_attempt_id=None,
         continuation="resume",
         handoff=None,
@@ -131,7 +135,10 @@ class TaskRuntime:
                 record.update(task_id=task_id, conversation_id=destination)
                 slot = self.slots.acquire()
                 self.tasks.insert(
-                    record, prepared["owned"], routing=prepared["routing"]
+                    record,
+                    prepared["owned"],
+                    routing=prepared["routing"],
+                    focus=prepared["focus"],
                 )
                 if work_attempt_id is not None:
                     try:
@@ -199,6 +206,7 @@ class TaskRuntime:
         review_stage,
         reserved_task_id,
         review_run_id,
+        team_run_id,
         work_attempt_id,
         continuation,
         handoff,
@@ -216,13 +224,25 @@ class TaskRuntime:
         handoff = (
             ConversationHandoff.model_validate(handoff) if handoff is not None else None
         )
-        if (reserved_task_id is None) != (review_run_id is None):
+        reservation_owners = int(review_run_id is not None) + int(
+            team_run_id is not None
+        )
+        if reservation_owners > 1 or (reserved_task_id is None) != (
+            reservation_owners == 0
+        ):
             raise ValueError(
-                "Review run dispatch requires both private reservation arguments"
+                "Run dispatch requires one private run identity and its reserved task ID"
             )
+        if team_run_id is not None:
+            team_run_id = str(UUID(team_run_id))
+            if following or review_id is not None or work_attempt_id is not None:
+                raise ValueError("Team steps require dedicated non-managed turns")
+            if contract is None:
+                raise ValueError("Team steps require structured contracts")
         if fresh and (
             review_id is not None
             or review_run_id is not None
+            or team_run_id is not None
             or work_attempt_id is not None
         ):
             raise ValueError(
@@ -446,6 +466,7 @@ class TaskRuntime:
             "review_id": review_id,
             "review_stage": review_stage,
             "review_run_id": review_run_id,
+            "team_run_id": team_run_id,
             "project_context_id": project_context_id,
             "previous_project_context_id": previous_context_id
             if previous_context_id != project_context_id
@@ -467,6 +488,12 @@ class TaskRuntime:
                 raise ValueError(
                     "Selected verification estimates exceed the remaining review-run timeout"
                 )
+        if team_run_id is not None:
+            self.tasks.validate_team_reservation(record)
+            if verification["estimated_seconds"] > record["deadline"] - now:
+                raise ValueError(
+                    "Selected verification estimates exceed the remaining team timeout"
+                )
         if len(self.messages.build(record, snapshot).encode("utf-8")) > 200_000:
             raise ValueError(
                 "Resolved task and product context exceed 200000 UTF8 bytes; move details into artifacts"
@@ -485,6 +512,11 @@ class TaskRuntime:
                 managed=attempt is not None,
             )
             if self.model_routing is not None
+            else None
+        )
+        focus = (
+            self.focus.prepare(record, settings, managed=attempt is not None)
+            if self.focus is not None
             else None
         )
         result = {
@@ -520,6 +552,14 @@ class TaskRuntime:
                     )
                 },
             }
+        if focus is not None:
+            result["execution"] = {
+                **result["execution"],
+                "focus": {
+                    key: focus.get(key)
+                    for key in ("enabled", "reason", "policy_sha256")
+                },
+            }
         if snapshot is not None:
             result["project_context"] = {
                 key: value for key, value in snapshot.items() if key != "context"
@@ -531,6 +571,7 @@ class TaskRuntime:
             "snapshot": snapshot,
             "preflight": result,
             "routing": routing,
+            "focus": focus,
         }
 
     def _check_continuation(self, history, *, fresh):
