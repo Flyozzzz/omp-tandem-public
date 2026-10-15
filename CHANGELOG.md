@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.12.0 — 2026-10-15
 
 - Added interactive `tandem_team` for development, research and review: durable bounded DAGs, final integration, exact file ownership, queued capacity, structured-success dependency gates, full result/artifact recovery and owner-scoped cancellation without uncertain replay.
 - Team assignments select an eligible model/thinking pair using only OMP-available `openai-codex` subscription models. OpenRouter, ordinary OpenAI API and other providers are excluded from candidate lists and rejected in explicit team assignments. Native model and thinking are checked before/after execution; subscription workers and explicit subscription consultations pin auxiliary model roles and disable prewalk, advisor and model fallback.

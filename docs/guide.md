@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Package 3.11.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Package 3.12.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -1194,7 +1194,7 @@ This mechanism is local to the same state-base. Transfer packages persist until 
 `tandem_team` runs a complete bounded plan for development, investigation, writing or review.
 It complements ordinary peer consultation; it does not replace `tandem_work` grants,
 revisioned acceptance, worktrees or detached supervision. Inspect `tandem_scope.team`
-in the loaded runtime; this feature is not part of published 3.11.0.
+in the loaded runtime; this feature is new in 3.12.0.
 
 The coordinator supplies 2–16 steps with existing `TaskContract` declarations.
 `depends_on` must form an acyclic graph with one final integration sink covering
@@ -1404,7 +1404,7 @@ Ordinary `tandem_result`, waiting and report submission never invoke Jev.
 
 ### Optional Jev candidate recommendation (unreleased)
 
-This checkout adds `tandem_recommend`; published 3.11.0 has evidence audit only.
+3.12.0 adds `tandem_recommend`; 3.11.0 has evidence audit only.
 Inspect `tandem_scope.jev_recommend` in the actual runtime before using it. Do not
 restart an active session or change configuration merely to obtain this tool.
 
@@ -1607,7 +1607,7 @@ remain unmeasured until separately authorized, credentialed evaluation.
 
 `execution.focus` uses one task-bound selector for three presentation surfaces.
 Inspect `tandem_scope.focus` in the loaded runtime; this checkout's feature is
-not in published 3.11.0. It neither replaces the coding model nor compacts native
+new in 3.12.0, not in 3.11.0. It neither replaces the coding model nor compacts native
 conversation history.
 
 The operator loads a bounded JSON policy using `--jev-focus-policy PATH` or

@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**软件包 3.11.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**软件包 3.12.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -1426,7 +1426,7 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 ## 交互式团队模式（未发布）
 
 `tandem_team` 执行开发、研究、写作或审查计划，不替代 `tandem_work` 的版本化验收、
-worktree 或独立后台授权。检查已加载 runtime 的 `tandem_scope.team`；已发布的 3.11.0 不含此功能。
+worktree 或独立后台授权。检查已加载 runtime 的 `tandem_scope.team`；此功能自 3.12.0 起提供，3.11.0 不含。
 
 计划包含 2–16 个使用现有 `TaskContract` 的步骤；依赖必须无环，并且唯一最终整合步骤
 直接或间接依赖所有其他步骤。`max_parallel` 默认 3、最多 4 个共享 OMP 槽位。
@@ -1488,7 +1488,7 @@ Jev 的 confidence 与所选概率都需至少 0.7；这些不是校准后的正
 
 `jev-audit` skill 建议先以 `preview:true` 查看完整有界 payload、目的地、字节数和哈希，无需密钥、网络或保留尝试。发送仍需明确启用与密钥；`expected_input_sha256` 在输入变化时于收费前拒绝。预览不是同意，也不会清除已有失败。
 
-**此工作副本的未发布功能：** `tandem_recommend` 可在创建任务前建议一个技能或审查方向。已发布的 3.11.0 只有证据审计；先检查实际 runtime 的 `tandem_scope.jev_recommend`，不要仅为新工具重启活跃任务。
+**3.12.0 新增：** `tandem_recommend` 可在创建任务前建议一个技能或审查方向。3.11.0 只有证据审计；先检查实际 runtime 的 `tandem_scope.jev_recommend`，不要仅为新工具重启活跃任务。
 
 传入 `request`：`kind` 为 `skill` 或 `review_direction`，`goal` 最多 4000 字符，1–20 个 `{id, description}` 候选项；简单 ID 唯一且最多 64 字符，描述最多 2000。目录由协调者明确提供，不自动扫描技能、上下文、历史或产物。默认 `preview:true` 返回完整精确请求，无需密钥、网络或尝试保留；完整 UTF-8 载荷最多 32000 字节，超限拒绝而不截断。普通 runtime/数据库初始化仍可建立基础结构。
 

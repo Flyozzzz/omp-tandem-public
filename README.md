@@ -93,7 +93,7 @@ The agent uses `tandem_review_run`: a saved staged/index snapshot, one independe
 
 See [compact views, runtime identity and recovery](docs/guide.md#compact-contracts) and [operator blocker resolution](docs/guide.md#operator-unblock). Hints and notifications grant no authority; resolving a blocker never resumes or authorizes work. Independent acceptance is separate from operator application and publication.
 
-Latest published release: **[3.11.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.11.0)**. Managed submission checks ownership before recording intent; current views distinguish intent from committed output. Explicitly authorized [supervisor review checks](docs/guide.md#controlled-review-checks) use a prepared, immutable Linux Docker image and a separate exact-commit copy inside the existing product step, without reviewer shell tools. Network defaults to none; confirmed container removal is required, with no host fallback. Old grants are not upgraded. See the [changelog](CHANGELOG.md). Updating the repository does not restart existing work or authorize new execution.
+Latest published release: **[3.12.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.12.0)**. Managed submission checks ownership before recording intent; current views distinguish intent from committed output. Explicitly authorized [supervisor review checks](docs/guide.md#controlled-review-checks) use a prepared, immutable Linux Docker image and a separate exact-commit copy inside the existing product step, without reviewer shell tools. Network defaults to none; confirmed container removal is required, with no host fallback. Old grants are not upgraded. See the [changelog](CHANGELOG.md). Updating the repository does not restart existing work or authorize new execution.
 
 <a id="team-mode"></a>
 ## Team mode (unreleased)
@@ -124,13 +124,13 @@ facts, not source files, contract context or histories. [Protocol and examples](
 ## Optional Jev assistance and shadow routing
 
 Jev is a separate, optional structured-decision service—not the model that performs
-the coding task. **This checkout's recommendation, shadow-routing and focus
-additions are not included in the published 3.11.0 release.** Inspect the loaded
+the coding task. **Recommendation, shadow-routing and focus are new in 3.12.0
+and absent from 3.11.0 and earlier.** Inspect the loaded
 runtime's `tandem_scope` capabilities before using them.
 
 | Capability | Purpose | Availability |
 |---|---|---|
-| `tandem_audit` | Flag gaps between acceptance criteria and reported evidence | 3.11.0 and `main` |
+| `tandem_audit` | Flag gaps between acceptance criteria and reported evidence | 3.11.0 and later |
 | `tandem_recommend` | Suggest one caller-supplied skill or review direction before task creation | `main`, unreleased |
 | `execution.routing` | Compare a task-start model suggestion with the unchanged execution model | `main`, **shadow-only** |
 | `execution.focus` | Rank optional context, defer permitted native tool schemas and retrieve exact focused excerpts | This checkout, unreleased |

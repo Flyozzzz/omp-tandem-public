@@ -95,7 +95,7 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 
 参见[精简视图、运行身份与恢复](docs/guide.zh-CN.md#compact-contracts)、[操作者解除阻塞](docs/guide.zh-CN.md#operator-unblock)。提示与通知不授予权限；解除阻塞不会恢复或授权工作。验收、应用和发布是各自独立的决定。
 
-最新已发布版本为 **[3.11.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.11.0)**。受管 submit 在记录意图前检查文件归属，明确区分提交意图与已保存的提交。[监督器审查检查](docs/guide.zh-CN.md#controlled-review-checks) 需要单独授权及预先准备、绑定不可变 ID 的 Linux Docker 镜像，在同一产品步骤的精确提交副本上执行，不向审查模型授予 shell。网络默认关闭，成功要求确认容器已删除，不回退到主机执行。旧授权不会升级；更新仓库不会重启活跃工作或授予新权限。详见[变更日志](CHANGELOG.md)。
+最新已发布版本为 **[3.12.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.12.0)**。受管 submit 在记录意图前检查文件归属，明确区分提交意图与已保存的提交。[监督器审查检查](docs/guide.zh-CN.md#controlled-review-checks) 需要单独授权及预先准备、绑定不可变 ID 的 Linux Docker 镜像，在同一产品步骤的精确提交副本上执行，不向审查模型授予 shell。网络默认关闭，成功要求确认容器已删除，不回退到主机执行。旧授权不会升级；更新仓库不会重启活跃工作或授予新权限。详见[变更日志](CHANGELOG.md)。
 
 <a id="team-mode"></a>
 ## 团队模式（未发布）
@@ -122,12 +122,12 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 ## Jev：建议与影子模型路由
 
 Jev 是可选的结构化决策模型，不替代实际执行任务的模型。
-**本工作副本中的候选建议、shadow-routing 与 focus 尚未包含在已发布的 3.11.0 中。**
+**候选建议、shadow-routing 与 focus 自 3.12.0 起提供，3.11.0 及更早版本不含。**
 请通过 `tandem_scope` 检查实际加载 runtime 的能力。
 
 | 功能 | 用途 | 可用状态 |
 |---|---|---|
-| `tandem_audit` | 查找验收条件与报告证据之间的缺口 | 3.11.0 与 `main` |
+| `tandem_audit` | 查找验收条件与报告证据之间的缺口 | 3.11.0 及更新版本 |
 | `tandem_recommend` | 在创建任务前，从明确提供的列表建议一个技能或审查方向 | `main`，未发布 |
 | `execution.routing` | 将任务启动时的模型建议与保持不变的实际模型对照 | `main`，**仅影子模式** |
 | `execution.focus` | 排序可选上下文、按需加载已获准的原生工具 schema、读取精确聚焦片段 | 本工作副本，未发布 |
