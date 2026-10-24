@@ -95,7 +95,7 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 
 参见[精简视图、运行身份与恢复](docs/guide.zh-CN.md#compact-contracts)、[操作者解除阻塞](docs/guide.zh-CN.md#operator-unblock)。提示与通知不授予权限；解除阻塞不会恢复或授权工作。验收、应用和发布是各自独立的决定。
 
-最新已发布版本为 **[3.12.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.12.0)**。受管 submit 在记录意图前检查文件归属，明确区分提交意图与已保存的提交。[监督器审查检查](docs/guide.zh-CN.md#controlled-review-checks) 需要单独授权及预先准备、绑定不可变 ID 的 Linux Docker 镜像，在同一产品步骤的精确提交副本上执行，不向审查模型授予 shell。网络默认关闭，成功要求确认容器已删除，不回退到主机执行。旧授权不会升级；更新仓库不会重启活跃工作或授予新权限。详见[变更日志](CHANGELOG.md)。
+最新已发布版本为 **[3.13.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.13.0)**。等待现在默认采用协调方真正需要的时长：`tandem_result` 与 `tandem_wait` 改为一次长时有界等待，而不是每个模型回合重复一次的 25 秒小憩。对已过期且无人作答的澄清提交成功报告，现在由服务器拒绝，而不再只是在指引中不建议。操作员命令 `work_daemon.py cleanup` 清理被遗弃的受管 worktree：默认为试运行，保留的提交以及存有未捕获改动的工作副本都不会被删除。新增可选的[整份需求协议](docs/guide.zh-CN.md#carry-a-whole-brief)：这对搭档可把被钉住的需求做到底，而不必为每个决定打扰所有者，并为自己了结的每个决定发布依据。详见[变更日志](CHANGELOG.md)。更新仓库不会重启活跃工作或授予新权限。
 
 <a id="team-mode"></a>
 ## 团队模式（未发布）
