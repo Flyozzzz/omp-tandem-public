@@ -1065,3 +1065,82 @@ class WorkWorkspaceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkspaceCleanupTests(WorkWorkspaceTests):
+    """Abandoned working copies: reported always, removed only when provably done."""
+
+    def prepared(self, step="edit"):
+        plan = self.plan((step, ["alpha.txt"], []))
+        attempt = self.attempt(step)
+        workspace = self.workspaces.prepare(attempt, plan, [])
+        return attempt, plan, Path(workspace["path"])
+
+    def test_a_dry_run_reports_without_touching_anything(self):
+        attempt, _, path = self.prepared()
+        report = self.workspaces.cleanup({attempt["attempt_id"]: "succeeded"})
+        entry = report["workspaces"][0]
+        self.assertFalse(report["applied"])
+        self.assertEqual(report["removed"], 0)
+        self.assertEqual(report["removable"], 1)
+        self.assertTrue(entry["remove"])
+        self.assertEqual(entry["step_id"], "edit")
+        self.assertGreater(entry["bytes"], 0)
+        self.assertTrue(path.is_dir(), "a dry run must not remove anything")
+
+    def test_an_active_attempt_keeps_its_working_copy(self):
+        attempt, _, path = self.prepared()
+        report = self.workspaces.cleanup({attempt["attempt_id"]: "running"}, apply=True)
+        self.assertEqual(report["removed"], 0)
+        self.assertEqual(report["workspaces"][0]["keep"], "attempt is running")
+        self.assertTrue(path.is_dir())
+
+    def test_an_unknown_attempt_keeps_its_working_copy(self):
+        _, _, path = self.prepared()
+        report = self.workspaces.cleanup({}, apply=True)
+        self.assertEqual(report["removed"], 0)
+        self.assertEqual(report["workspaces"][0]["keep"], "no record of that attempt")
+        self.assertTrue(path.is_dir())
+
+    def test_uncaptured_edits_are_not_deleted_by_age(self):
+        attempt, _, path = self.prepared()
+        (path / "alpha.txt").write_text("work nobody captured\n")
+        report = self.workspaces.cleanup({attempt["attempt_id"]: "blocked"}, apply=True)
+        self.assertEqual(report["removed"], 0)
+        self.assertEqual(
+            report["workspaces"][0]["keep"], "uncaptured edits and no retained commit"
+        )
+        self.assertTrue(path.is_dir())
+
+    def test_a_finished_attempt_is_removed_and_its_result_survives(self):
+        step = "edit"
+        plan = self.plan((step, ["alpha.txt"], []))
+        attempt = self.attempt(step)
+        workspace = self.workspaces.prepare(attempt, plan, [])
+        path = Path(workspace["path"])
+        (path / "alpha.txt").write_text("accepted work\n")
+        published = self.workspaces.finish(attempt, plan, workspace)
+
+        before = self.workspaces.cleanup({attempt["attempt_id"]: "succeeded"})
+        self.assertEqual(
+            before["workspaces"][0]["retained_commit"], published["commit"]
+        )
+
+        report = self.workspaces.cleanup(
+            {attempt["attempt_id"]: "succeeded"}, apply=True
+        )
+        self.assertEqual(report["removed"], 1)
+        self.assertGreater(report["freed_bytes"], 0)
+        self.assertFalse(path.exists())
+        self.assertFalse(
+            (self.workspaces.directory / f"{attempt['attempt_id']}.json").exists()
+        )
+        # The accepted result is still readable after its working copy is gone.
+        self.assertEqual(
+            self.git(
+                self.root, "rev-parse", "--verify", published["commit"] + "^{commit}"
+            )
+            .decode()
+            .strip(),
+            published["commit"],
+        )

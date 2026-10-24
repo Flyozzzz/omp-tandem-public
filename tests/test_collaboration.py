@@ -85,6 +85,23 @@ class CollaborationTests(RpcHarness):
         )
         self.assertEqual(json.loads(stored["content"]), result["report"])
 
+    async def test_an_expired_question_cannot_be_reported_as_success(self):
+        """The instruction after an expiry is now a rule the server enforces.
+
+        A worker that asks and gets no answer used to be told to report blocked
+        or partial, and nothing stopped it from reporting success anyway.
+        """
+        job = await self.start("expire-success", question_timeout_seconds=1)
+        waiting = await self.result(job["task_id"])
+        self.assertEqual(waiting["status"], "waiting_input")
+        await asyncio.sleep(1.1)
+        result = await self.result(job["task_id"])
+        # The report is refused, so the guessed answer never becomes the task's
+        # outcome: the task ends without a structured result instead.
+        self.assertNotEqual(result.get("outcome"), "success")
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("no success inferred", str(result.get("error", "")).lower())
+
     async def test_question_expiry_does_not_invent_success(self):
         job = await self.start("expire", question_timeout_seconds=1)
         waiting = await self.result(job["task_id"])

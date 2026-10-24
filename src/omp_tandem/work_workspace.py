@@ -25,6 +25,17 @@ _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
 
+def _directory_size(path: Path) -> int:
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file() and not item.is_symlink():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
 def _path(value: str) -> str:
     if not isinstance(value, str) or not value or "\\" in value:
         raise ValueError("Ownership requires exact relative POSIX file paths")
@@ -1090,6 +1101,118 @@ class WorkWorkspace:
                 capture=False,
                 allow_ignored=shell_permission(attempt),
             )
+
+    def cleanup(self, attempts: dict[str, str], *, apply: bool = False) -> dict:
+        """Report abandoned managed workspaces and, on request, remove them.
+
+        A step workspace stays on disk after its attempt ends because it holds
+        evidence an operator may still need. Removing it automatically would
+        destroy that evidence, but keeping every copy forever is not free
+        either: one project accumulated 13 GB in six weeks.
+
+        `attempts` carries attempt states from the work store, which owns the
+        decision about whether work has ended; this directory only executes it.
+        An unknown attempt, an active one, or an unresolved outcome keeps its
+        copy. A retained commit lives on under refs/omp-tandem/work/<attempt_id>,
+        so an accepted result survives removal of the working copy it came from.
+        """
+        removable_states = {"succeeded", "reconciled", "blocked", "cancelled"}
+        with self._lock():
+            if not self.directory.is_dir():
+                return {
+                    "workspaces": [],
+                    "removed": 0,
+                    "freed_bytes": 0,
+                    "applied": apply,
+                }
+            known = {
+                Path(line.split(b" ", 1)[1].decode()).resolve()
+                for line in (
+                    self._git(
+                        self.scope.root,
+                        "worktree",
+                        "list",
+                        "--porcelain",
+                        allow_failure=True,
+                    )
+                    or b""
+                ).splitlines()
+                if line.startswith(b"worktree ")
+            }
+            report, removed, freed = [], 0, 0
+            for manifest in sorted(self.directory.glob("*.json")):
+                attempt_id = manifest.stem
+                entry = {"attempt_id": attempt_id, "state": attempts.get(attempt_id)}
+                if manifest.is_symlink():
+                    entry["keep"] = "manifest is a symbolic link"
+                    report.append(entry)
+                    continue
+                try:
+                    metadata = json.loads(manifest.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as error:
+                    entry["keep"] = f"manifest is unreadable: {error}"
+                    report.append(entry)
+                    continue
+                path = Path(metadata.get("path", ""))
+                entry["path"] = str(path)
+                entry["step_id"] = metadata.get("step_id")
+                entry["bytes"] = _directory_size(path)
+                if path.parent.resolve() != self.directory.resolve():
+                    entry["keep"] = "workspace is outside this project"
+                elif entry["state"] is None:
+                    entry["keep"] = "no record of that attempt"
+                elif entry["state"] not in removable_states:
+                    entry["keep"] = f"attempt is {entry['state']}"
+                elif path.exists() and path.resolve() not in known:
+                    entry["keep"] = "Git does not know this working copy"
+                else:
+                    entry["retained_commit"] = (
+                        self._git(
+                            self.scope.root,
+                            "rev-parse",
+                            "--verify",
+                            f"refs/omp-tandem/work/{attempt_id}",
+                            allow_failure=True,
+                        )
+                        or b""
+                    ).decode().strip() or None
+                    dirty = path.exists() and self._git(
+                        path, "status", "--porcelain", allow_failure=True
+                    )
+                    if dirty and entry["retained_commit"] is None:
+                        # Uncommitted edits with no retained commit are the
+                        # only copy of that work. Age alone never justifies it.
+                        entry["keep"] = "uncaptured edits and no retained commit"
+                    else:
+                        entry["remove"] = True
+                if entry.get("remove") and apply:
+                    if path.exists():
+                        self._git(
+                            self.scope.root,
+                            "worktree",
+                            "remove",
+                            "--force",
+                            str(path),
+                            allow_failure=True,
+                        )
+                    if path.exists():
+                        entry["keep"] = "Git could not remove the working copy"
+                        entry.pop("remove", None)
+                    else:
+                        manifest.unlink(missing_ok=True)
+                        entry["removed"] = True
+                        removed += 1
+                        freed += entry["bytes"]
+                report.append(entry)
+            if apply and removed:
+                self._git(self.scope.root, "worktree", "prune", allow_failure=True)
+            return {
+                "workspaces": report,
+                "removable": sum(1 for e in report if e.get("remove")),
+                "removed": removed,
+                "freed_bytes": freed,
+                "applied": apply,
+            }
 
     def preserve(self, attempt: dict, plan: dict) -> dict:
         """Capture an interrupted managed workspace as a validated immutable commit.

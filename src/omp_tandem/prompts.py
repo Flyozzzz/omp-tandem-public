@@ -49,6 +49,13 @@ Never invent models/reasoning support or claim agreement not obtained. Assignmen
 that step's execution, not rights, acceptance or ordinary shadow routing.
 Worker questions use tandem_reply with the exact task/question IDs. Preserve blocked/partial work;
 do not retry failed steps, change providers to bypass a refusal, or continue a team-bound conversation.
+Keep answering worker questions from established facts as usual. Deciding an open question the user
+would otherwise settle is separate and opt-in: it needs the user's word and one pinned brief (project
+context, artifact or exact commit), and closes only what is derivable from that brief and reversible
+inside scope. Scope, irreversible/external effects, permissions, cost and brief contradictions stay
+with the user. Verify quoted sections yourself, publish the basis before replying, end an underivable
+step blocked/partial with its own blocker, never answer an expired question later, and report
+decisions, bases and remaining questions once. Steps: the tandem skill.
 For read-only research summaries, the unique final think step may explicitly use
 dependency_policy=reported_evidence. Only completed structured success/partial inputs qualify;
 the aggregate remains partial if any input is partial. Never use this for work-mode teams,
@@ -71,20 +78,25 @@ operation_id identifies exact retries, not permission to replay work.
 Uncertain attempts require operator reconciliation. Only operator CLI grants detached execution.
 Closing the MCP owner stops its native turns; explicitly authorized separate work supervisor is independent."""
 
-POLLING_INSTRUCTIONS = """Runs: tandem_review_run(action='status', run_id, wait_seconds=25).
-Individual tasks: tandem_result(wait_seconds=25); several: tandem_wait(task_ids, wait_seconds=25),
-then read ready results. Repeat while active; handle questions, remove handled terminal IDs.
-With no complementary work of your own, ask for one long wait instead of many short ones:
-wait_seconds up to 1200 with wait_mode='bounded', which waits for the state itself rather than
-returning as soon as delivery could wake you. The server serves the whole wait; a client may stop
-waiting in the foreground first, and what it does then is the client's own behaviour. If the response
-says the client moved the request to a background task, that is a handoff, not a failure: keep the
-handle and read that result rather than starting a second observation. One measured Claude Code run
-did this at 120 seconds and delivered every such result later; treat that as an observation of one
-client, not a rule. Otherwise, on a real cancellation or timeout, read the same task/run identity
-with a bounded wait, never a new launch.
-Shared tasks: tandem_work(request={action:'get',work_id},wait_seconds=25); pass after_revision with
-the revision you last read, so a card already past it returns at once. Act on current assignments,
+POLLING_INSTRUCTIONS = """With no complementary work of your own, wait for the state itself in ONE
+call and spend one model turn on it: tandem_result(task_id) or tandem_wait(task_ids) already default
+to a long bounded wait. Runs: tandem_review_run(action='status', run_id) and
+tandem_team(action='status', run_id) default to the same long wait.
+A question, a terminal state or an expiry returns before the deadline, so a long wait costs nothing
+when the work finishes early. Repeat only after your wait actually expired and the work is still
+active: a 25-second nap followed by another one spends a model turn per nap and reads your whole
+context each time, which is the expensive part, not the waiting.
+wait_seconds=0 is a single read - after an event, or an explicit peek at current state. Never a loop.
+With complementary work of your own and confirmed delivery, pass wait_mode='auto' explicitly and
+follow next_action; do not spend that time on another short wait instead.
+The server serves the whole wait; a client may stop holding the call in the foreground first, and what
+it does then is the client's own behaviour. If the response says the client moved the request to a
+background task, that is a handoff, not a failure: keep the handle and read that result rather than
+starting a second observation. One measured Claude Code run did this at 120 seconds and delivered
+every such result later; treat that as an observation of one client, not a rule. Otherwise, on a real
+cancellation or timeout, read the same task/run identity with a bounded wait, never a new launch.
+Shared tasks: tandem_work(request={action:'get',work_id}, wait_seconds=1200, after_revision=<last
+revision you read>), so a card already past it returns at once. Act on current assignments,
 not the wake itself. Paused work never restarts implicitly.
 No zero-wait loops, tandem_list polling or promised automatic delivery.
 Before result-driven effects claim tandem_receipt: require authorized=true, retain token, complete afterward.
@@ -93,10 +105,11 @@ Uncertain claims need external reconciliation, not replay; no exactly-once exter
 PUSH_INSTRUCTIONS = """Push accelerates delivery; it does not replace bounded waiting by itself.
 Only next_action=await_event attests a currently armed independent watchdog: keep the client open
 and do complementary work. If you have no complementary work, do not recall a short wait on every
-response: ask for one long wait_seconds with wait_mode='bounded', which ignores delivery coverage
-and waits for the task. If the client answers that it moved the request to a background
+response: take the default long bounded wait, which ignores delivery coverage and waits for the task. If the client answers that it moved the request to a background
 task, read that result; that is delivery, not failure. Clients differ: one Claude Code run handed off
-at 120 seconds, another client may simply cancel, so branch on what the response actually says. Otherwise repeat tandem_result(wait_seconds=25), or tandem_wait for several.
+at 120 seconds, another client may simply cancel, so branch on what the response actually says.
+Otherwise wait for the state itself: tandem_result or tandem_wait, whose defaults are already a long
+bounded wait. Do not answer a push-enabled session with a chain of short waits.
 On an event or watchdog bounded_check use review-run status for scenario tasks; otherwise tandem_result.
 Handle questions promptly. A running result rearms only through the installed hook; follow next_action.
 Claim tandem_receipt before applying result-driven side effects; only authorized=true allows application.

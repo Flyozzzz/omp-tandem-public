@@ -132,15 +132,20 @@ class TaskInteraction:
                     else None,
                     report,
                 )
-            if (
-                report.outcome not in ("blocked", "partial")
-                and db.execute(
-                    "SELECT 1 FROM questions WHERE task_id=? AND state='context_required'",
-                    (task_id,),
-                ).fetchone()
-            ):
+            # An unresolved clarification is not a detail the report may skip over:
+            # the worker asked because it could not decide, and nobody decided.
+            # The instruction after an expiry already says "report blocked or
+            # partial"; without this check that stayed a request to the model,
+            # and a success could be reported over an unanswered question.
+            unresolved = db.execute(
+                "SELECT state FROM questions WHERE task_id=? AND state IN"
+                " ('context_required','expired') LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if report.outcome not in ("blocked", "partial") and unresolved:
                 raise ValueError(
-                    "Clarification requires a new snapshot; this stage must remain blocked or partial"
+                    "Clarification is still unresolved"
+                    f" ({unresolved['state']}); this stage must remain blocked or partial"
                 )
             snapshot = (
                 self.projects.get(task["project_context_id"])

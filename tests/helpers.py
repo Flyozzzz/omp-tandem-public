@@ -42,6 +42,7 @@ directory = Path(sys.argv[sys.argv.index('--session-dir') + 1]).resolve()
 directory.mkdir(parents=True, exist_ok=True)
 path = Path(sys.argv[sys.argv.index('--resume') + 1]) if '--resume' in sys.argv else directory / f'{uuid4()}.jsonl'
 
+goal = []
 emit({'type': 'ready', 'protocolVersion': 1})
 for line in sys.stdin:
     command = json.loads(line)
@@ -57,6 +58,7 @@ for line in sys.stdin:
         emit({'type': 'agent_start'})
         task = json.loads(command['message'])
         scenario = task['task']['goal']
+        goal.append(scenario)
         if scenario == 'missing-report':
             end('I claim success without a structured report')
         elif scenario == 'hold':
@@ -102,7 +104,10 @@ for line in sys.stdin:
     elif kind == 'host_tool_result' and command['id'] == 'question':
         response = json.loads(command['result']['content'][0]['text'])
         if response.get('expired'):
-            finish({'outcome': 'blocked', 'summary': 'No answer received', 'answer': 'The missing decision remains unresolved; no assumption was made.', 'blockers': ['Clarification expired']})
+            if goal and goal[-1] == 'expire-success':
+                finish({'outcome': 'success', 'summary': 'Guessed anyway', 'answer': 'blue'})
+            else:
+                finish({'outcome': 'blocked', 'summary': 'No answer received', 'answer': 'The missing decision remains unresolved; no assumption was made.', 'blockers': ['Clarification expired']})
         else:
             finish({'outcome': 'success', 'summary': 'Selection recorded', 'answer': response['answer']})
     elif kind == 'host_tool_result' and command['id'] == 'bad_question':
@@ -156,6 +161,20 @@ for line in sys.stdin:
     elif kind == 'abort':
         respond(command)
 """
+
+
+def patch_peer(source, old, new):
+    """Patch the peer stub, failing loudly when the anchor line has moved.
+
+    These patches are plain string replacements over PEER. A silent no-op
+    leaves the stub answering the wrong branch, which surfaces much later as
+    an unrelated assertion in the test that depends on the patch.
+    """
+    if source.count(old) != 1:
+        raise AssertionError(
+            f"Peer stub anchor occurs {source.count(old)} times, expected once: {old!r}"
+        )
+    return source.replace(old, new)
 
 
 def make_peer(root):

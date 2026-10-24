@@ -42,7 +42,7 @@ A connected MCP server, manifest declaration, or launch flag is not evidence of 
 
 The Claude watchdog establishes a separate capability. Its actual `asyncRewake` probe emits `OMP watchdog probe <token>`; acknowledge that token with `tandem_channel(action="ack", watchdog_token=...)`. It is never returned by an ordinary tool call. This proof plus a currently armed independent timer permits `next_action="await_event"`.
 
-When `await_event` is returned, keep the client open and fetch the authoritative result on either an event or a watchdog `bounded_check`. If still active, the installed hook rearms; follow the new response. Without live coverage, continue bounded `tandem_result(wait_seconds=25)` or selected `tandem_wait`, even if `delivery="push"`. Push accelerates that path rather than replacing it.
+When `await_event` is returned, keep the client open and fetch the authoritative result on either an event or a watchdog `bounded_check`. If still active, the installed hook rearms; follow the new response. Without live coverage, fall back to the default long bounded wait of `tandem_result` or selected `tandem_wait`, even if `delivery="push"`. Push accelerates that path rather than replacing it, and a chain of short waits replaces neither.
 
 The bridge advertises no `claude/channel/permission` capability. A probe token never approves filesystem actions or provider access.
 

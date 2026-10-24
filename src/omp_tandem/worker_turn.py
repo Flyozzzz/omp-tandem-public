@@ -132,7 +132,16 @@ def wait_for_turn(
             raise TurnCancelled("Worker turn cancelled")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("Task budget exhausted; partial edits may remain")
+            # Name the recovery path: the operator reads this message, and
+            # "partial edits may remain" alone says nothing about where to look.
+            raise TimeoutError(
+                "Task budget exhausted: the time limit was reached while the worker"
+                " was still running. Edits it already applied are not rolled back"
+                " and no outcome was reported. Inspect the preserved answer and"
+                " provisional artifacts of this task, and the working copy of a"
+                " managed step, before deciding to continue; raise"
+                " execution.timeout_seconds rather than replaying the task blind."
+            )
         return remaining
 
     try:

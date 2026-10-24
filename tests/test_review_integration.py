@@ -6,14 +6,17 @@ from contextlib import closing
 
 from fastmcp.exceptions import ToolError
 
-from tests.helpers import PEER, RpcHarness
+from tests.helpers import PEER, RpcHarness, patch_peer
 
-REVIEW_PEER = PEER.replace(
+REVIEW_PEER = patch_peer(
+    PEER,
     "        if scenario == 'missing-report':",
     """        if scenario == 'snapshot-reader':
             emit({'type': 'host_tool_call', 'id': 'saved', 'toolCallId': 'saved-call', 'toolName': 'tandem_review_read', 'arguments': {'section': 'selected', 'path': 'sample.txt'}})
         elif scenario == 'missing-report':""",
-).replace(
+)
+REVIEW_PEER = patch_peer(
+    REVIEW_PEER,
     "    elif kind == 'host_tool_result' and command['id'] == 'question':",
     """    elif kind == 'host_tool_result' and command['id'] == 'saved':
         saved = json.loads(command['result']['content'][0]['text'])

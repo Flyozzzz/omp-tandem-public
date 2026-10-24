@@ -16,18 +16,21 @@ from omp_rpc.host_tools import HostToolContext
 from omp_tandem import __file__ as package_file
 from tests import test_review_runs as run_fixtures
 from tests import test_work_integration as work_fixtures
-from tests.helpers import RpcHarness
+from tests.helpers import RpcHarness, patch_peer
 from tests.test_review_integration import REVIEW_PEER
 
 AUTHOR = "AUTHOR-INTERPRETATION-38-SENTINEL"
-PEER = REVIEW_PEER.replace(
+PEER = patch_peer(
+    REVIEW_PEER,
     "        elif scenario == 'missing-report':",
     "        elif scenario == 'packet':\n"
     "            finish({'outcome': 'success', 'summary': 'Packet observed', 'answer': json.dumps(task)})\n"
     "        elif scenario == 'partial':\n"
     "            finish({'outcome': 'partial', 'summary': 'Incomplete', 'answer': 'Missing evidence'})\n"
     "        elif scenario == 'missing-report':",
-).replace(
+)
+PEER = patch_peer(
+    PEER,
     "        if response.get('expired'):",
     "        if response.get('clarification_requires_new_snapshot'):\n"
     "            finish({'outcome': 'blocked', 'summary': 'Recapture required', 'answer': json.dumps(response), 'blockers': [response['reason']]})\n"

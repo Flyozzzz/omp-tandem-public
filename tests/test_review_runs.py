@@ -14,28 +14,29 @@ from uuid import uuid4
 
 from omp_tandem import __file__ as package_file
 from omp_tandem.review_runs import RUN_ACTIVE, ReviewRuns, _capture_error
-from tests.helpers import RpcHarness
+from tests.helpers import RpcHarness, patch_peer
 from tests.test_review_integration import REVIEW_PEER
 
-RUN_PEER = (
-    REVIEW_PEER.replace(
-        "scenario = task['task']['goal']",
-        "scenario = Path(__file__).with_name('scenario').read_text()\n"
-        "        if scenario == 'comparison-question':\n"
-        "            scenario = 'snapshot-reader' if task['review']['stage'] == 'independent' else 'question'",
-    )
-    .replace(
-        "        elif scenario == 'missing-report':",
-        "        elif scenario == 'partial':\n"
-        "            finish({'outcome': 'partial', 'summary': 'Incomplete evidence', 'answer': 'Only part of the saved material was assessed.'})\n"
-        "        elif scenario == 'missing-report':",
-    )
-    .replace(
-        "        if response.get('expired'):",
-        "        if response.get('clarification_requires_new_snapshot'):\n"
-        "            finish({'outcome': 'blocked', 'summary': 'New context required', 'answer': json.dumps(response), 'blockers': [response['reason']]})\n"
-        "        elif response.get('expired'):",
-    )
+RUN_PEER = patch_peer(
+    REVIEW_PEER,
+    "scenario = task['task']['goal']",
+    "scenario = Path(__file__).with_name('scenario').read_text()\n"
+    "        if scenario == 'comparison-question':\n"
+    "            scenario = 'snapshot-reader' if task['review']['stage'] == 'independent' else 'question'",
+)
+RUN_PEER = patch_peer(
+    RUN_PEER,
+    "        elif scenario == 'missing-report':",
+    "        elif scenario == 'partial':\n"
+    "            finish({'outcome': 'partial', 'summary': 'Incomplete evidence', 'answer': 'Only part of the saved material was assessed.'})\n"
+    "        elif scenario == 'missing-report':",
+)
+RUN_PEER = patch_peer(
+    RUN_PEER,
+    "        if response.get('expired'):",
+    "        if response.get('clarification_requires_new_snapshot'):\n"
+    "            finish({'outcome': 'blocked', 'summary': 'New context required', 'answer': json.dumps(response), 'blockers': [response['reason']]})\n"
+    "        elif response.get('expired'):",
 )
 
 

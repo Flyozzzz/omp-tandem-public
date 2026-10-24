@@ -213,7 +213,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
         plan: TeamPlan | None = None,
         run_id: str | None = None,
         assignments: dict[str, TeamAssignment] | None = None,
-        wait_seconds: Annotated[int, Field(ge=0, le=MAX_WAIT_SECONDS)] = 25,
+        wait_seconds: Annotated[int | None, Field(ge=0, le=MAX_WAIT_SECONDS)] = None,
         details: bool = False,
         limit: Annotated[int, Field(ge=1, le=100)] = 20,
         section: Literal["run", "plan", "selection", "step"] | None = None,
@@ -321,6 +321,8 @@ def build_server(configuration: Bridge | RuntimeOptions):
         if action == "cancel":
             result = await asyncio.to_thread(bridge.team_runs.cancel, run_id)
             return presentation.present(result, bridge.channel, details=details)
+        if wait_seconds is None:
+            wait_seconds = MAX_WAIT_SECONDS if action == "status" else 25
         observation = Observation(wait_seconds)
         while True:
             state = await asyncio.to_thread(bridge.team_runs.observation, run_id)
@@ -621,11 +623,19 @@ def build_server(configuration: Bridge | RuntimeOptions):
     async def tandem_result(
         task_id: str,
         ctx: Context,
-        wait_seconds: Annotated[int, Field(ge=0, le=MAX_WAIT_SECONDS)] = 0,
+        wait_seconds: Annotated[
+            int, Field(ge=0, le=MAX_WAIT_SECONDS)
+        ] = MAX_WAIT_SECONDS,
         details: bool = False,
-        wait_mode: Literal["auto", "bounded"] = "auto",
+        wait_mode: Literal["auto", "bounded"] = "bounded",
     ) -> dict:
         """Get the actual answer, work outcome and next_action. Questions return immediately.
+
+        By default this waits for the state itself, up to 1200 seconds: a terminal state, a
+        question or an expiry returns earlier. That is one model turn instead of a chain of
+        short naps, each of which re-reads your whole context. Pass wait_seconds=0 to peek at
+        the current state without waiting, and wait_mode="auto" when you have complementary
+        work and want delivery coverage to release you early.
 
         wait_seconds: 0..1200, served in full by the server. A client may stop holding the
         call in the foreground first, and what it does then differs by client: if it answers
@@ -744,10 +754,16 @@ def build_server(configuration: Bridge | RuntimeOptions):
     async def tandem_wait(
         task_ids: Annotated[list[str], Field(min_length=1, max_length=32)],
         ctx: Context,
-        wait_seconds: Annotated[int, Field(ge=0, le=MAX_WAIT_SECONDS)] = 20,
-        wait_mode: Literal["auto", "bounded"] = "auto",
+        wait_seconds: Annotated[
+            int, Field(ge=0, le=MAX_WAIT_SECONDS)
+        ] = MAX_WAIT_SECONDS,
+        wait_mode: Literal["auto", "bounded"] = "bounded",
     ) -> dict:
         """Wait for ANY selected task to finish or ask a question, not for each in turn.
+
+        Like tandem_result, this defaults to a long bounded wait: the first task to
+        finish or ask returns it. Pass wait_seconds=0 to peek at which tasks are
+        already ready, and wait_mode="auto" when you have complementary work.
 
         wait_seconds: 0..1200, served in full by the server; a client may stop holding the call in the
         foreground first; if it says it moved the request to a background task, read that result. wait_mode
@@ -1005,7 +1021,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
         execution: ExecutionOptions | None = None,
         budget_seconds: Annotated[int | None, Field(ge=10, le=7200)] = None,
         compare: bool | None = None,
-        wait_seconds: Annotated[int, Field(ge=0, le=MAX_WAIT_SECONDS)] = 25,
+        wait_seconds: Annotated[int | None, Field(ge=0, le=MAX_WAIT_SECONDS)] = None,
         question_id: str | None = None,
         answer: Annotated[str | None, Field(min_length=1, max_length=60000)] = None,
     ) -> dict:
@@ -1071,6 +1087,10 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 raise ValueError("Question fields are only valid for reply")
             elif action == "cancel":
                 await asyncio.to_thread(bridge.review_runs.cancel, run_id)
+        # Waiting for the state is what status is for. Start and reply hand back
+        # an identifier at once; holding those for twenty minutes helps nobody.
+        if wait_seconds is None:
+            wait_seconds = MAX_WAIT_SECONDS if action == "status" else 25
         observation, reason = Observation(wait_seconds), None
         while action != "cancel":
             status = await asyncio.to_thread(bridge.review_runs.state, run_id)

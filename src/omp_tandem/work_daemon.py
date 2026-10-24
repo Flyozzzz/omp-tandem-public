@@ -268,6 +268,21 @@ def parser():
     )
     assess.add_argument("work_id")
     assess.add_argument("--expected-head", required=True)
+    cleanup = commands.add_parser(
+        "cleanup",
+        help=(
+            "Report abandoned managed worktrees of this project and, with --apply, "
+            "remove the ones whose attempt is finished. Dry run by default."
+        ),
+    )
+    cleanup.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Actually remove the listed workspaces through Git. Retained commits "
+            "(refs/omp-tandem/work/<attempt_id>) survive; uncaptured edits are kept"
+        ),
+    )
     show = commands.add_parser("show", help="Read a shared task or list project tasks")
     show.add_argument("work_id", nargs="?")
     show.add_argument(
@@ -665,6 +680,13 @@ def main(argv=None):
                     "next_action": view.get("next_action"),
                     "operator_commands": view.get("operator_commands"),
                 }
+            elif args.command == "cleanup":
+                # The work store owns the decision about whether an attempt
+                # has ended; the directory only executes it. Otherwise a running
+                # step working copy could vanish underneath it.
+                result = WorkWorkspace(scope).cleanup(
+                    store.attempt_states(), apply=args.apply
+                )
             elif args.command == "assess":
                 view = store.perform(
                     {"action": "get", "work_id": args.work_id}, actor="operator"

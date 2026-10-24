@@ -68,8 +68,10 @@ class BoundedWaitTests(RpcHarness):
         task_id = await self.held()
         with patch.object(self.bridge.channel, "can_await", return_value=True):
             started = time.monotonic()
+            # Following delivery is now the explicit choice, not the default:
+            # a caller with complementary work asks for it by name.
             handed_back = await self.call(
-                "tandem_result", task_id=task_id, wait_seconds=2
+                "tandem_result", task_id=task_id, wait_seconds=2, wait_mode="auto"
             )
             quick = time.monotonic() - started
             started = time.monotonic()
@@ -112,12 +114,51 @@ class BoundedWaitTests(RpcHarness):
         self.assertEqual(waiting["status"], "waiting_input")
         self.assertEqual(waiting["wait"]["reason"], "question")
 
-    async def test_an_unrequested_wait_reports_nothing_about_waiting(self):
+    async def test_a_peek_reports_nothing_about_waiting(self):
         job = await self.start("paragraph")
         await self.result(job["task_id"])
-        immediate = await self.call("tandem_result", task_id=job["task_id"])
+        immediate = await self.call(
+            "tandem_result", task_id=job["task_id"], wait_seconds=0
+        )
         self.assertEqual(immediate["status"], "completed")
         self.assertNotIn("wait", immediate)
+
+    async def test_the_default_waits_for_the_state_and_returns_when_it_arrives(self):
+        """A finished task returns at once, so the long default costs nothing."""
+        job = await self.start("paragraph")
+        await self.result(job["task_id"])
+        started = time.monotonic()
+        settled = await self.call("tandem_result", task_id=job["task_id"])
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(settled["status"], "completed")
+        self.assertEqual(settled["wait"]["mode"], "bounded")
+        self.assertEqual(settled["wait"]["requested_seconds"], MAX_WAIT_SECONDS)
+        self.assertEqual(settled["wait"]["reason"], "terminal")
+
+    async def test_the_default_does_not_hand_a_waiting_caller_back_to_delivery(self):
+        """The 25-second nap loop came from returning early with nothing to do."""
+        task_id = await self.held()
+        with patch.object(self.bridge.channel, "can_await", return_value=True):
+            observation = Observation(2)
+            with patch(
+                "omp_tandem.api.Observation",
+                lambda seconds, mode="auto": Observation(2, mode),
+            ):
+                started = time.monotonic()
+                waited = await self.call("tandem_result", task_id=task_id)
+                held = time.monotonic() - started
+        del observation
+        self.assertGreaterEqual(held, 2)
+        self.assertEqual(waited["wait"]["mode"], "bounded")
+        self.assertEqual(waited["wait"]["reason"], "deadline_elapsed")
+
+    async def test_group_waiting_defaults_the_same_way(self):
+        job = await self.start("paragraph")
+        await self.result(job["task_id"])
+        ready = await self.call("tandem_wait", task_ids=[job["task_id"]])
+        self.assertEqual([item["task_id"] for item in ready["ready"]], [job["task_id"]])
+        self.assertEqual(ready["wait"]["mode"], "bounded")
+        self.assertEqual(ready["wait"]["requested_seconds"], MAX_WAIT_SECONDS)
 
     async def test_an_unknown_mode_is_refused_at_the_surface(self):
         task_id = await self.held()

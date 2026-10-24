@@ -1274,6 +1274,18 @@ class WorkStore:
         )
         return [json.loads(row["attempt"]) for row in rows]
 
+    def attempt_states(self) -> dict[str, str]:
+        """Every attempt of this project with its state: ended, or still active.
+
+        The operator workspace cleanup needs it: the decision about whether work
+        has ended belongs here, not to the worktrees directory that executes it.
+        """
+        with self._transaction() as db:
+            return {
+                row["attempt_id"]: row["state"]
+                for row in db.execute("SELECT attempt_id, state FROM work_attempts")
+            }
+
     def _save_attempt(self, db, attempt):
         db.execute(
             "INSERT INTO work_attempts VALUES (?,?,?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET state=excluded.state, native_task_id=excluded.native_task_id, attempt=excluded.attempt",
