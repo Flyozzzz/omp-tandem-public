@@ -120,10 +120,9 @@ class TaskInteraction:
                 if trusted is None:
                     raise ValueError("Supervisor verification context is unavailable")
             enforce_verification(verification, report, trusted=trusted)
-            # Declared acceptance evidence is task-local in this release: when a work
-            # attempt owns the plan, the task's own set says nothing about that plan's
-            # denominator, so the gate does not run rather than run on the wrong set.
-            if attempt is None:
+            if attempt is not None:
+                self.work_items.enforce_acceptance(attempt["attempt_id"], report)
+            else:
                 declared = contract.get("acceptance_set")
                 enforce_coverage(
                     AcceptanceSet.model_validate(declared) if declared else None,
@@ -139,7 +138,7 @@ class TaskInteraction:
             # and a success could be reported over an unanswered question.
             unresolved = db.execute(
                 "SELECT state FROM questions WHERE task_id=? AND state IN"
-                " ('context_required','expired') LIMIT 1",
+                " ('context_required','expired','decision_unresolved') LIMIT 1",
                 (task_id,),
             ).fetchone()
             if report.outcome not in ("blocked", "partial") and unresolved:
@@ -247,6 +246,10 @@ class TaskInteraction:
                     None,
                 ),
             )
+            db.execute(
+                "INSERT INTO question_metadata VALUES (?,?,?)",
+                (question_id, request.kind, request.blocking_scope),
+            )
             if self._independent(task_id, task):
                 result = self._require_snapshot(
                     db,
@@ -309,6 +312,17 @@ class TaskInteraction:
                     result = self._require_snapshot(db, task_id, question)
                     db.commit()
                     return result
+                if question["state"] == "decision_unresolved":
+                    db.commit()
+                    return json.dumps(
+                        {
+                            "question_id": question_id,
+                            "unresolved": True,
+                            "decision": question["answer"],
+                            "instruction": "The brief did not establish an answer. Report blocked or partial; shared blockers remain shared.",
+                        },
+                        ensure_ascii=False,
+                    )
                 if question["state"] == "answered":
                     db.commit()
                     return json.dumps(
@@ -342,7 +356,9 @@ class TaskInteraction:
                 db.commit()
             time.sleep(0.15)
 
-    def reply(self, task_id, question_id, answer):
+    def reply(
+        self, task_id, question_id, answer, *, decision_id=None, unresolved=False
+    ):
         if (
             not isinstance(answer, str)
             or not answer.strip()
@@ -352,6 +368,28 @@ class TaskInteraction:
         self.tasks.get(task_id)
         with closing(self.tasks.connect()) as db:
             db.execute("BEGIN IMMEDIATE")
+            decision = None
+            if decision_id is not None:
+                decision = db.execute(
+                    "SELECT * FROM decisions WHERE decision_id=? AND task_id=? AND question_id=?",
+                    (decision_id, task_id, question_id),
+                ).fetchone()
+                if decision is None or decision["reply_text"] != answer:
+                    raise ValueError("Reply must match the immutable recorded decision")
+                basis = json.loads(decision["basis_json"])
+                if (basis["assessment"]["verdict"] == "not_established") != unresolved:
+                    raise ValueError(
+                        "Decision unresolved state does not match its basis"
+                    )
+                if basis["assessment"]["verdict"] not in (
+                    "derivable",
+                    "not_established",
+                ):
+                    raise ValueError("This decision requires the operator")
+                if decision["reply_json"]:
+                    return json.loads(decision["reply_json"])
+            elif unresolved:
+                raise ValueError("Unresolved closure requires a recorded decision")
             row = db.execute(
                 "SELECT * FROM questions WHERE question_id=? AND task_id=?",
                 (question_id, task_id),
@@ -365,27 +403,65 @@ class TaskInteraction:
                 raise ValueError(
                     "Clarification requires a new immutable snapshot/attempt; free-text replies cannot enter this independent stage"
                 )
-            if row["state"] == "answered" and row["answer"] == answer:
+            if (
+                decision is None
+                and row["state"] == "answered"
+                and row["answer"] == answer
+            ):
                 return {
                     "task_id": task_id,
                     "question_id": question_id,
                     "accepted": True,
                     "next_action": "wait",
                 }
-            if row["state"] != "pending" or time.time() >= row["deadline"]:
+            if row["state"] != "pending" or time.time() >= min(
+                row["deadline"], task["deadline"]
+            ):
                 raise ValueError("Question is no longer pending or has expired")
             if task["status"] != "waiting_input" or task["cancel_requested"]:
                 raise ValueError("Task no longer accepts clarification")
             now = time.time()
             db.execute(
-                "UPDATE questions SET state='answered', answer=?, answered=? WHERE question_id=?",
-                (answer, now, question_id),
+                "UPDATE questions SET state=?, answer=?, answered=? WHERE question_id=?",
+                (
+                    "decision_unresolved" if unresolved else "answered",
+                    answer,
+                    now,
+                    question_id,
+                ),
             )
             db.execute(
                 "UPDATE tasks SET status='running', activity='Continuing after clarification', updated=? WHERE task_id=?",
                 (now, task_id),
             )
+            if decision is not None:
+                db.execute(
+                    "UPDATE decisions SET reply_json=?, replied=? WHERE decision_id=?",
+                    (
+                        json.dumps(
+                            {
+                                "task_id": task_id,
+                                "question_id": question_id,
+                                "decision_id": decision_id,
+                                "accepted": not unresolved,
+                                "closed_unresolved": unresolved,
+                                "next_action": "wait",
+                            }
+                        ),
+                        now,
+                        decision_id,
+                    ),
+                )
             db.commit()
+        if decision is not None:
+            return {
+                "task_id": task_id,
+                "question_id": question_id,
+                "decision_id": decision_id,
+                "accepted": not unresolved,
+                "closed_unresolved": unresolved,
+                "next_action": "wait",
+            }
         return {
             "task_id": task_id,
             "question_id": question_id,

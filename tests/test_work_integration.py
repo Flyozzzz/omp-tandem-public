@@ -93,7 +93,27 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
         result = await client.call_tool(
             "tandem_work", {"request": request, "view": "full", **presentation}
         )
-        return to_jsonable_python(result.data)
+        data = to_jsonable_python(result.data)
+        if presentation.get("view", "full") != "full" or presentation.get("section"):
+            return data
+        for name, value in data.items():
+            if not isinstance(value, dict) or value.get("paged") is not True:
+                continue
+            arguments = value["arguments"]
+            parts = []
+            while True:
+                page = to_jsonable_python(
+                    (await client.call_tool("tandem_work", arguments)).data
+                )
+                self.assertNotIn("error", page)
+                self.assertEqual(page["revision"], data["revision"])
+                self.assertLessEqual(len(json.dumps(page).encode()), 16384)
+                parts.append(page["content"])
+                if page["next_cursor"] is None:
+                    break
+                arguments = {**arguments, "cursor": page["next_cursor"]}
+            data[name] = json.loads("".join(parts))
+        return data
 
     async def revise(self, client, work_id, new_plan):
         """Propose a differing plan; the operator activates it through the CLI."""
@@ -244,15 +264,13 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "after_revision": summary["revision"] - 1,
             }
         )
-        with patch(
-            "omp_tandem.native_worker.time.sleep",
-            side_effect=AssertionError("waited for a revision it had already missed"),
-        ):
-            observed = json.loads(
-                tool.execute(
-                    request, HostToolContext("wait", threading.Event(), lambda _: None)
-                )
+        started = time.monotonic()
+        observed = json.loads(
+            tool.execute(
+                request, HostToolContext("wait", threading.Event(), lambda _: None)
             )
+        )
+        self.assertLess(time.monotonic() - started, 5)
         self.assertEqual(observed["revision"], summary["revision"])
         ahead = tool.parse_params(
             {
@@ -1358,7 +1376,9 @@ class WorkIntegrationTests(unittest.IsolatedAsyncioTestCase):
             adapter = OmpWorkAdapter(self.omp_bridge)
             self.addCleanup(adapter.close)
             # Stop at the provider boundary; admission and ExecutionOptions resolution are real.
-            with patch.object(self.omp_bridge.runtime.worker, "execute"):
+            with patch.object(
+                self.omp_bridge.runtime.worker, "execute", return_value=True
+            ):
                 handle = adapter.start(
                     attempt, view["plan"], workspace, token_file=token_file
                 )

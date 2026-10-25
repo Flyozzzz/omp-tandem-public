@@ -170,7 +170,7 @@ class RuntimeIdentity:
     captured_at: float
     source_checkout_json: str
     launch_selection_json: str = "{}"
-    work_protocol: str = "work-v2-presentation"
+    work_protocol: str = "work-v3-evidence"
     review_protocol: str = "independent-first-v1"
 
     @classmethod

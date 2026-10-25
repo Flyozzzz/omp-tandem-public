@@ -547,21 +547,29 @@ class FocusEngine:
                         )
                 if source["end"] > info["characters"]:
                     raise ValueError("Focus artifact range exceeds its source")
-                # ArtifactStore's public reader is bounded to 50000 code points.
+                # Character ranges may span several byte-bounded public pages.
                 if source["end"] - source["start"] > 50000:
                     raise ValueError("Focus artifact range exceeds reader bounds")
-                raw = self.artifacts.read(
-                    source["id"],
-                    offset=source["start"],
-                    limit=max(1, source["end"] - source["start"]),
-                )
-                if (
-                    raw["sha256"] != source["sha256"]
-                    or raw["content"] != candidate.text
-                ):
+                start, end = source["start"], source["end"]
+                if len(candidate.text) != end - start:
                     raise ValueError(
                         "Focus artifact text differs from immutable source"
                     )
+                offset = start
+                while offset < end:
+                    raw = self.artifacts.read(
+                        source["id"], offset=offset, limit=end - offset
+                    )
+                    content = raw["content"]
+                    if (
+                        raw["sha256"] != source["sha256"]
+                        or not content
+                        or not candidate.text.startswith(content, offset - start)
+                    ):
+                        raise ValueError(
+                            "Focus artifact text differs from immutable source"
+                        )
+                    offset += len(content)
                 allowed = info["media_type"] in ("text/plain", "text/markdown")
                 surface, data_class = "outputs", "declared_or_own_artifacts"
             else:

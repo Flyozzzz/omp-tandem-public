@@ -93,15 +93,18 @@ The agent uses `tandem_review_run`: a saved staged/index snapshot, one independe
 
 See [compact views, runtime identity and recovery](docs/guide.md#compact-contracts) and [operator blocker resolution](docs/guide.md#operator-unblock). Hints and notifications grant no authority; resolving a blocker never resumes or authorizes work. Independent acceptance is separate from operator application and publication.
 
-Latest published release: **[3.13.1](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.13.1)**. This patch makes MCP shutdown finish project cleanup before returning, fixing the macOS shutdown/temporary-directory race.
+Latest published release: **[3.14.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.14.0)**. Bounded result recovery, reserved coordination capacity and explicit evidence-backed decision workflows make the agent-facing protocol more predictable.
 
 Version 3.13.0 introduced long bounded waits, server-enforced handling of unanswered clarifications, operator cleanup of abandoned managed worktrees, and the opt-in [whole-brief protocol](docs/guide.md#carry-a-whole-brief). See the [changelog](CHANGELOG.md). Updating the repository does not restart existing work or authorize new execution.
 
+**New in 3.14.0:** bounded task/review readers, a reserved think-only coordination lane, current-evidence coverage for local/global shared-work requirements, durable pinned-brief decisions, a read-only recovery inbox and source-bound review-context suggestions. [Reader/inbox/capacity contracts](docs/guide.md#compact-contracts), [work coverage](docs/guide.md#declared-acceptance-evidence), [decision workflow](docs/guide.md#carry-a-whole-brief). Stop incompatible MCP processes and back up state before upgrading to schema 2. Updating files does not replace a running server, restart work or grant authority; old compatibility reports remain historical.
+
 <a id="team-mode"></a>
-## Team mode (unreleased)
+## Team mode
 
 Ask the coordinator to split development, research or review into a team. `tandem_team`
-runs 2–16 planned steps, up to four concurrently, followed by a final integration step.
+runs 2–16 planned steps followed by a final integration step. Since 3.14.0,
+three ordinary slots run work; the fourth is reserved for explicit read-only coordination.
 It queues file conflicts, preserves partial results and cancels pending and active work
 without replaying uncertain execution. Work stays in the live project; this is not a sandbox.
 Assigned workers no longer wait for unrelated model choices. Read-only research can
@@ -133,9 +136,9 @@ runtime's `tandem_scope` capabilities before using them.
 | Capability | Purpose | Availability |
 |---|---|---|
 | `tandem_audit` | Flag gaps between acceptance criteria and reported evidence | 3.11.0 and later |
-| `tandem_recommend` | Suggest one caller-supplied skill or review direction before task creation | `main`, unreleased |
-| `execution.routing` | Compare a task-start model suggestion with the unchanged execution model | `main`, **shadow-only** |
-| `execution.focus` | Rank optional context, defer permitted native tool schemas and retrieve exact focused excerpts | This checkout, unreleased |
+| `tandem_recommend` | Suggest one caller-supplied skill or review direction before task creation | 3.12.0 and later |
+| `execution.routing` | Compare a task-start model suggestion with the unchanged execution model | 3.12.0 and later, **shadow-only** |
+| `execution.focus` | Rank optional context, defer permitted native tool schemas and retrieve exact focused excerpts | 3.12.0 and later |
 
 Audits and recommendations support exact keyless previews. A runtime OpenRouter
 key automatically enables recommendations unless disabled; `--jev-recommend`

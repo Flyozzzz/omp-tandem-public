@@ -147,13 +147,23 @@ class TaskResults:
         if status == "waiting_input":
             with closing(self.tasks.connect()) as db:
                 question = db.execute(
-                    "SELECT * FROM questions WHERE task_id=? AND state='pending' AND deadline>?",
+                    "SELECT q.*, COALESCE(m.kind, 'information') AS kind, "
+                    "COALESCE(m.blocking_scope, 'task') AS blocking_scope "
+                    "FROM questions q LEFT JOIN question_metadata m USING(question_id) "
+                    "WHERE q.task_id=? AND q.state='pending' AND q.deadline>?",
                     (task_id, time.time()),
                 ).fetchone()
             if question:
                 result["question"] = {
                     key: question[key]
-                    for key in ("question_id", "question", "context", "deadline")
+                    for key in (
+                        "question_id",
+                        "question",
+                        "context",
+                        "deadline",
+                        "kind",
+                        "blocking_scope",
+                    )
                 }
                 result["question"]["options"] = json.loads(question["options_json"])
             else:
@@ -212,27 +222,21 @@ class TaskResults:
                 "runs": trusted["runs"] if details else None,
                 "reader": {
                     "tool": "tandem_work",
-                    "request": {
-                        "action": "get",
-                        "work_id": attempt["work_id"],
-                        "step_id": attempt["step_id"],
+                    "arguments": {
+                        "request": {
+                            "action": "get",
+                            "work_id": attempt["work_id"],
+                            "step_id": attempt["step_id"],
+                        },
+                        "section": "verification",
                     },
-                    "section": "verification",
                 },
             }
         declared = contract.get("acceptance_set")
         if attempt is not None:
-            # A work attempt owns its own plan and denominator; saying anything about
-            # coverage here would be a claim about a set this task never declared.
-            result["acceptance_coverage"] = {
-                "schema_version": 1,
-                "assessment": "unsupported_surface",
-                "reason": "work_binding_not_supported",
-                "subject": {"kind": "task", "task_id": task_id},
-                "admission": "not_enforced",
-                "semantic_sufficiency": "not_assessed",
-                "acceptance": "not_assessed",
-            }
+            result["acceptance_coverage"] = self.work_items.acceptance_coverage(
+                attempt["attempt_id"], report=report
+            )
         else:
             result["acceptance_coverage"] = project(
                 AcceptanceSet.model_validate(declared) if declared else None,

@@ -10,6 +10,7 @@ import stat
 import time
 from uuid import UUID, uuid4
 
+from .errors import ProtocolError
 from .models import CheckRun, VerificationPlan, check_revision
 from .verification import verification_requirements
 
@@ -585,12 +586,36 @@ class ReviewCheckState:
             return
         assessment = self._review_assessment(db, attempt)
         if not assessment["settled"]:
-            raise ValueError("Trusted review checks are not settled")
+            raise ProtocolError(
+                "trusted_checks_unsettled",
+                "Trusted review checks are not settled",
+                fields=["attempt_id"],
+                allowed_fix="Observe the existing check ledger; do not replay uncertain checks or accept the submission.",
+                next_request={
+                    "request": {
+                        "action": "get",
+                        "work_id": attempt["work_id"],
+                        "step_id": attempt["step_id"],
+                    },
+                    "section": "verification",
+                },
+            )
         if accept and (
             assessment["status"] != "passed" or not attempt.get("comparison_opened_at")
         ):
-            raise ValueError(
-                "Acceptance requires comparison and all trusted review checks passed"
+            raise ProtocolError(
+                "trusted_checks_not_acceptance_ready",
+                "Acceptance requires comparison and all trusted review checks passed",
+                fields=["attempt_id"],
+                allowed_fix="Open comparison only after settlement; inspect failures and reject or block rather than claiming acceptance.",
+                next_request={
+                    "request": {
+                        "action": "get",
+                        "work_id": attempt["work_id"],
+                        "step_id": attempt["step_id"],
+                    },
+                    "section": "verification",
+                },
             )
 
     def require_finalization(self, db, attempt):

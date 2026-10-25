@@ -69,7 +69,7 @@ class ProjectionLimitsTests(unittest.TestCase):
                 note=f"Blocker {index}: " + "界" * 6000,
                 condition="Inspect all required evidence, not only the first page",
             )
-        full = self.public(view="full")
+        full = self.case.view()
         summary = self.public(limit=2)
         self.assertLessEqual(len(json.dumps(summary).encode()), 16384)
         blockers = self.section("blockers", arguments=summary["blockers"]["arguments"])
@@ -86,6 +86,45 @@ class ProjectionLimitsTests(unittest.TestCase):
             large[key] = [{"required": "界" * 6000} for _ in range(20)]
         bounded = present_work(large, actor="claude")
         self.assertLessEqual(len(json.dumps(bounded).encode()), 16384)
+
+    def test_explicit_views_bound_large_criteria_and_recover_complete_step(self):
+        contract = fixtures.plan()
+        criterion = "Required Unicode behavior: " + "界" * 6000
+        contract["steps"][0]["acceptance"] = [criterion] * 4
+        self.case.revise(contract)
+        for view in ("summary", "plan", "step", "full"):
+            with self.subTest(view=view):
+                request = {
+                    "action": "get",
+                    "work_id": self.work_id,
+                    "step_id": "backend",
+                }
+                result = perform_work(
+                    self.store,
+                    request,
+                    actor="claude",
+                    presentation=WorkPresentation(view=view),
+                )
+                self.assertLessEqual(len(json.dumps(result).encode()), 16384)
+                if view == "step":
+                    recovered = self.section(
+                        "step", arguments=result["step"]["arguments"]
+                    )
+                    self.assertEqual(recovered["acceptance"], [criterion] * 4)
+                elif view in {"plan", "full"}:
+                    recovered = self.section(
+                        "plan", arguments=result["plan"]["arguments"]
+                    )
+                    self.assertEqual(
+                        recovered["steps"][0]["acceptance"], [criterion] * 4
+                    )
+        markdown = perform_work(
+            self.store,
+            request,
+            actor="claude",
+            presentation=WorkPresentation(view="full", format="markdown"),
+        )
+        self.assertLessEqual(len(json.dumps(markdown).encode()), 16384)
 
     def test_list_keyset_does_not_load_later_cards_and_rejects_changed_context(self):
         with sqlite3.connect(self.store.database) as db:
@@ -250,9 +289,13 @@ class ProjectionLimitsTests(unittest.TestCase):
             "operation_id": "create",
         }
         legacy = WorkCommand.model_validate(request).model_dump()
+        legacy.pop("check_runs")
+        legacy["plan"].pop("acceptance_set")
+        legacy["plan"].pop("verification")
         for step in legacy["plan"]["steps"]:
             for key in (
                 "review_context_paths",
+                "acceptance_set",
                 "requirements",
                 "verification",
                 "review_requirements",

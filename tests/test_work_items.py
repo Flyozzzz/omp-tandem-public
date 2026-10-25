@@ -160,6 +160,14 @@ class WorkItemsTests(unittest.TestCase):
         new_plan["steps"][0]["owned_files"] = ["child/new.py"]
         self.revise(new_plan)
         self.agreed()
+        actions = self.store.next_actions(self.view(), actor="omp")
+        self.assertTrue(
+            next(
+                item
+                for item in actions
+                if item["action"] == "claim" and item["step_id"] == "backend"
+            )["allowed"]
+        )
         child = self.root / "child"
         child.mkdir()
         subprocess.run(["git", "init", "-q", str(child)], check=True)
@@ -307,6 +315,30 @@ class WorkItemsTests(unittest.TestCase):
         return self.store.perform(
             {"action": "get", "work_id": self.work_id}, actor="claude"
         )
+
+    def unpage(self, value, *, actor="omp", token=None):
+        from omp_tandem.work_access import WorkToolRequest, perform_work
+
+        if not isinstance(value, dict) or value.get("paged") is not True:
+            return value
+        request = WorkToolRequest.model_validate(value["arguments"])
+        parts, cursor = [], None
+        while True:
+            page = perform_work(
+                self.store,
+                request.request,
+                actor=actor,
+                attempt_token=token,
+                presentation=request.model_copy(update={"cursor": cursor}),
+            )
+            self.assertNotIn("error", page)
+            self.assertLessEqual(len(json.dumps(page).encode()), 16384)
+            parts.append(page["content"])
+            following = page["next_cursor"]
+            if following is None:
+                return json.loads("".join(parts))
+            self.assertNotEqual(following, cursor)
+            cursor = following
 
     def change(self, action, *, actor="claude", token=None, **fields):
         return self.store.perform(
@@ -488,13 +520,14 @@ class WorkItemsTests(unittest.TestCase):
         selected = perform_work(
             self.store, request, actor="omp", presentation=WorkPresentation(view="plan")
         )
-        self.assertEqual(selected["plan"], full["plan"])
+        self.assertEqual(self.unpage(selected["plan"]), full["plan"])
         selected = perform_work(
             self.store,
             {**request, "step_id": "step1"},
             actor="omp",
             presentation=WorkPresentation(view="step"),
         )
+        selected["step"] = self.unpage(selected["step"])
         self.assertEqual(
             selected["step"]["submissions"], [full["steps"][1]["submission"]]
         )
@@ -504,8 +537,8 @@ class WorkItemsTests(unittest.TestCase):
         selected = perform_work(
             self.store, request, actor="omp", presentation=WorkPresentation(view="full")
         )
-        self.assertEqual(selected["plan"], full["plan"])
-        self.assertEqual(selected["steps"], full["steps"])
+        self.assertEqual(self.unpage(selected["plan"]), full["plan"])
+        self.assertEqual(self.unpage(selected["steps"]), full["steps"])
         rendered = perform_work(
             self.store,
             request,
@@ -513,13 +546,14 @@ class WorkItemsTests(unittest.TestCase):
             presentation=WorkPresentation(view="plan", format="markdown"),
         )
         self.assertEqual(set(rendered), {"markdown"})
-        self.assertIn(full["plan"]["steps"][0]["acceptance"][0], rendered["markdown"])
+        self.assertLessEqual(len(json.dumps(rendered).encode()), 16384)
         accepted = perform_work(
             self.store,
             {**request, "step_id": "step0"},
             actor="omp",
             presentation=WorkPresentation(view="step"),
         )["step"]
+        accepted = self.unpage(accepted)
         self.assertEqual(
             {item["kind"] for item in accepted["attempts"]}, {"implement", "review"}
         )
@@ -859,12 +893,14 @@ class WorkItemsTests(unittest.TestCase):
             origin=successor_host,
         )
         self.assertEqual(claims, {})
-        descriptor = seen["step"]["recovery"]
+        descriptor = self.unpage(seen["step"])["recovery"]
         self.assertTrue(descriptor["origin"]["settled"]["teardown_confirmed"])
         self.assertFalse(descriptor["successors"][0]["consumed"])
         self.assertNotIn("token", json.dumps(descriptor))
         hint = next(
-            item for item in seen["next_actions"] if item["action"] == "recover"
+            item
+            for item in self.unpage(seen["next_actions"])
+            if item["action"] == "recover"
         )
         self.assertTrue(hint["allowed"])
         with self.assertRaisesRegex(ValueError, "recovery_not_authorized"):
@@ -3983,6 +4019,10 @@ class IndependentReviewTests(WorkItemsTests):
                 presentation=WorkPresentation(view=view),
             )
             self.assertNotIn(self.SENTINEL, json.dumps(result))
+            for value in result.values():
+                if isinstance(value, dict) and value.get("paged") is True:
+                    material = self.unpage(value, actor="claude", token=review["token"])
+                    self.assertNotIn(self.SENTINEL, json.dumps(material))
         for snapshots in (False, True):
             result = perform_work(
                 self.store,
@@ -4001,7 +4041,8 @@ class IndependentReviewTests(WorkItemsTests):
             attempt_token=review["token"],
             presentation=WorkPresentation(view="step"),
         )
-        self.assertIn(self.SENTINEL, json.dumps(result))
+        material = self.unpage(result["step"], actor="claude", token=review["token"])
+        self.assertIn(self.SENTINEL, json.dumps(material))
 
     def test_inferred_reader_never_fails_open(self):
         from omp_tandem.work_access import perform_work

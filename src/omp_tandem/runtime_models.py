@@ -16,6 +16,10 @@ class QuestionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     question: Annotated[Nonempty, Field(max_length=4000)]
     context: str = Field(default="", max_length=8000)
+    kind: Literal["information", "technical_choice", "approval", "contradiction"] = (
+        "information"
+    )
+    blocking_scope: Literal["task", "shared"] = "task"
     options: list[Annotated[Nonempty, Field(max_length=1000)]] = Field(
         default_factory=list, max_length=8
     )

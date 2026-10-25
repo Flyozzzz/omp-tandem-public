@@ -82,7 +82,8 @@ class AuthorityAdmissionTests(RpcHarness):
         ordinary = await self.start(
             "packet", project_context_id=self.context["context_id"]
         )
-        packet = json.loads((await self.result(ordinary["task_id"]))["answer"])
+        observed = await self.result(ordinary["task_id"])
+        packet = json.loads(await self.read_section(observed["readers"]["answer"]))
         self.assertEqual(
             packet["project_context"]["context"]["product_summary"], AUTHOR
         )
@@ -274,7 +275,8 @@ class AuthorityAdmissionTests(RpcHarness):
             review_stage="comparison",
             project_context_id=self.context["context_id"],
         )
-        packet = json.loads((await self.result(compared["task_id"]))["answer"])
+        observed = await self.result(compared["task_id"])
+        packet = json.loads(await self.read_section(observed["readers"]["answer"]))
         self.assertEqual(
             packet["project_context"]["context"]["product_summary"], AUTHOR
         )

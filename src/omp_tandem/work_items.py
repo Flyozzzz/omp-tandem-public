@@ -25,7 +25,10 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-from .models import TaskRequirements, VerificationPlan
+from .acceptance import enforce_coverage
+from .acceptance import project as project_acceptance
+from .errors import ProtocolError, require_fields
+from .models import AcceptanceSet, CheckRun, TaskRequirements, VerificationPlan
 from .review_check_state import (
     ReviewCheckState,
     authorization_policy,
@@ -176,7 +179,7 @@ def grant_preview(grant: dict) -> dict:
 WITHHELD = {
     "withheld": "author interpretation is hidden until the independent report is recorded and comparison is opened"
 }
-AUTHOR_FIELDS = ("answer", "evidence")
+AUTHOR_FIELDS = ("answer", "evidence", "check_runs")
 
 
 def independent_stage(bound: dict | None) -> bool:
@@ -187,6 +190,35 @@ def independent_stage(bound: dict | None) -> bool:
         and bound.get("protocol") == "independent_first"
         and not bound.get("comparison_opened_at")
     )
+
+
+def acceptance_context(attempt: dict, plan: dict) -> dict:
+    """Exact declared evidence, or a digest-bound pointer to the agreed plan."""
+    step = next(step for step in plan["steps"] if step["id"] == attempt["step_id"])
+    declarations = {
+        "global": plan.get("acceptance_set"),
+        "local": step.get("acceptance_set"),
+        "global_verification": plan.get("verification"),
+        "verification": step.get("verification"),
+        "review_verification": step.get("review_verification"),
+    }
+    encoded = _json(declarations).encode("utf-8")
+    if len(encoded) <= 4000:
+        return declarations
+    return {
+        "paged": True,
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "plan_revision": attempt["plan_revision"],
+        "step_id": attempt["step_id"],
+        "arguments": _section_arguments(attempt["work_id"], "plan"),
+        "selection": [
+            "acceptance_set",
+            "verification",
+            "steps[].acceptance_set",
+            "steps[].verification",
+            "steps[].review_verification",
+        ],
+    }
 
 
 def review_inputs(attempt: dict, plan: dict) -> dict:
@@ -202,6 +234,14 @@ def review_inputs(attempt: dict, plan: dict) -> dict:
                 *(f"- {item}" for item in plan.get("constraints", [])),
                 "Global acceptance:",
                 *(f"- {item}" for item in plan["acceptance"]),
+                *(
+                    [
+                        f"Declared acceptance evidence (exact agreed plan revision {attempt['plan_revision']}): "
+                        + _json(acceptance_context(attempt, plan))
+                    ]
+                    if plan.get("acceptance_set") or step.get("acceptance_set")
+                    else []
+                ),
             ]
         ),
         "criteria": list(step["acceptance"]),
@@ -268,6 +308,12 @@ def redact_author(payload, bound: dict | None):
         return payload
     if isinstance(payload, dict) and "steps" in payload and "plan" in payload:
         view = json.loads(_json(payload))
+        if "acceptance_coverage" in view:
+            view["acceptance_coverage"] = {
+                "assessment": "withheld_until_comparison",
+                "semantic_sufficiency": "not_assessed",
+                "acceptance": "not_assessed",
+            }
         for step in view["steps"]:
             step["submission"] = _withhold(step.get("submission"))
             step["checkpoint"] = _withhold(step.get("checkpoint"))
@@ -407,6 +453,7 @@ class WorkStep(_Model):
         description="Prerequisite step IDs. One final integration step must depend, directly or transitively, on every other step, including investigation and verification steps.",
     )
     acceptance: list[_NonBlank] = Field(min_length=1, max_length=100)
+    acceptance_set: AcceptanceSet | None = None
     requirements: TaskRequirements = Field(default_factory=TaskRequirements)
     verification: VerificationPlan | None = None
     review_requirements: TaskRequirements = Field(default_factory=TaskRequirements)
@@ -414,6 +461,8 @@ class WorkStep(_Model):
 
     @model_validator(mode="after")
     def validate_step(self) -> Self:
+        if self.acceptance_set is not None:
+            self.acceptance_set.require_matches(self.acceptance)
         if self.owner == self.reviewer:
             raise ValueError("Step owner and reviewer must be distinct principals")
         if self.review_requirements.requires_write:
@@ -437,6 +486,8 @@ class WorkPlan(_Model):
     goal: _NonBlank
     constraints: list[_NonBlank] = Field(default_factory=list, max_length=100)
     acceptance: list[_NonBlank] = Field(min_length=1, max_length=100)
+    acceptance_set: AcceptanceSet | None = None
+    verification: VerificationPlan | None = None
     steps: list[WorkStep] = Field(
         min_length=1,
         max_length=200,
@@ -445,26 +496,9 @@ class WorkPlan(_Model):
     context: str = Field(default="", max_length=64000)
 
     @model_validator(mode="after")
-    def acceptance_coverage_unsupported(self) -> Self:
-        # Declared acceptance evidence is task-local in 3.10.0. Accepting these
-        # fields here and ignoring them would be worse than refusing them.
-        for step in self.steps:
-            for plan in (step.verification, step.review_verification):
-                if plan is None:
-                    continue
-                if (
-                    plan.acceptance_coverage != "report_only"
-                    or plan.coverage_scope is not None
-                    or any(check.acceptance_refs for check in plan.checks)
-                ):
-                    raise ValueError(
-                        "acceptance_coverage_unsupported_surface: declared acceptance "
-                        "evidence is supported on task contracts, not on work steps"
-                    )
-        return self
-
-    @model_validator(mode="after")
     def validate_graph(self) -> Self:
+        if self.acceptance_set is not None:
+            self.acceptance_set.require_matches(self.acceptance)
         steps = {step.id: step for step in self.steps}
         if len(steps) != len(self.steps):
             raise ValueError("Step IDs must be unique")
@@ -572,9 +606,29 @@ class WorkCommand(_Model):
     commit: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40,64}$")] | None = (
         None
     )
+    check_runs: list[CheckRun] = Field(default_factory=list, max_length=200)
 
     @model_validator(mode="after")
     def validate_mutation(self) -> Self:
+        if self.check_runs and self.action not in {
+            "submit",
+            "report",
+            "accept",
+            "reject",
+        }:
+            raise ProtocolError(
+                "unsupported_evidence_action",
+                "check_runs require submit, report, accept or reject",
+                fields=["check_runs"],
+                allowed_fix="Attach observations to the exact submission or review command.",
+            )
+        if any(run.provenance != "participant_reported" for run in self.check_runs):
+            raise ProtocolError(
+                "untrusted_check_provenance",
+                "Participants cannot record machine-observed runs",
+                fields=["check_runs"],
+                allowed_fix="Use participant_reported provenance; trusted supervisor runs are recorded separately.",
+            )
         if self.action in {"list", "get", "history"}:
             return self
         missing = [
@@ -588,16 +642,32 @@ class WorkCommand(_Model):
                 if self.action == "create"
                 else "Read the current card with get and use its revision as expected_revision."
             )
-            raise ValueError(
-                f"{self.action} requires missing field(s): {', '.join(missing)}. "
-                f"{revision_help} Supply a unique operation_id for each new or corrected "
-                "request; reuse it only for an exact retry."
+            raise ProtocolError(
+                "missing_fields",
+                f"{self.action} requires missing field(s): {', '.join(missing)}",
+                fields=missing,
+                allowed_fix=revision_help
+                + " Supply a fresh operation_id for a corrected request.",
+                next_request={"request": {"action": "get", "work_id": self.work_id}}
+                if self.work_id
+                else {"request": {"action": "list"}},
+            )
+        if self.action in {"create", "propose"}:
+            require_fields(
+                self.action,
+                {"plan": self.plan},
+                next_request={"request": {"action": "get", "work_id": self.work_id}}
+                if self.work_id
+                else {"request": {"action": "list"}},
             )
         if self.action == "create" and (
             self.plan is None or self.expected_revision != 0 or self.work_id is not None
         ):
-            raise ValueError(
-                "Create requires plan, expected_revision=0, and no work_id"
+            raise ProtocolError(
+                "invalid_create_identity",
+                "Create requires plan, expected_revision=0, and no work_id",
+                fields=["expected_revision", "work_id"],
+                allowed_fix="Use expected_revision=0 and omit work_id for a new card; never reuse an operation_id for a changed request.",
             )
         return self
 
@@ -617,8 +687,17 @@ def _json(value):
 def _operation_fingerprint(command, bound, *, version=2):
     """Preserve exact historical receipts when new declarations remain empty."""
     payload = command.model_dump()
+    if not payload["check_runs"]:
+        payload.pop("check_runs")
+    declared_plan = payload.get("plan")
+    if declared_plan:
+        for key in ("acceptance_set", "verification"):
+            if declared_plan.get(key) is None:
+                declared_plan.pop(key, None)
     empty_requirements = TaskRequirements().model_dump()
     for step in (payload.get("plan") or {}).get("steps", []):
+        if step.get("acceptance_set") is None:
+            step.pop("acceptance_set", None)
         if step.get("review_context_paths") == []:
             step.pop("review_context_paths")
         for key in ("requirements", "review_requirements"):
@@ -800,8 +879,41 @@ class WorkPresentation(_Model):
     )
 
 
-def _section_arguments(work_id, section):
-    return {"request": {"action": "get", "work_id": work_id}, "section": section}
+def _section_arguments(work_id, section, step_id=None):
+    return {
+        "request": {
+            "action": "get",
+            "work_id": work_id,
+            **({"step_id": step_id} if step_id else {}),
+        },
+        "section": section,
+    }
+
+
+def _step_projection(payload, step_id):
+    require_fields(
+        "step view",
+        {"step_id": step_id},
+        next_request=_section_arguments(payload["work_id"], "plan"),
+    )
+    step = next((item for item in payload["steps"] if item["id"] == step_id), None)
+    if step is None:
+        raise ValueError("Unknown step")
+    spec = next(item for item in payload["plan"]["steps"] if item["id"] == step_id)
+    return {
+        **spec,
+        **{
+            key: value
+            for key, value in step.items()
+            if key not in {"attempt", "submission", "acceptance"}
+        },
+        "acceptance": spec["acceptance"],
+        "review_acceptance": step["acceptance"],
+        "attempts": step.get("attempts", [step["attempt"]] if step["attempt"] else []),
+        "submissions": step.get(
+            "submissions", [step["submission"]] if step["submission"] else []
+        ),
+    }
 
 
 def present_work(
@@ -839,6 +951,7 @@ def present_work(
                 "participant",
                 "bound_attempt",
                 "next_actions",
+                "acceptance_coverage",
                 "recovery",
                 "application",
                 "repository",
@@ -863,32 +976,7 @@ def present_work(
             result["agreements"] = payload["agreements"]
             result["proposal"] = payload.get("proposal")
         elif view == "step":
-            if not step_id:
-                raise ValueError("view=step requires step_id")
-            step = next(
-                (item for item in payload["steps"] if item["id"] == step_id), None
-            )
-            if step is None:
-                raise ValueError("Unknown step")
-            spec = next(
-                item for item in payload["plan"]["steps"] if item["id"] == step_id
-            )
-            result["step"] = {
-                **spec,
-                **{
-                    key: value
-                    for key, value in step.items()
-                    if key not in {"attempt", "submission", "acceptance"}
-                },
-                "acceptance": spec["acceptance"],
-                "review_acceptance": step["acceptance"],
-                "attempts": step.get(
-                    "attempts", [step["attempt"]] if step["attempt"] else []
-                ),
-                "submissions": step.get(
-                    "submissions", [step["submission"]] if step["submission"] else []
-                ),
-            }
+            result["step"] = _step_projection(payload, step_id)
         else:
             result["paused"] = payload["status"] == "paused"
             proposal = payload.get("proposal")
@@ -1020,7 +1108,7 @@ def present_work(
             }
     if "runtime_identity" in payload:
         result["runtime_identity"] = payload["runtime_identity"]
-    if view == "summary" and "plan" in payload:
+    if "plan" in payload:
         # Each replaced section remains completely readable, including long text,
         # through a bounded, freshly authorized page. Never truncate a requirement.
         for key in sorted(
@@ -1041,15 +1129,13 @@ def present_work(
             result[key] = {
                 "paged": True,
                 "count": len(value) if isinstance(value, (list, dict)) else None,
-                "arguments": _section_arguments(payload["work_id"], key),
+                "arguments": _section_arguments(
+                    payload["work_id"], key, step_id if key == "step" else None
+                ),
             }
     if format == "markdown":
         # Render exactly the selected material, without a second JSON copy.
-        return {
-            "markdown": "```json\n"
-            + json.dumps(result, ensure_ascii=False, indent=2)
-            + "\n```"
-        }
+        return {"markdown": "```json\n" + _json(result) + "\n```"}
     return result
 
 
@@ -1201,6 +1287,11 @@ class WorkStore:
                 raise
 
     def _load(self, db, work_id):
+        require_fields(
+            "work lookup",
+            {"work_id": work_id},
+            next_request={"request": {"action": "list"}},
+        )
         row = db.execute(
             "SELECT card FROM work_cards WHERE work_id=?", (work_id,)
         ).fetchone()
@@ -1252,6 +1343,11 @@ class WorkStore:
         return card
 
     def _attempt(self, db, attempt_id):
+        require_fields(
+            "attempt lookup",
+            {"attempt_id": attempt_id},
+            next_request={"request": {"action": "list"}},
+        )
         row = db.execute(
             "SELECT attempt FROM work_attempts WHERE attempt_id=?", (attempt_id,)
         ).fetchone()
@@ -1301,6 +1397,11 @@ class WorkStore:
         )
 
     def _step(self, card, step_id):
+        require_fields(
+            "step lookup",
+            {"step_id": step_id},
+            next_request=_section_arguments(card["work_id"], "plan"),
+        )
         for step in card["steps"]:
             if step["id"] == step_id:
                 return step
@@ -1457,7 +1558,293 @@ class WorkStore:
             if card["status"] == "completed"
             else None
         )
+        view["acceptance_coverage"] = self._acceptance_coverage(db, card)
         return self._redact(db, view)
+
+    def _acceptance_records(self, db, card, *, attempt=None, report=None):
+        """Read the existing immutable command, native-report and trusted histories."""
+        records, history, stale = [], [], []
+        seen = {}
+        for saved in self._attempts(db, card["work_id"]):
+            if attempt and saved["attempt_id"] == attempt["attempt_id"]:
+                saved = attempt
+            sources = [
+                saved.get("submission_intent") or {},
+                saved.get("independent_report") or {},
+                saved.get("verdict") or {},
+            ]
+            if saved.get("native_task_id"):
+                native = db.execute(
+                    "SELECT report_json FROM tasks WHERE task_id=?",
+                    (saved["native_task_id"],),
+                ).fetchone()
+                if native and native["report_json"]:
+                    sources.append(json.loads(native["report_json"]))
+            if attempt and saved["attempt_id"] == attempt["attempt_id"] and report:
+                sources.append(
+                    report.model_dump() if hasattr(report, "model_dump") else report
+                )
+            runs = {}
+            for source in sources:
+                for value in source.get("check_runs") or []:
+                    run = CheckRun.model_validate(value)
+                    if run.run_id in seen and seen[run.run_id] != run:
+                        raise ProtocolError(
+                            "evidence_identity_conflict",
+                            "A check run identity has different content",
+                            fields=["check_runs"],
+                            allowed_fix="Keep the immutable run; use a new run_id for a new observation.",
+                        )
+                    seen[run.run_id] = run
+                    runs[run.run_id] = run
+            for row in self._review_checks._review_rows(db, saved["attempt_id"]):
+                if row.get("check_run"):
+                    run = CheckRun.model_validate(row["check_run"])
+                    if run.run_id in seen and seen[run.run_id] != run:
+                        raise ProtocolError(
+                            "evidence_identity_conflict",
+                            "Participant evidence conflicts with a trusted run",
+                            fields=["check_runs"],
+                            allowed_fix="Do not impersonate a trusted run identity.",
+                        )
+                    seen[run.run_id] = run
+                    runs[run.run_id] = run
+            current = saved["plan_revision"] == card["plan_revision"]
+            step = next(
+                (step for step in card["steps"] if step["id"] == saved["step_id"]), None
+            )
+            submission = (step or {}).get("submission") or {}
+            submitted = (
+                submission.get("submission_id")
+                == (saved.get("submission") or {}).get("submission_id")
+                if saved["kind"] == "review"
+                else submission.get("attempt_id") == saved["attempt_id"]
+            ) and bool(submission)
+            history.append(
+                {
+                    "attempt_id": saved["attempt_id"],
+                    "step_id": saved["step_id"],
+                    "plan_revision": saved["plan_revision"],
+                    "current_plan": current,
+                    "current_submission": submitted,
+                    "runs": [run.model_dump() for run in runs.values()],
+                }
+            )
+            if current and submitted:
+                records.extend((saved["step_id"], run) for run in runs.values())
+            elif not current and runs:
+                stale.append(saved["attempt_id"])
+        return records, history, stale
+
+    def _acceptance_coverage(
+        self, db, card, *, attempt=None, report=None, recorded=None
+    ):
+        records, history, stale = (
+            self._acceptance_records(db, card, attempt=attempt, report=report)
+            if recorded is None
+            else recorded
+        )
+        final_id = self._final_step_id(card)
+        final = self._step(card, final_id)
+        final_submission = final.get("submission") or {}
+
+        def projection(declared, verification, runs, submission, subject):
+            commit = submission.get("commit")
+            scopes = [{"kind": "commit", "digest": commit}] if commit else []
+            if commit and submission.get("tree_hash"):
+                scopes.append({"kind": "tree", "digest": submission["tree_hash"]})
+            coverage = project_acceptance(
+                AcceptanceSet.model_validate(declared) if declared else None,
+                VerificationPlan.model_validate(verification) if verification else None,
+                runs if commit else [],
+                report_scope={"kind": "commit", "digest": commit} if commit else None,
+                equivalent_scopes=scopes,
+            )
+            coverage["subject"] = subject
+            coverage["plan_revision"] = card["plan_revision"]
+            coverage["submitted_identity"] = {
+                key: submission.get(key)
+                for key in ("submission_id", "commit", "tree_hash", "plan_revision")
+            }
+            coverage["submission_binding"] = (
+                "submitted_commit" if commit else "not_submitted"
+            )
+            return coverage
+
+        base = {"work_id": card["work_id"], "plan_revision": card["plan_revision"]}
+        local = []
+        for spec in card["plan"]["steps"]:
+            step = self._step(card, spec["id"])
+            submission = step.get("submission") or {}
+            runs = [run for step_id, run in records if step_id == spec["id"]]
+            subject = {"kind": "work_step", **base, "step_id": spec["id"]}
+            local.append(
+                {
+                    "step_id": spec["id"],
+                    "implementation": projection(
+                        spec.get("acceptance_set"),
+                        spec.get("verification"),
+                        runs,
+                        submission,
+                        subject,
+                    ),
+                    "review": projection(
+                        spec.get("acceptance_set"),
+                        spec.get("review_verification"),
+                        runs,
+                        submission,
+                        subject,
+                    ),
+                }
+            )
+        return {
+            "schema_version": 1,
+            "subject": {"kind": "work", **base},
+            "semantic_sufficiency": "not_assessed",
+            "acceptance": "not_assessed",
+            "global": projection(
+                card["plan"].get("acceptance_set"),
+                card["plan"].get("verification"),
+                [run for _, run in records],
+                final_submission,
+                {"kind": "work_plan", **base, "final_step_id": final_id},
+            ),
+            "steps": local,
+            "history": history,
+            "stale_plan_attempt_ids": stale,
+        }
+
+    def acceptance_coverage(self, attempt_id, report=None):
+        with self._read_connection() as db:
+            attempt = self._attempt(db, attempt_id)
+            card = self._load(db, attempt["work_id"])
+            coverage = self._acceptance_coverage(
+                db, card, attempt=attempt, report=report
+            )
+            if independent_stage(attempt):
+                return {
+                    "subject": coverage["subject"],
+                    "visibility": "independent_stage",
+                    "assessment": "withheld_until_comparison",
+                    "semantic_sufficiency": "not_assessed",
+                    "acceptance": "not_assessed",
+                }
+            return coverage
+
+    def _enforce_acceptance(self, db, card, attempt, report=None):
+        # An honest non-success may lack passing evidence, but must never rewrite
+        # an existing observation and poison subsequent reads or reconciliation.
+        recorded = (
+            self._acceptance_records(db, card, attempt=attempt, report=report)
+            if report is not None
+            else None
+        )
+        if report is not None:
+            outcome = (
+                report.outcome if hasattr(report, "outcome") else report.get("outcome")
+            )
+            if outcome != "success":
+                return
+        if attempt["plan_revision"] != card["plan_revision"]:
+            raise ProtocolError(
+                "stale_work_plan",
+                "Attempt evidence belongs to a previous work plan revision",
+                fields=["attempt_id"],
+                allowed_fix="Retain historical evidence; do not publish from a fenced attempt.",
+                next_request=_section_arguments(card["work_id"], "acceptance_coverage"),
+            )
+        if (
+            report is not None
+            and (attempt.get("verdict") or {}).get("verdict") == "reject"
+        ):
+            return
+        spec = next(
+            item for item in card["plan"]["steps"] if item["id"] == attempt["step_id"]
+        )
+        if report is not None and attempt["kind"] == "implement":
+            # Before supervisor capture, current-report admission remains provisional.
+            # Independent acceptance below rechecks these runs on the captured commit.
+            declared = spec.get("acceptance_set")
+            verification = spec.get("verification")
+            _, history, _ = recorded
+            own = next(
+                row for row in history if row["attempt_id"] == attempt["attempt_id"]
+            )
+            current_report = report.model_copy(
+                update={
+                    "check_runs": [CheckRun.model_validate(run) for run in own["runs"]]
+                }
+            )
+            enforce_coverage(
+                AcceptanceSet.model_validate(declared) if declared else None,
+                VerificationPlan.model_validate(verification) if verification else None,
+                current_report,
+            )
+            return
+        coverage = self._acceptance_coverage(
+            db, card, attempt=attempt, report=report, recorded=recorded
+        )
+        local = next(
+            item for item in coverage["steps"] if item["step_id"] == attempt["step_id"]
+        )
+        stages = (
+            ["review"]
+            if report is not None and attempt["kind"] == "review"
+            else ["implementation"]
+        )
+        if report is None and attempt["kind"] == "review":
+            stages = ["implementation", "review"]
+        selected = [
+            (
+                spec.get(
+                    "review_verification" if stage == "review" else "verification"
+                ),
+                local[stage],
+            )
+            for stage in stages
+        ]
+        if (
+            attempt["step_id"] == self._final_step_id(card)
+            and attempt["kind"] == "review"
+        ):
+            selected.append((card["plan"].get("verification"), coverage["global"]))
+        for plan, assessed in selected:
+            if (plan or {}).get("acceptance_coverage") != "require_current_evidence":
+                continue
+            if (
+                assessed["admission"] != "eligible"
+                or assessed["submission_binding"] != "submitted_commit"
+            ):
+                raise ProtocolError(
+                    "acceptance_evidence_required",
+                    "Success requires current evidence for every declared unit on the exact submitted commit",
+                    fields=["check_runs", "acceptance_set"],
+                    allowed_fix="Keep failures and missing obligations explicit. Record applicable evidence or finish blocked/partial; change declarations only through a new agreed plan.",
+                    next_request={
+                        "request": {"action": "get", "work_id": card["work_id"]},
+                        "section": "acceptance_coverage",
+                    },
+                )
+
+    def enforce_acceptance(self, attempt_id, report):
+        with self._read_connection() as db:
+            attempt = self._attempt(db, attempt_id)
+            card = self._load(db, attempt["work_id"])
+            try:
+                self._enforce_acceptance(db, card, attempt, report)
+            except ProtocolError as error:
+                envelope = error.envelope
+                raise ProtocolError(
+                    envelope["code"],
+                    envelope["reasons"][0],
+                    fields=envelope["fields"],
+                    allowed_fix=envelope["allowed_fix"],
+                    next_request={
+                        "tool": "tandem_work",
+                        "arguments": envelope.get("next_request")
+                        or _section_arguments(card["work_id"], "acceptance_coverage"),
+                    },
+                ) from error
 
     @staticmethod
     def _when(value):
@@ -2119,8 +2506,11 @@ class WorkStore:
 
     def step_material(self, current, *, step_id, actor, attempt_token=None, limit=50):
         """Historical step material uses the same snapshot disclosure projection."""
-        if not step_id:
-            raise ValueError("view=step requires step_id")
+        require_fields(
+            "step view",
+            {"step_id": step_id},
+            next_request=_section_arguments(current["work_id"], "plan"),
+        )
         step = self._step(current, step_id)
         with self._read_connection() as db:
             bound = (
@@ -2165,8 +2555,12 @@ class WorkStore:
                 db, card, self._step(card, step_id), bound=bound
             )
         for name, records in (("attempts", attempts), ("submissions", submissions)):
-            step[name] = list(records.values())[-limit:]
-            if len(records) > limit:
+            step[name] = (
+                list(records.values())
+                if limit is None
+                else list(records.values())[-limit:]
+            )
+            if limit is not None and len(records) > limit:
                 step.setdefault("continuation", []).append(
                     {
                         "section": name,
@@ -2197,6 +2591,15 @@ class WorkStore:
             raise ValueError("Invalid page limit")
         self._maintenance()
         with self._read_connection() as db:
+            independent_claims = {}
+            for token in (claims or {}).values():
+                try:
+                    held = self._authenticate(db, token)
+                except ValueError:
+                    # Retired remembered credentials confer no active seat.
+                    continue
+                if independent_stage(held):
+                    independent_claims[held["work_id"]] = held
             head = db.execute(
                 "SELECT COALESCE(MAX(rowid),0) FROM work_events"
             ).fetchone()[0]
@@ -2248,6 +2651,7 @@ class WorkStore:
                     _db=db,
                     _card=stored,
                 )
+                card = redact_author(card, independent_claims.get(row["work_id"]))
                 item = present_work(card, actor=actor, view=view, limit=limit)
                 item_bytes = (
                     len(json.dumps(item).encode("utf-8")) if view == "summary" else 0
@@ -2272,7 +2676,9 @@ class WorkStore:
                 else None,
             }
 
-    def section_page(self, current, *, actor, section, cursor=None, attempt_token=None):
+    def section_page(
+        self, current, *, actor, section, cursor=None, attempt_token=None, step_id=None
+    ):
         """JSON-text chunks of one complete projected section, not arbitrary reads.
 
         Concatenate content in cursor order, then JSON-decode. The offset counts
@@ -2295,6 +2701,7 @@ class WorkStore:
                 "bound_attempt": bound["attempt_id"] if bound else None,
                 "stage": stage,
                 "section": section,
+                **({"step_id": step_id} if section == "step" else {}),
             }
             after = 0
             try:
@@ -2325,6 +2732,17 @@ class WorkStore:
                 ]
             elif section == "title":
                 value = current["plan"]["title"]
+            elif section == "step":
+                material = self.step_material(
+                    current,
+                    step_id=step_id,
+                    actor=actor,
+                    attempt_token=attempt_token,
+                    limit=None,
+                )
+                if material.get("error"):
+                    return material
+                value = _step_projection(material, step_id)
             elif section in current and section not in {"claim", "markdown"}:
                 value = current[section]
             else:
@@ -2577,6 +2995,18 @@ class WorkStore:
                 return self._perform_command(
                     db, command, actor, attempt_token, origin, source_commit
                 )
+        except (ProtocolError, WorkConflict):
+            raise
+        except ValueError as error:
+            raise ProtocolError(
+                "work_admission_refused",
+                str(error),
+                fields=["request.action"],
+                allowed_fix="Read current work state and satisfy its admission gates. Use a fresh operation_id for a corrected request; never replay uncertain execution.",
+                next_request={"request": {"action": "get", "work_id": command.work_id}}
+                if command.work_id
+                else {"request": {"action": "list"}},
+            ) from error
         finally:
             self._local.delegation = None
 
@@ -2612,6 +3042,12 @@ class WorkStore:
                 and command.step_id is None
             ):
                 command = command.model_copy(update={"step_id": bound["step_id"]})
+        if command.action not in {"create", "list"}:
+            require_fields(
+                command.action,
+                {"work_id": command.work_id},
+                next_request={"request": {"action": "list"}},
+            )
         if command.action == "list":
             return {
                 "items": [
@@ -2736,6 +3172,37 @@ class WorkStore:
     ):
         action = command.action
         self._require_open(card)
+        # Historical receipts have already been resolved. A terminal card cannot
+        # be repaired by filling mutation fields, so its state refusal comes first.
+        required = {}
+        if action in {
+            "claim",
+            "recover",
+            "heartbeat",
+            "submit",
+            "report",
+            "compare",
+            "accept",
+            "reject",
+        }:
+            required["step_id"] = command.step_id
+        if action in {"accept", "reject", "report"}:
+            required["submission_id"] = command.submission_id
+        if action == "unblock":
+            required["blocker_id"] = command.blocker_id
+        if action in {"submit", "report", "accept", "reject", "reconcile"}:
+            required.update(note=command.note, evidence=command.evidence or None)
+        if action == "block":
+            required.update(note=command.note, condition=command.condition)
+        if action in {"report", "unblock", "reconcile"}:
+            required["resolution"] = command.resolution
+        if action == "submit" and bound and not bound["autonomous"]:
+            required["commit"] = command.commit
+        require_fields(
+            action,
+            required,
+            next_request={"request": {"action": "get", "work_id": card["work_id"]}},
+        )
         if action == "recover":
             return self._recover(db, card, command, actor, origin)
         if action == "propose":
@@ -3011,6 +3478,7 @@ class WorkStore:
                 bound["submission_intent"] = {
                     "answer": command.note,
                     "evidence": command.evidence,
+                    "check_runs": [run.model_dump() for run in command.check_runs],
                     "commit": command.commit,
                     "plan_revision": card["plan_revision"],
                     "at": time.time(),
@@ -3052,6 +3520,7 @@ class WorkStore:
                     "outcome": command.resolution,
                     "answer": command.note,
                     "evidence": command.evidence,
+                    "check_runs": [run.model_dump() for run in command.check_runs],
                     "submission_id": command.submission_id,
                     "at": time.time(),
                 }
@@ -3130,6 +3599,7 @@ class WorkStore:
                     "plan_revision": card["plan_revision"],
                     "note": command.note,
                     "evidence": command.evidence,
+                    "check_runs": [run.model_dump() for run in command.check_runs],
                     "criteria": next(
                         item["acceptance"]
                         for item in card["plan"]["steps"]
@@ -3143,6 +3613,8 @@ class WorkStore:
                 ):
                     verdict["global_criteria_attested"] = card["plan"]["acceptance"]
                 bound["verdict"] = verdict
+                if action == "accept":
+                    self._enforce_acceptance(db, card, bound)
                 self._save_attempt(db, bound)
                 if not bound["autonomous"]:
                     step["acceptance"] = verdict if action == "accept" else None
@@ -3219,8 +3691,12 @@ class WorkStore:
     @staticmethod
     def _require_open(card):
         if card["status"] in _TERMINAL:
-            raise ValueError(
-                f"work_terminal: {card['status']}; execution cannot reopen"
+            raise ProtocolError(
+                "work_terminal",
+                f"Work is {card['status']}; execution cannot reopen",
+                fields=("work_id",),
+                allowed_fix="Read retained history or explicitly create a new scoped card. Completing request fields cannot reopen terminal work.",
+                next_request={"request": {"action": "get", "work_id": card["work_id"]}},
             )
 
     @staticmethod
@@ -3484,6 +3960,21 @@ class WorkStore:
             if attempt_token:
                 bound = self._credential(db, attempt_token, actor)
             actions = []
+            repository_observation = None
+            repository_failure = None
+
+            def observe_repository():
+                nonlocal repository_observation, repository_failure
+                if repository_observation is None and repository_failure is None:
+                    try:
+                        repository_observation = self._observe_repository(
+                            card["plan"], action="claim", required=True
+                        )
+                    except ValueError as error:
+                        repository_failure = str(error)
+                if repository_failure is not None:
+                    raise ValueError(repository_failure)
+                return repository_observation
 
             def add(action, step, kind, credential=None, reason=None):
                 submission = step["submission"] if step else None
@@ -3512,7 +4003,41 @@ class WorkStore:
                         "expected_revision": current["revision"],
                         "required_fields": required,
                         "allowed": reason is None,
-                        "blocked_reason": reason,
+                        "blocked_reason": reason.envelope["code"]
+                        if isinstance(reason, ProtocolError)
+                        else reason,
+                        **(
+                            {"diagnostic": reason.envelope}
+                            if isinstance(reason, ProtocolError)
+                            else {}
+                        ),
+                        "tool": "tandem_work",
+                        "arguments": {
+                            "request": {
+                                "action": action,
+                                "work_id": card["work_id"],
+                                "expected_revision": current["revision"],
+                                **({"step_id": step["id"]} if step else {}),
+                                **(
+                                    {"submission_id": submission["submission_id"]}
+                                    if submission
+                                    and action in {"report", "accept", "reject"}
+                                    else {}
+                                ),
+                            }
+                        },
+                        **(
+                            {
+                                "allowed_values": {
+                                    "resolution": ["partial", "blocked"]
+                                    if credential
+                                    and credential.get("clarification_request")
+                                    else ["success", "partial", "blocked"]
+                                }
+                            }
+                            if action == "report"
+                            else {}
+                        ),
                     }
                 )
 
@@ -3567,6 +4092,21 @@ class WorkStore:
                                 if step["submission"]
                                 else "submission_required"
                             )
+                        if reason is None:
+                            try:
+                                self._reserve(
+                                    db,
+                                    card,
+                                    step["id"],
+                                    actor=actor,
+                                    kind=kind,
+                                    owner_id="manual:" + actor,
+                                    autonomous=False,
+                                    dry_run=True,
+                                    repository_observation=observe_repository(),
+                                )
+                            except ValueError as error:
+                                reason = str(error)
                         add("claim", step, kind, reason=reason)
                     if step.get("attempt"):
                         # A live claim nobody here holds: show whether this caller
@@ -3590,6 +4130,10 @@ class WorkStore:
                 if kind == "implement":
                     if credential.get("submission_intent"):
                         reason = "submission_intent_already_recorded"
+                    if self._delegation(
+                        credential, actor, (origin or {}).get("host_owner")
+                    ):
+                        reason = "recovery_report_only"
                     add("submit", step, kind, credential, reason)
                     continue
                 submission = step["submission"]
@@ -3615,6 +4159,19 @@ class WorkStore:
                         "comparison_already_opened",
                     }:
                         continue
+                    if not (reason or phase_reason) and action in {"compare", "accept"}:
+                        try:
+                            self._require_review_checks(
+                                db, credential, accept=action == "accept"
+                            )
+                            if action == "accept":
+                                self._enforce_acceptance(db, card, credential)
+                        except ValueError as error:
+                            phase_reason = (
+                                error
+                                if isinstance(error, ProtocolError)
+                                else str(error)
+                            )
                     add(action, step, kind, credential, reason or phase_reason)
             return self._redact(db, actions)
 
@@ -3663,6 +4220,8 @@ class WorkStore:
         autonomous,
         source_commit=None,
         binding=None,
+        dry_run=False,
+        repository_observation=None,
     ):
         if (
             not owner_id
@@ -3678,10 +4237,15 @@ class WorkStore:
         }
         if eligible not in self._ready(db, card):
             raise WorkConflict("Step is not ready for this actor and attempt kind")
-        observation = self._observe_repository(
-            card["plan"], action="claim", required=True
+        if repository_observation is not None and not dry_run:
+            raise ValueError(
+                "Repository observations may only be reused within read-only hints"
+            )
+        observation = (
+            repository_observation
+            if repository_observation is not None
+            else self._observe_repository(card["plan"], action="claim", required=True)
         )
-        card["repository_observation"] = observation
         if not autonomous:
             source_commit = observation["head"]
         grant = card["authorization"]
@@ -3779,6 +4343,10 @@ class WorkStore:
             )
             if envelope <= 0:
                 raise ValueError("No unreserved monetary budget remains")
+        if dry_run:
+            return None
+        card["repository_observation"] = observation
+        if autonomous:
             grant["launches"] += 1
         step = self._step(card, step_id)
         token = secrets.token_urlsafe(32)
@@ -4043,6 +4611,18 @@ class WorkStore:
         with self._transaction() as db:
             attempt = self._attempt(db, attempt_id)
             self._authenticate(db, attempt["token"])
+            task = db.execute(
+                "SELECT execution_json FROM tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if task and task["execution_json"]:
+                execution = json.loads(task["execution_json"])
+                if (execution.get("effective") or {}).get("purpose") == "coordination":
+                    raise ProtocolError(
+                        "coordination_work_binding_forbidden",
+                        "A coordination turn cannot become a managed work assignment",
+                        fields=["task_id"],
+                        allowed_fix="Start a separately authorized ordinary work turn.",
+                    )
             if attempt["native_task_id"] not in {None, task_id}:
                 raise ValueError("Attempt native task binding is immutable")
             attempt["native_task_id"] = task_id
@@ -4316,6 +4896,7 @@ class WorkStore:
                     acceptance=None,
                     state="review",
                 )
+                self._enforce_acceptance(db, card, attempt)
                 attempt["state"] = "succeeded"
             elif cooperative_block:
                 if attempt["kind"] == "implement":
@@ -4341,6 +4922,8 @@ class WorkStore:
                 and not unresolved
             ):
                 self._review_checks.require_finalization(db, attempt)
+                if attempt["verdict"]["verdict"] == "accept":
+                    self._enforce_acceptance(db, card, attempt)
                 attempt["state"] = "succeeded"
                 verdict = attempt["verdict"]
                 step["acceptance"] = verdict if verdict["verdict"] == "accept" else None
@@ -4413,7 +4996,15 @@ class WorkStore:
         after = {step["id"]: step for step in plan["steps"]}
         plan_level = any(
             card["plan"].get(key) != plan.get(key)
-            for key in ("title", "goal", "constraints", "acceptance", "context")
+            for key in (
+                "title",
+                "goal",
+                "constraints",
+                "acceptance",
+                "context",
+                "acceptance_set",
+                "verification",
+            )
         )
         return {
             "card_wide": True,

@@ -33,6 +33,22 @@ async def main():
                 "operation_id": str(uuid4()),
             }
         )
+        if isinstance(view["steps"], dict) and view["steps"].get("paged"):
+            arguments = view["steps"]["arguments"]
+            parts = []
+            while True:
+                page = to_jsonable_python(
+                    (await client.call_tool("tandem_work", arguments)).data
+                )
+                if page.get("error") or page["revision"] != view["revision"]:
+                    raise RuntimeError(
+                        "Assignment changed while reading its checkpoint"
+                    )
+                parts.append(page["content"])
+                if page["next_cursor"] is None:
+                    break
+                arguments = {**arguments, "cursor": page["next_cursor"]}
+            view["steps"] = json.loads("".join(parts))
         module = Path("module.txt")
         # The owned checkpoint marker, NOT the external effect log, decides whether
         # this assignment continues already-performed work.

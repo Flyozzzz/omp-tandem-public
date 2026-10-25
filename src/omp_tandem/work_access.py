@@ -1,5 +1,6 @@
 """Server-bound participant identity; shared task data never grants execution authority."""
 
+import json
 import os
 import stat
 from contextlib import suppress
@@ -7,6 +8,7 @@ from pathlib import Path
 
 from pydantic import ConfigDict, Field
 
+from .errors import PRESERVABLE_ACCEPTANCE_REFUSALS, ProtocolError, require_fields
 from .observation import MAX_WAIT_SECONDS
 from .runtime_identity import runtime_identity
 from .work_items import (
@@ -94,6 +96,12 @@ def perform_work(
         if len(held) == 1:
             token, inferred = held[0], True
     bound, output = None, None
+    if command.action in {"get", "history"} and token is None:
+        require_fields(
+            command.action,
+            {"work_id": command.work_id},
+            next_request={"request": {"action": "list"}},
+        )
     if token:
         # Exact receipts may still be read with a retired credential; new effects
         # require an active one and are checked again by the domain transaction.
@@ -107,6 +115,11 @@ def perform_work(
         # A successor host closes bookkeeping only; it never adopts Git output.
         raise ValueError("recovery_report_only")
     if bound and not bound["autonomous"] and command.action == "submit":
+        require_fields(
+            "submit",
+            {"commit": command.commit},
+            next_request={"request": {"action": "get", "work_id": bound["work_id"]}},
+        )
         view = store.perform(
             {"action": "get", "work_id": bound["work_id"]}, actor=actor
         )
@@ -219,22 +232,49 @@ def perform_work(
         claims[(result["work_id"], claim["step_id"])] = claim["token"]
     if output is not None:
         store.started(bound["attempt_id"], workspace=output["workspace"])
-        store.finish_attempt(
-            bound["attempt_id"],
-            outcome="success",
-            answer=command.note or "",
-            evidence=command.evidence,
-            output=output,
-            cost_usd=None,
-        )
+        completion = {
+            "outcome": "success",
+            "answer": command.note or "",
+            "evidence": command.evidence,
+            "output": output,
+            "cost_usd": None,
+        }
+        try:
+            store.finish_attempt(bound["attempt_id"], **completion)
+        except ProtocolError as error:
+            if error.envelope["code"] not in PRESERVABLE_ACCEPTANCE_REFUSALS:
+                raise
+            # The exact commit was already adopted and intent committed. Preserve
+            # it as interrupted output; never leave an immutable bad intent running.
+            store.finish_attempt(
+                bound["attempt_id"],
+                **{**completion, "outcome": "interrupted", "error": str(error)},
+            )
+            raise ProtocolError(
+                error.envelope["code"],
+                error.envelope["reasons"][0],
+                fields=error.envelope["fields"],
+                allowed_fix="Exact output was preserved for operator reconciliation. Read current work; do not resubmit or replay execution.",
+                next_request={
+                    "tool": "tandem_work",
+                    "arguments": {
+                        "request": {"action": "get", "work_id": bound["work_id"]}
+                    },
+                },
+            ) from error
         result = store.perform(
             {"action": "get", "work_id": bound["work_id"]}, actor=actor
         )
     action_token = result.get("claim", {}).get("token") or token
-    for card in result.get("items", [result]):
-        card["next_actions"] = store.next_actions(
-            card, actor=actor, attempt_token=action_token, claims=claims, origin=origin
-        )
+    if not options.section or options.section == "next_actions":
+        for card in result.get("items", [result]):
+            card["next_actions"] = store.next_actions(
+                card,
+                actor=actor,
+                attempt_token=action_token,
+                claims=claims,
+                origin=origin,
+            )
     result["participant"] = actor
     if bound:
         result["bound_attempt"] = {
@@ -248,6 +288,7 @@ def perform_work(
             section=options.section,
             cursor=options.cursor,
             attempt_token=token,
+            step_id=command.step_id or (bound or {}).get("step_id"),
         )
     if options.cursor:
         return {
@@ -263,15 +304,15 @@ def perform_work(
             limit=options.limit,
         )
     if options.format == "markdown" and command.action == "get" and "plan" in result:
-        return {
-            "markdown": store.report_markdown(
-                result,
-                actor=actor,
-                attempt_token=token,
-                usage=store.work_usage(result["work_id"]),
-                identity=result.get("runtime_identity") or runtime_identity(),
-            )
-        }
+        markdown = store.report_markdown(
+            result,
+            actor=actor,
+            attempt_token=token,
+            usage=store.work_usage(result["work_id"]),
+            identity=result.get("runtime_identity") or runtime_identity(),
+        )
+        if len(json.dumps({"markdown": markdown}).encode("utf-8")) <= 12000:
+            return {"markdown": markdown}
     return present_work(
         result,
         actor=actor,

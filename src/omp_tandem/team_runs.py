@@ -19,7 +19,7 @@ from .execution import resolve_execution
 from .models import TaskContract
 from .runtime_models import ACTIVE
 from .team_models import TeamPlan, team_dependency_ready
-from .workspace import TaskAdmissionBusy
+from .workspace import TaskAdmissionBusy, WorkerSlots
 
 ACTIVE_TEAM = frozenset({"running", "waiting_input", "waiting_models", "cancelling"})
 _ACTIVE_SQL = "('running','waiting_input','waiting_models','cancelling')"
@@ -52,6 +52,7 @@ class TeamRuns:
         self, tasks, scope, start_task, read_task, cancel_task, selection, owner
     ):
         self.tasks, self.scope = tasks, scope
+        self.slots = WorkerSlots(scope.base)
         self.start_task, self.read_task, self.cancel_task = (
             start_task,
             read_task,
@@ -216,12 +217,16 @@ class TeamRuns:
             if validated.execution
             else None
         )
+        if (payload["execution"] or {}).get("purpose", "work") != "work":
+            raise ValueError("Team turns cannot use reserved coordination capacity")
         for step, item in zip(validated.steps, payload["steps"], strict=True):
             item["execution"] = (
                 step.execution.model_dump(exclude_unset=True, exclude_none=True)
                 if step.execution
                 else None
             )
+            if (item["execution"] or {}).get("purpose", "work") != "work":
+                raise ValueError("Team turns cannot use reserved coordination capacity")
             # Reserve bounded context for role advice and complete evidence pointers.
             role_size = len(_json(step.role or "development")) + 128
             if (
@@ -561,6 +566,9 @@ class TeamRuns:
                 "status": saved["status"],
                 "task_id": saved["task_id"],
                 "error": saved["error"],
+                "queue_reason": saved["error"]
+                if saved["status"] == "pending"
+                else None,
                 "assignment": assignment,
                 "selected_model": assignment.get("model") if assignment else None,
                 "selected_thinking": assignment.get("thinking") if assignment else None,
@@ -603,9 +611,16 @@ class TeamRuns:
                 final = result
             steps.append(item)
         status = observation["status"]
+        capacity = {
+            **self.slots.capacity(),
+            "purpose": "work",
+            "requested_parallel": plan["max_parallel"],
+            "effective_parallel": min(plan["max_parallel"], WorkerSlots.LIMITS["work"]),
+        }
         value = {
             "run_id": run["run_id"],
             "request_key": run["request_key"],
+            "capacity": capacity,
             "goal": plan["goal"],
             "status": status,
             "outcome": observation["outcome"],
@@ -981,6 +996,7 @@ class TeamRuns:
             status="reserved",
             task_id=task_id,
             dependency_json=_json(evidence),
+            error=None,
         )
         try:
             result = self.start_task(
@@ -995,9 +1011,15 @@ class TeamRuns:
             )
             if result["task_id"] != task_id:
                 raise ValueError("Dispatch did not consume the reserved task ID")
-        except TaskAdmissionBusy:
+        except TaskAdmissionBusy as exc:
             # The runtime guarantees this specific exception means no task was admitted.
-            self._step_update(run["run_id"], step["id"], status="pending", task_id=None)
+            self._step_update(
+                run["run_id"],
+                step["id"],
+                status="pending",
+                task_id=None,
+                error=str(exc),
+            )
             return False
         except Exception as exc:
             logger.exception("Team dispatch failed; uncertain work will not replay")
@@ -1146,15 +1168,32 @@ class TeamRuns:
         self._update(run["run_id"], status=status)
         busy = self._busy()
         for step in ready:
-            if active_count >= plan["max_parallel"]:
-                break
+            if active_count >= min(plan["max_parallel"], WorkerSlots.LIMITS["work"]):
+                self._step_update(
+                    run["run_id"],
+                    step["id"],
+                    error="Ordinary team parallel capacity is busy; the fourth slot is reserved for think-only coordination.",
+                )
+                continue
             if any(
                 self._conflicts(plan, step, other_plan, other)
                 for other_plan, other in busy
             ):
+                self._step_update(
+                    run["run_id"],
+                    step["id"],
+                    error="Declared workspace ownership conflicts with an active team step.",
+                )
                 continue
             if self._cancelled(run["run_id"]):
                 return
+            if self.slots.capacity()["work"]["available"] == 0:
+                self._step_update(
+                    run["run_id"],
+                    step["id"],
+                    error="Shared ordinary worker capacity is busy; waiting for owned lifecycle termination.",
+                )
+                continue
             if self._dispatch(run, plan, step, saved, selection):
                 active_count += 1
                 busy.append((plan, step))

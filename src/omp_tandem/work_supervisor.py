@@ -9,6 +9,7 @@ import threading
 import time
 from uuid import uuid4
 
+from .errors import PRESERVABLE_ACCEPTANCE_REFUSALS, ProtocolError
 from .review_check_state import has_review_runner
 from .review_checks import ReviewChecks
 from .work_adapters import ClaudeWorkAdapter, OmpWorkAdapter
@@ -101,15 +102,25 @@ class WorkSupervisor:
             result = {**result, "error": f"Output requires reconciliation: {exc}"}
         # poll() only returns after actual process/reader/native-thread teardown.
         self.store.confirm_stopped(attempt["attempt_id"])
-        self.store.finish_attempt(
-            attempt["attempt_id"],
-            outcome=outcome,
-            answer=result.get("answer", ""),
-            evidence=result.get("evidence", []),
-            output=output,
-            cost_usd=result.get("cost_usd"),
-            error=result.get("error"),
-        )
+        completion = {
+            "outcome": outcome,
+            "answer": result.get("answer", ""),
+            "evidence": result.get("evidence", []),
+            "output": output,
+            "cost_usd": result.get("cost_usd"),
+            "error": result.get("error"),
+        }
+        try:
+            self.store.finish_attempt(attempt["attempt_id"], **completion)
+        except ProtocolError as error:
+            if error.envelope["code"] not in PRESERVABLE_ACCEPTANCE_REFUSALS:
+                raise
+            # Success admission rolled back. Preserve the captured commit and
+            # observations as uncertain output, without executing/capturing again.
+            self.store.finish_attempt(
+                attempt["attempt_id"],
+                **{**completion, "outcome": "interrupted", "error": str(error)},
+            )
 
     def _run_attempt(self, attempt):
         identifier = attempt["attempt_id"]

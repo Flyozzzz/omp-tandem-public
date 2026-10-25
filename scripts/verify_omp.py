@@ -1120,8 +1120,6 @@ def exercise_focus_transport(executable, root, agent, report):
     """Production Bridge -> FocusEngine -> NativeWorker -> pinned OMP -> callbacks."""
     from unittest.mock import patch
 
-    from omp_rpc import RpcClient
-
     from omp_tandem import native_worker
     from omp_tandem.bridge import Bridge
     from omp_tandem.focus import FocusPolicy
@@ -1157,14 +1155,15 @@ def exercise_focus_transport(executable, root, agent, report):
     base_config = resources / "worker.yml"
     base_digest = digest(base_config)
     launches = []
+    native_client = native_worker._OwnedRpcClient
 
     def observe_client(*args, **kwargs):
-        # Observe the public constructor only; return the actual SDK client and
-        # leave registration, callbacks, configuration and prompting untouched.
+        # Observe production construction while retaining owned-stop confirmation
+        # and the real SDK registration, callbacks, configuration and prompting.
         launches.append(
             {"extra_args": list(kwargs["extra_args"]), "tools": kwargs.get("tools")}
         )
-        return RpcClient(*args, **kwargs)
+        return native_client(*args, **kwargs)
 
     with Provider() as provider, FocusDecisions() as decisions:
         provider.configure(agent)
@@ -1184,7 +1183,9 @@ def exercise_focus_transport(executable, root, agent, report):
         bridge.focus.endpoint = decisions.endpoint
         measurements = {}
         try:
-            with patch.object(native_worker, "RpcClient", side_effect=observe_client):
+            with patch.object(
+                native_worker, "_OwnedRpcClient", side_effect=observe_client
+            ):
                 for label, mode, consent in (
                     ("baseline", "analyze", False),
                     ("focused", "analyze", True),
@@ -2357,7 +2358,29 @@ async def installed_shared_flow(root, executable, report_path):
         result = await client.call_tool(
             "tandem_work", {"request": request, "view": "full", **presentation}
         )
-        return to_jsonable_python(result.data)
+        data = to_jsonable_python(result.data)
+        # Full views are bounded too. Recover only omitted sections in code,
+        # without another model turn or replaying the original mutation.
+        for name, value in data.items():
+            if not isinstance(value, dict) or value.get("paged") is not True:
+                continue
+            arguments = value["arguments"]
+            parts = []
+            while True:
+                page = to_jsonable_python(
+                    (await client.call_tool("tandem_work", arguments)).data
+                )
+                require(not page.get("error"), f"Work reader refused: {page}")
+                require(
+                    page["revision"] == data["revision"],
+                    "Work changed while reconstructing the observation",
+                )
+                parts.append(page["content"])
+                if page["next_cursor"] is None:
+                    break
+                arguments = {**arguments, "cursor": page["next_cursor"]}
+            data[name] = json.loads("".join(parts))
+        return data
 
     async def mutate(client, identifier, action, **values):
         current = await call(client, {"action": "get", "work_id": identifier})

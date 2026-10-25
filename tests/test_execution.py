@@ -40,6 +40,16 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(changed["effective"]["timeout_seconds"], 3600)
         self.assertEqual(changed["effective"]["thinking"], "high")
 
+    def test_coordination_purpose_is_turn_local_even_when_other_settings_inherit(self):
+        first = resolve_execution({"purpose": "coordination", "thinking": "low"})
+        inherited = resolve_execution(previous=first["effective"])
+        self.assertEqual(inherited["effective"]["purpose"], "work")
+        self.assertEqual(inherited["effective"]["thinking"], "low")
+        explicit = resolve_execution(
+            {"purpose": "coordination"}, previous=inherited["effective"]
+        )
+        self.assertEqual(explicit["effective"]["purpose"], "coordination")
+
     def test_unsupported_thinking_and_permission_options_are_rejected(self):
         with self.assertRaises(ValidationError):
             ExecutionOptions(thinking="ultra")

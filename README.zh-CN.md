@@ -95,15 +95,18 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 
 参见[精简视图、运行身份与恢复](docs/guide.zh-CN.md#compact-contracts)、[操作者解除阻塞](docs/guide.zh-CN.md#operator-unblock)。提示与通知不授予权限；解除阻塞不会恢复或授权工作。验收、应用和发布是各自独立的决定。
 
-最新已发布版本为 **[3.13.1](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.13.1)**。此补丁确保 MCP 关闭流程在返回前完成项目资源清理，修复 macOS 上关闭流程与临时目录删除之间的竞态。
+最新已发布版本为 **[3.14.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.14.0)**。有界结果恢复、协调专用槽位和可追溯的需求决策流程，让智能体工具协议更可预测。
 
 3.13.0 引入了默认长时有界等待、服务器强制执行的无人作答澄清处理、操作员清理被遗弃的受管 worktree，以及可选的[整份需求协议](docs/guide.zh-CN.md#carry-a-whole-brief)。详见[变更日志](CHANGELOG.md)。更新仓库不会重启活跃工作或授予新权限。
 
+**3.14.0 新增：**任务/审查的有界响应与完整 reader、专用只读协调槽位、共享工作的局部/全局验收证据覆盖、固定需求的持久决策、只读恢复收件箱，以及绑定原始来源的审查上下文建议。参见 [reader、收件箱与槽位](docs/guide.zh-CN.md#compact-contracts)、[工作覆盖](docs/guide.zh-CN.md#work-acceptance-coverage)、[决策流程](docs/guide.zh-CN.md#carry-a-whole-brief)。升级到状态 schema 2 前，先停止不兼容的 MCP 进程并备份。更新文件不会替换运行中的服务、重启工作或授予权限；旧兼容性报告仍是历史证据。
+
 <a id="team-mode"></a>
-## 团队模式（未发布）
+## 团队模式
 
 让协调者把开发、研究或审查拆分为团队计划。`tandem_team` 支持 2–16 个步骤，
-最多四个并行，并要求最终整合步骤。文件所有权冲突排队，保留部分结果，
+并要求最终整合步骤。自 3.14.0 起提供三个普通执行槽，第四个保留给明确的只读协调。
+文件所有权冲突排队，保留部分结果，
 取消涵盖正在运行和等待的工作；未知执行不会重放。工作位于当前项目，不是 OS 沙箱。
 已分配的工作者不再等待其他步骤的模型选择。只读研究的最终 `think` 步骤可显式使用
 `dependency_policy="reported_evidence"` 汇总结构化部分证据，但整体仍保持 `partial`。
@@ -130,9 +133,9 @@ Jev 是可选的结构化决策模型，不替代实际执行任务的模型。
 | 功能 | 用途 | 可用状态 |
 |---|---|---|
 | `tandem_audit` | 查找验收条件与报告证据之间的缺口 | 3.11.0 及更新版本 |
-| `tandem_recommend` | 在创建任务前，从明确提供的列表建议一个技能或审查方向 | `main`，未发布 |
-| `execution.routing` | 将任务启动时的模型建议与保持不变的实际模型对照 | `main`，**仅影子模式** |
-| `execution.focus` | 排序可选上下文、按需加载已获准的原生工具 schema、读取精确聚焦片段 | 本工作副本，未发布 |
+| `tandem_recommend` | 在创建任务前，从明确提供的列表建议一个技能或审查方向 | 3.12.0 及更新版本 |
+| `execution.routing` | 将任务启动时的模型建议与保持不变的实际模型对照 | 3.12.0 及更新版本，**仅影子模式** |
+| `execution.focus` | 排序可选上下文、按需加载已获准的原生工具 schema、读取精确聚焦片段 | 3.12.0 及更新版本 |
 
 审计与推荐支持无密钥精确预览。存在 OpenRouter 密钥时自动启用推荐，除非明确关闭；
 `--jev-recommend` 仍可显式启用。报告审计仍需 `--jev-audit`。

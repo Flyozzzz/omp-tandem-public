@@ -50,6 +50,10 @@ def initialize_database(scope: ProjectScope) -> Path:
                 "tasks",
                 "questions",
                 "artifacts",
+                "question_metadata",
+                "decision_policies",
+                "decision_preparations",
+                "decisions",
                 "project_contexts",
                 "channel_events",
                 "context_imports",
@@ -143,6 +147,11 @@ def initialize_database(scope: ProjectScope) -> Path:
             question TEXT NOT NULL, context TEXT NOT NULL, options_json TEXT NOT NULL,
             created REAL NOT NULL, deadline REAL NOT NULL, state TEXT NOT NULL,
             answer TEXT, answered REAL
+        )""")
+        db.execute("""CREATE TABLE IF NOT EXISTS question_metadata (
+            question_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            blocking_scope TEXT NOT NULL
         )""")
         db.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS one_pending_question ON questions(task_id) WHERE state='pending'"

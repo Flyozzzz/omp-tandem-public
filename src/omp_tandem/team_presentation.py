@@ -10,21 +10,16 @@ import time
 from contextlib import closing
 from uuid import UUID, uuid4
 
+from .presentation import MAX_READ_BYTES, MAX_RESPONSE_BYTES, json_bytes, wire_size
 from .team_runs import ACTIVE_TEAM
-
-MAX_RESPONSE_BYTES = 16384
-MAX_READ_BYTES = 8192
 
 
 def _bytes(value):
-    return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    return json_bytes(value)
 
 
 def _size(value):
-    # ASCII escaping is an upper bound even for transports emitting literal UTF-8.
-    return len(json.dumps(value, ensure_ascii=True).encode("utf-8"))
+    return wire_size(value)
 
 
 def _request(run_id, section, step_id=None):
@@ -79,6 +74,7 @@ class TeamPresentation:
                 "answer_artifact_id",
                 "outcome_artifact_id",
                 "pending_models",
+                "capacity",
                 "next_action",
             )
         }
@@ -146,6 +142,7 @@ class TeamPresentation:
                     "selected_thinking",
                     "answer_artifact_id",
                     "outcome_artifact_id",
+                    "queue_reason",
                 )
             }
             execution = step.get("execution") or {}

@@ -629,3 +629,28 @@ class ReviewCheckStateTests(unittest.TestCase):
         self.assertEqual(trusted["runs"], [])
         result = self.case.finish_review(attempt)
         self.assert_rejected_candidate(attempt, result)
+
+    def test_action_hints_share_trusted_settlement_and_comparison_gates(self):
+        self.declare()
+        attempt = self.reviewer()
+        self.case.report(attempt)
+
+        def hints():
+            return {
+                row["action"]: row
+                for row in self.store.next_actions(
+                    self.case.view(), actor="claude", attempt_token=attempt["token"]
+                )
+            }
+
+        before = hints()
+        self.assertFalse(before["compare"]["allowed"])
+        self.assertFalse(before["accept"]["allowed"])
+        self.assertEqual(before["accept"]["blocked_reason"], "trusted_checks_unsettled")
+        self.finished_check(attempt)
+        settled = hints()
+        self.assertTrue(settled["compare"]["allowed"])
+        self.assertFalse(settled["accept"]["allowed"])
+        self.compare(attempt)
+        self.assertTrue(hints()["accept"]["allowed"])
+        self.case.verdict(attempt, report=False)

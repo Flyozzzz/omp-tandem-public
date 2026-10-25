@@ -9,6 +9,7 @@ asserts the right behaviour at all is a judgement no schema can make, so
 
 from __future__ import annotations
 
+from .errors import ProtocolError
 from .models import (
     AcceptanceSet,
     CheckRun,
@@ -110,7 +111,7 @@ def _scope(value):
     return CheckScope.model_validate(value)
 
 
-def _target(plan: VerificationPlan, report_scope) -> dict:
+def _target(plan: VerificationPlan, report_scope, equivalent_scopes=()) -> dict:
     """Which bytes the evidence must be about, and how confidently we know them."""
     declared = [
         ("plan_declared", plan.coverage_scope if plan else None),
@@ -120,6 +121,13 @@ def _target(plan: VerificationPlan, report_scope) -> dict:
     if not present:
         return {"scope": None, "source": "unknown", "conflict": False}
     kinds = {(scope.kind, scope.digest) for _, scope in present}
+    equivalent = {(scope.kind, scope.digest) for scope in equivalent_scopes}
+    if len(kinds) > 1 and kinds <= equivalent:
+        return {
+            "scope": present[-1][1].model_dump(),
+            "source": "submitted_git_identity",
+            "conflict": False,
+        }
     if len(kinds) > 1:
         # Two claims about the same bytes that disagree are not a majority vote.
         return {
@@ -178,6 +186,7 @@ def project(
     *,
     task_id: str | None = None,
     report_scope=None,
+    equivalent_scopes=(),
 ) -> dict:
     """The whole coverage picture for one task, computed from declarations alone."""
     subject = {"kind": "task", "task_id": task_id}
@@ -207,7 +216,11 @@ def project(
     declarations = {check.id: check for check in (plan.checks if plan else [])}
     revisions = {name: check_revision(check) for name, check in declarations.items()}
     selected_ids = {check.id for check in selected}
-    target = _target(plan, report_scope) if plan else _target(None, report_scope)
+    equivalents = [_scope(scope) for scope in equivalent_scopes]
+    target = _target(plan, report_scope, equivalents)
+    applicable_scopes = {(scope.kind, scope.digest) for scope in equivalents}
+    if target["scope"]:
+        applicable_scopes.add((target["scope"]["kind"], target["scope"]["digest"]))
 
     declared_for, parents_for = {}, {}
     for check in plan.checks if plan else []:
@@ -285,10 +298,7 @@ def project(
             if target["scope"] is None or target["conflict"]:
                 row["unknown_target_run_ids"].append(run.run_id)
                 continue
-            if (run.scope.kind, run.scope.digest) != (
-                target["scope"]["kind"],
-                target["scope"]["digest"],
-            ):
+            if (run.scope.kind, run.scope.digest) not in applicable_scopes:
                 row["other_bytes_run_ids"].append(run.run_id)
                 continue
             if declared_check.scope is not None and not run_applies(
@@ -421,8 +431,11 @@ def enforce_coverage(declared, plan, report) -> None:
     if coverage["admission"] == "eligible":
         return
     if coverage["assessment"] != "assessed":
-        raise ValueError(
-            "require_current_evidence needs an acceptance_set; declare one or use report_only"
+        raise ProtocolError(
+            "acceptance_set_required",
+            "require_current_evidence needs an acceptance_set; declare one or use report_only",
+            fields=["acceptance_set"],
+            allowed_fix="Declare the complete denominator or explicitly choose report_only; do not infer missing criteria.",
         )
     open_units = [
         unit["ref"]["criterion_id"]
@@ -430,7 +443,10 @@ def enforce_coverage(declared, plan, report) -> None:
         for unit in coverage["units"]
         if not unit["current_passing_run_ids"] or unit["current_failed_run_ids"]
     ]
-    raise ValueError(
+    raise ProtocolError(
+        "acceptance_evidence_required",
         "Success needs applicable current evidence for every declared unit; "
-        f"still open: {sorted(open_units)[:20]}"
+        f"still open: {sorted(open_units)[:20]}",
+        fields=["check_runs"],
+        allowed_fix="Read complete acceptance coverage; retain failures and record applicable observations, or finish blocked/partial.",
     )

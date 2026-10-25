@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**软件包 3.13.1** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**软件包 3.14.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -372,6 +372,18 @@ claim/submit 要求**绑定的项目根本身是已有 HEAD 提交的 Git 仓库
 <a id="compact-contracts"></a>
 ### 精简契约、身份与关闭
 
+**以下能力自 3.14.0 起可用。** 使用前检查已加载 runtime。旧兼容性报告仅证明其中记录的版本，不证明当前运行中的服务器。
+
+任务/审查响应最多 16,384 字节 UTF-8 JSON，`details=true` 也受限。`readers[section]` 提供 `{tool,arguments}`；`truncated_fields`/`omitted_fields` 明示不完整内容。`tandem_read_result(target,identifier,section,offset_bytes=0,max_bytes=8192,expected_sha256=None)` 支持 task 的 `result|answer|report|contract` 和 review_run 的 `result|independent|comparison`。`answer` 是文本，其他节为规范 JSON。页面含 `encoding`、`format`、`sha256`、`total_bytes`、`offset_bytes`、`returned_bytes`、`content`、`next_offset_bytes`、`next_request`、`next_action`。同一工具的 `next_request`/`restart_request` 是直接关键字参数，不含 tool 包装；非零偏移必须附摘要。拼接全部内容后再解析 JSON。来源变化会返回 `status="digest_mismatch"`、无 content 和 `restart_request`；从头读，不混合版本。产物的 `offset`/`next_offset` 仍按 Unicode 字符计数，字节预算可能缩短页面。
+
+协调者专用的 `tandem_overview(limit=20,cursor=None)` 是只读发现，不是等待或修复。按字节限制的页面（limit 最大 100）返回 `scope_id`、`participant`、`items`、`next_cursor`、`next_request`、`read_only=true`、`replay_authorized=false`。条目包含 `kind=task|team|review_run|review|work`、`id`、`status`、`category=pending_question|operator_required_recovery|active_work|ready_result`、`next_observation:{tool,arguments}`、`saved_evidence` 读取描述，以及必要的 question/recovery/revision。项目、参与者与阶段隔离不变。遵循精确描述；这是实时 keyset 游标，若需发现插入到前面的新条目，应从头读取。读取不会领取、取消、授权、reconcile 或恢复运行。
+
+只读咨询显式使用 `mode="think", execution={"purpose":"coordination"}`。默认 `purpose="work"`，续接时**不继承**。共享状态基目录内跨进程/项目的内核租约池有三个普通槽位及一个保留协调槽。协调不能声明 owned_files、写入/shell，不能成为受管尝试或团队步骤，也不能使用 `tandem_work`；不增加权限。等待问题仍占普通槽。团队可接受 `max_parallel<=4`，实际最多运行三个普通轮次；`capacity` 显示 requested/effective parallelism，排队步骤显示 `queue_reason`。Preflight 只是观察，不预留；没有第五个槽或隐藏重试。
+
+`tandem_review(action="prepare",request=...)` 返回 `context_candidates:[{path,reasons:[{kind,related_path}],source_identity}]`。原因包括 `import`、`reverse_importer`、`test_name_match`。Python AST 与 JS/TS 词法本地关系仅是提示，不证明语义完整性。`context_scan` 明示来源身份、文件/字节预算、遗漏、未解析关系及 limitations；`complete=false`、`semantic_completeness="not_established"`。当前上限为 128 个文件、合计 1 MiB、每文件 64 KiB、20 个候选及 unresolved 详情。索引/提交来源不会替换成实时字节；非 Git 仅扫描明确选中的文件。检查建议后，明确把所需路径加入新请求/快照；prepare 不自动扩权、纳入上下文或重新捕获。
+
+协议拒绝给出 `code`、`fields`、`reasons`、`allowed_fix`、`retryable` 及可用时的 `next_request`。补充精确缺失标识/声明、重读陈旧状态或采用指定修复；提示与 retry 标志不是重放未知影响的许可。跨工具描述统一为 `{tool,arguments}`。新的 work-evidence/问题关闭语义要求 state schema 2 / work protocol `work-v3-evidence`；旧的 guarded binary 不应访问升级后的状态。刻意升级前先停止/检查进程并备份；迁移不恢复 grants 或重启工作。
+
 展示参数与 `request` 同级：`view="summary"|"plan"|"step"|"full"`、`format="json"|"markdown"`、`limit`、`cursor`、`include_snapshots`。选择步骤时设置 `request.step_id`。默认 summary 不重复 Markdown；历史分页且默认不含快照。按返回的续页信息读取；游标绑定任务、修订、区段与可见性，`cursor_stale` 要求重新读取。`next_actions` 展示前提与标识，不授予权限，也不允许自动重试。CAS 和 `operation_id` 含义不变。
 
 每个结果附带 `runtime_identity`：已加载包版本、安装来源、经过 `RECORD` 验证的构建、工作副本观察值及已注册 schema 摘要。editable 或无法验证的构建保持 `unknown`；更新工作副本不会更新运行中的服务。请求／有效／观察到的模型、手动／受管模式、grant 和披露来源分别记录，不暗中调用模型。
@@ -401,7 +413,7 @@ python -m omp_tandem.work_daemon --project-root /project --state-dir /state succ
 
 ### 创建计划：两个并行模块，一个最终集成
 
-以下都是 `tandem_work` 的参数 JSON，不是已经运行的案例。请替换教学路径、需求和证据。`plan` 的准确字段为 `title`、`goal`、`constraints`、`context`、`acceptance`、`steps`；每个步骤包含下例所示的八个字段。不接受额外字段。`owned_files` 必须是项目内精确相对路径，不能使用目录通配、绝对路径或 `..`。
+以下都是 `tandem_work` 的参数 JSON，不是已经运行的案例。请替换教学路径、需求和证据。示例展示 `plan` 的基础字段 `title`、`goal`、`constraints`、`context`、`acceptance`、`steps`；可选的 `acceptance_set`、`verification` 及步骤扩展字段参见当前工具 schema 和验收证据章节。不接受 schema 外的字段。`owned_files` 必须是项目内精确相对路径，不能使用目录通配、绝对路径或 `..`。
 
 ```json
 {
@@ -859,7 +871,14 @@ revision 是集合的内容，不是你挑选的版本号：修改标准文本�
 
 **它从不主张什么。** 该投影统计的是声明与运行。它并不确立：被映射的检查断言了正确的行为、声明的义务穷尽了该标准、或一次通过的运行意味着需求已满足——`semantic_sufficiency` 与 `acceptance` 在任何响应中都保持 `not_assessed`，即使每个单元都有当前通过。参与者可以声明一个其测试并不遵守的映射，任何 schema 都发现不了；投影让这条主张变得显式、可供审查——这与为它背书是两回事。
 
-声明式 `acceptance_set` 覆盖仍仅作用于任务。共享步骤以 `acceptance_coverage_unsupported_surface` 拒绝这些映射，绑定任务报告 `assessment: "unsupported_surface"`，不会把自己的集合套用到另一计划。监督器执行会记录已声明检查的真实运行，但不为工作卡片增加 acceptance-set 映射，也不证明测试语义充分。
+<a id="work-acceptance-coverage"></a>
+**共享工作覆盖（自 3.14.0）。** `WorkStep.acceptance_set` 精确重复步骤 `acceptance`，`WorkPlan.acceptance_set` 精确重复计划的 `acceptance`，使用相同 `AcceptanceSet` 标识、obligations 与内容 revision。步骤 `verification`/`review_verification` 以及全局 `WorkPlan.verification` 沿用 `VerificationPlan`：check 的 `acceptance_refs`、`acceptance_coverage="report_only"|"require_current_evidence"` 与 `coverage_scope`。不引入第二份清单，也不拿 native 任务分母替换计划。
+
+`WorkCommand.check_runs` 仅供 `submit|report|accept|reject` 添加只追加的 `CheckRun`；参与者不能声明 `machine_observed`。保留精确标准/check 标识、计划修订、提交 commit 与 environment。局部 implementation/review 和全局义务分别评估；全局目标是最终集成提交，不是已接受步骤数。必需的 supervisor checks 必须在真实 grant 下完成；此路径的验收需要比较阶段。`next_actions` 反映实际 gates。
+
+工作卡片的 `acceptance_coverage` 包含 `subject:{kind:"work",work_id,plan_revision}`、`global`、`steps:[{step_id,implementation,review}]`、`history:[{attempt_id,step_id,plan_revision,current_plan,current_submission,runs}]`、`stale_plan_attempt_ids`。`submitted_identity` 绑定 `submission_id`、`commit`、`tree_hash`、`plan_revision`；精确捕获的树可证明与提交 commit 相同的字节，无需在捕获前猜测未来 commit。用 `section="acceptance_coverage"` 读取完整历史，仍遵守独立阶段披露限制。全部视图（含 `full|plan|step`）可能分页；完整步骤通过 `section="step"`、`request.step_id` 和返回的 character/digest cursor 恢复。未知、未映射、陈旧、失败证据保持显式。默认 report-only；strict gate 约束 native stage report、监督器捕获输出、独立验收和审查最终确认，但不阻止诚实的 reject/partial/blocked。`semantic_sufficiency` 与 `acceptance` 保持 `not_assessed`：覆盖不是验收或应用。
+
+行动描述使用 `tool="tandem_work"`、`arguments={request:{action,work_id,step_id?,expected_revision,submission_id?}}`，并以 `required_fields` 指出缺少的语义输入。这是当前前提，不是完整请求或授权；必须提供真实证据/决定，而非重放提示。
 
 ### 固定胶囊，而非每轮重复完整快照
 
@@ -1085,13 +1104,13 @@ OMP 会核对实际模型及其支持的思考等级。模型不支持所请求�
 |---|---|
 | `run_id`、`review_id`、`task_id` | 场景、不可变快照、当前／最后阶段任务的 ID；捕获阶段可能没有任务 ID |
 | `status`、`phase`、`outcome`、`error` | 运行状态、`capture`／`independent`／`comparison` 阶段、结构化判定和错误；`completed` 本身不证明 `success`，更不证明代码正确 |
-| `independent`、`comparison` | 完整阶段结果或 `null`；读取各自的 **`answer`** 与报告，不只读 `summary`。场景返回完整阶段回答，无需把摘要当成答案或重新发起审查来获取全文 |
+| `independent`、`comparison` | 有界阶段投影或 `null`；通过返回的 `readers` 和 `tandem_read_result` 读取完整 **`answer`** 与报告，不只读 `summary`。完整答案已保存，不必重新审查来获取全文 |
 | `question`、`findings` | 当前待答问题，以及按 `independent`／`comparison` 分组的发现；仍需协调者判断证据与有效性 |
 | `applicability` | 所选来源及观察时刻的快照适用性，不是整个环境、后续工作区或生产系统的正确性保证 |
 | `created`、`deadline`、`elapsed_seconds` | 受理时间、总截止时间和**本次受理运行**的耗时；不包括受理前协调者的准备，也不是整个用户工作流时钟 |
 | `usage` | `scope="OMP worker turns only; excludes coordinator usage"`，`peer` 汇总阶段用量，`coordinator=null`、`total_cost=null`；未知不是零 |
 
-运行中的 `starting`／`running` 响应只返回紧凑的 `stage_statuses` 和 `full_result_pending`，避免重复发送长答案。终态结果才包含完整 `independent`／`comparison`；`waiting_input` 会提供问题及相关已完成阶段，便于回答。
+运行中的 `starting`／`running` 响应返回紧凑的 `stage_statuses` 和 `full_result_pending`，避免重复长答案。终态结果展示 `independent`／`comparison` 投影及完整数据 reader；`waiting_input` 提供问题和相关阶段信息。截断/省略会明确标记，不把预览当全文。
 
 代码负责保存首次完整回答、执行阶段门槛和轮数／预算限制、汇总结果并观察适用性；协调者负责阅读原文、保留分歧、选择方案或有区分力的检查。场景不会代替协调者整合，也不会把双方一致当作真相。后续实际实现仍需独立授权。
 
@@ -1424,13 +1443,13 @@ Claude 的额外目录授权会在每个新轮次开始前通过 `roots/list` �
 此机制仅限于同一个状态基目录内的本地共享。传递包会一直保留到操作者删除，没有自动过期机制。应将包内容和传递 ID 视为敏感信息，而不是公开下载链接。
 
 <a id="team-mode"></a>
-## 交互式团队模式（未发布）
+## 交互式团队模式
 
 `tandem_team` 执行开发、研究、写作或审查计划，不替代 `tandem_work` 的版本化验收、
 worktree 或独立后台授权。检查已加载 runtime 的 `tandem_scope.team`；此功能自 3.12.0 起提供，3.11.0 不含。
 
 计划包含 2–16 个使用现有 `TaskContract` 的步骤；依赖必须无环，并且唯一最终整合步骤
-直接或间接依赖所有其他步骤。`max_parallel` 默认 3、最多 4 个共享 OMP 槽位。
+直接或间接依赖所有其他步骤。`max_parallel` 默认 3、最多可设 4；自 3.14.0 起最多启动三个普通轮次，第四槽保留给协调。
 `budget_seconds=1800` 覆盖分类、启动、执行及等待决策；它是时间上限，不是硬性账单上限。
 
 模型池**仅保留 OMP `get_available_models` 返回的 `openai-codex` 订阅模型**。
@@ -1497,7 +1516,7 @@ Jev 的 confidence 与所选概率都需至少 0.7；这些不是校准后的正
 
 结果区分带精确 `candidate_id` 的 `candidate`、`none` 和 `unclear`；提供商故障属于单独的不可用状态。ID 与模型概率不证明技能存在或代码正确，不触发执行、权限变更、丢弃必需检查或验收。建议不得进入独立快照审查阶段。合成协议测试没有测量真实 Jev 的推荐准确率。[完整契约与示例](guide.md#optional-jev-candidate-recommendation-unreleased)。
 
-**任务启动时的影子模型路由（未发布）** 接入普通新任务启动。操作者通过 `--jev-routing-policy /absolute/policy.json` 或 `OMP_TANDEM_JEV_ROUTING_POLICY` 提供仅 `shadow` 模式的策略，包含 2–3 个精确唯一 `provider/model`、描述和明确能力声明。实际模型不切换；显式任务/进程模型、所有续接、快照审查及受管尝试均绕过路由。
+**任务启动时的影子模型路由（自 3.12.0）** 接入普通新任务启动。操作者通过 `--jev-routing-policy /absolute/policy.json` 或 `OMP_TANDEM_JEV_ROUTING_POLICY` 提供仅 `shadow` 模式的策略，包含 2–3 个精确唯一 `provider/model`、描述和明确能力声明。实际模型不切换；显式任务/进程模型、所有续接、快照审查及受管尝试均绕过路由。
 
 导出同时要求策略 `allow_external_summary=true`、密钥，以及 `execution.routing` 中明确批准的 `summary`（最多 4000 字符）与 `allow_external_summary=true`。另需正数 `input_token_estimate` / `output_token_estimate`，输入 `input_modalities` 默认 `["text"]`，可选 `max_candidate_cost_usd`。不从提示、历史或文件自动生成摘要。这些只约束假设候选，不保证实际任务的费用、隐私或上下文。策略/输入与任务原子保存；preflight 不启动探测、请求或保留尝试。
 
@@ -1505,7 +1524,7 @@ Jev 的 confidence 与所选概率都需至少 0.7；这些不是校准后的正
 
 `execution.routing` 将建议、原始模型、原因、耗时及 Jev 用量与实际执行区分。工作预算默认 10 秒、最多 30 秒且受任务剩余时间约束；异常 OS 停止没有严格墙钟保证。`stop_returned` 仅表示 SDK 返回，不证明所有后代退出。普通路由故障保留原选择；任务取消/总期限禁止后续提示，teardown 错误不伪装成健康回退。未知请求不重放，建议不进入提示或验收。真实准确率与节约尚未测量。[策略示例与完整契约](guide.md#task-start-shadow-model-routing-unreleased)。
 
-**Jev 上下文、工具与输出聚焦（未发布）** 单独通过 `--jev-focus-policy PATH` / `OMP_TANDEM_JEV_FOCUS_POLICY`、OpenRouter 密钥、策略允许的数据类别以及当前任务明确提供的 `execution.focus.goal`、`allow_external:true`、`surfaces` 启用。同意不随续接继承；审查与受管尝试绕过该功能。Preflight 和结果读取不调用 Jev。
+**Jev 上下文、工具与输出聚焦（自 3.12.0）** 单独通过 `--jev-focus-policy PATH` / `OMP_TANDEM_JEV_FOCUS_POLICY`、OpenRouter 密钥、策略允许的数据类别以及当前任务明确提供的 `execution.focus.goal`、`allow_external:true`、`surfaces` 启用。同意不随续接继承；审查与受管尝试绕过该功能。Preflight 和结果读取不调用 Jev。
 
 `context` 只补充固定快照中的可选材料，不改变必需规则、当前决定、显式选择与验收条件。`tools` 仅改变已获准的原生 `tandem_work` / `tandem_publish_artifact` 的展示方式：通过 `read xd://TOOL` 获取完整 schema，再向同一路径 `write` JSON 调用；这不授予文件写权限，也不选择外部 Claude/Codex 工具。`outputs` 在绑定任务的产物／上下文 reader 中提供显式 `view:"focused"`；普通协调者产物 reader 保持 raw。
 
@@ -1516,13 +1535,16 @@ Jev 的 confidence 与所选概率都需至少 0.7；这些不是校准后的正
 | 工具 | 主要输入 | 用途 |
 |---|---|---|
 | `tandem_scope` | 无 | 检查不可变的项目边界和启动迁移结果 |
-| `tandem_team`（未发布） | `action=models/start/status/list/assign/cancel/read`、`plan`、`run_id`、`assignments`、分节/游标 | 有界团队响应、订阅模型分配及完整证据恢复 |
+| `tandem_team` | `action=models/start/status/list/assign/cancel/read`、`plan`、`run_id`、`assignments`、分节/游标 | 有界团队响应、订阅模型分配及完整证据恢复 |
 | `tandem_work` | `request: WorkCommand`、`wait_seconds=0..1200` | [共享计划、CAS 更新、领取、提交与独立验收](#shared-work)；自主授权及不确定执行恢复仅限操作者 CLI |
 | `tandem_start` | `cwd`、`prompt` 或 `contract`、`mode`、超时、execution/review/context、`preflight` | 检查准入或显式启动任务 |
 | `tandem_continue` | `conversation_id`、`prompt` 或 `contract`、超时、execution/context、`continuation`、`handoff`、`preflight` | 继续历史或显式新建有限上下文 |
 | `tandem_result` | `task_id`、`wait_seconds`、`details` | 读取回答、结果判定、问题、产物和诊断信息 |
+| `tandem_read_result`（自 3.14.0） | `target`、`identifier`、`section`、`offset_bytes`、`max_bytes`、`expected_sha256` | 摘要绑定的完整任务/审查数据 |
+| `tandem_overview`（自 3.14.0） | `limit`、`cursor` | 当前项目的只读行动收件箱 |
+| `tandem_decision`（自 3.14.0） | `request`，`action=policy/prepare/record/reply/list/read` | 固定需求、决策依据与单独回复 |
 | `tandem_audit` | `task_id`、`offset=0`、`limit=5`（1–10） | 显式启用的 Jev 证据声明审计；仅提供建议，不是验证或验收 |
-| `tandem_recommend`（未发布） | `request`、`preview=true`、`expected_input_sha256` | 对明确提供的候选项给出建议；不发现技能、不执行 |
+| `tandem_recommend` | `request`、`preview=true`、`expected_input_sha256` | 对明确提供的候选项给出建议；不发现技能、不执行 |
 | `tandem_wait` | `task_ids`、`wait_seconds` | 等待任意选定结果／问题 |
 | `tandem_list` | `limit` | 列出本命名空间中的近期任务，不包含大段正文 |
 | `tandem_reply` | `task_id`、`question_id`、`answer` | 回答准确匹配的待处理问题 |
@@ -1534,7 +1556,7 @@ Jev 的 confidence 与所选概率都需至少 0.7；这些不是校准后的正
 | `tandem_export_context` | `context_id`、`target_project_root` | 向特定接收方提供快照 |
 | `tandem_import_context` | `transfer_id`、`expected_revision` | 接收定向发送的快照 |
 | `tandem_channel` | `action=status/probe/ack/pending/recover`、相关 ID／令牌、`include_previous`、`limit` | 管理可选投递机制 |
-| `tandem_review` | `action=create/read/assess`、`request` 或 `review_id`、`section`、`path`、`offset`、`limit`、`reveal_author` | 保存／分页读取审查包，观察快照适用性 |
+| `tandem_review` | `action=prepare/create/read/assess`、`request` 或 `review_id`、`section`、`path`、`offset`、`limit`、`reveal_author` | 准备、保存/分页读取审查包，观察快照适用性 |
 | `tandem_review_run` | `action=start/status/reply/cancel`、`request_key`、`request`、`run_id`、`execution`、`budget_seconds`、`compare`、`wait_seconds`、`question_id`、`answer` | 一次捕获，独立审查后按条件比较一次；完整结果、澄清与取消 |
 | `tandem_findings` | `action=create/update/get/list`、对话／审查／问题 ID、`finding`、`change`、`expected_revision`、`number`、`task_id`、分页 | 管理只追加的问题历史 |
 | `tandem_diagnose` | `live`、`task_id`、`expected_project`、`wait_seconds`、`timeout_seconds` | 当前客户端本地或显式在线检查 |
@@ -1549,7 +1571,7 @@ OMP 也可使用同一个 `tandem_work` 契约，参与者由服务端绑定；�
 
 `task_id` 标识一个轮次；`conversation_id` 标识该轮次所属的持久 OMP 对话。`question_id`、`artifact_id` 和 `context_id` 分别标识具体问题、不可变材料版本和产品快照。
 
-高层场景另用 `run_id` 标识一次最多两轮的编排；通过 `tandem_review_run(action=status)` 获取完整阶段结果。下面 `details` 与回答截断说明针对底层 `tandem_result`，不要误套到已经返回完整阶段答案的场景 API。
+高层场景用 `run_id` 标识最多两轮的编排，通过 `tandem_review_run(action="status")` 观察同一运行。任务与场景响应均有大小上限；完整阶段数据通过返回的 `readers` 和 `tandem_read_result` 恢复，而非重新启动审查。
 
 | 状态 | 含义 |
 |---|---|
@@ -1564,7 +1586,7 @@ OMP 也可使用同一个 `tandem_work` 契约，参与者由服务端绑定；�
 
 `completed` 不能证明 `success`。结果判定为 `success`、`partial` 或 `blocked`；历史上的非结构化回复可能没有经过评估的结果判定。
 
-请阅读 **`answer`**，而不只是 `summary`。默认响应较长时，会提供 `answer_truncated` 和 `answer_artifact_id`。`details=true` 包含完整回答／报告、契约、当前目标，以及 `diagnostics`，例如原生会话路径和实际生效的限制。
+请阅读 **`answer`**，而不只是 `summary`。`answer_truncated` 和 `answer_artifact_id` 保留完整文本入口；`readers` 通过 `tandem_read_result` 恢复完整 answer/report/contract/result。`details=true` 增加诊断投影但仍受大小限制，不是绕过分页的方式。按精确续页读取，并在认定证据完整前检查 omitted fields。
 
 缺少 `tandem_finish` 时，不会因为普通文本听起来很自信就被视为成功。保留的文本和 `provisional_artifacts` 仍可读取。重跑整个任务前，请先审阅这些内容。
 
@@ -1632,29 +1654,29 @@ OMP 也可使用同一个 `tandem_work` 契约，参与者由服务端绑定；�
 <a id="carry-a-whole-brief"></a>
 ## 把整份需求做到底，不在每个问题前停下
 
-默认情况下，协调方无法依据已确立事实回答的问题会交给你。当你在键盘前时这是对的；当你交出整份需求书后离开时则不是：运行会停在第一个无人事先声明的决定上。
+基于指令的协议在 3.13.0 发布。**以下持久化 `tandem_decision` 工作流自 3.14.0 起可用。** 默认未知决定仍交给用户；必须明确启用。需求文字、引文和模型置信度都不是授权。
 
-下面的协议由你开口才启用，在你要求之前不产生任何成本，并且它是这对搭档遵守的规则，而不是服务器强制执行的检查。
+以下示例是协调者专用 `tandem_decision(request=...)` 的 `request` 对象；请替换为实际观察到的标识。
 
-**如何启用。** 说明需求要做到底，并钉住需求本身：一份 `tandem_project_context` 快照、一个已发布的产物，或一个确切的提交。协调方会说明它钉住了哪一个。没有被钉住的来源就没有自动回答——读取此刻工作树里恰好存在的内容不是决定来源，缺少它会终止该协议，而不是放宽它。
+1. 为任务固定一份不可变策略：
 
-**这对搭档可以自行了结什么。** 只有那些答案可从被钉住的需求推出、且后果可逆并处于约定范围之内的问题。界线依据的是事后可核对的依据，而不是问题看起来有多重要。以下始终回到你这里：
+   ```json
+   {"action":"policy","task_id":"<task UUID>","policy":{"source":{"kind":"artifact","artifact_id":"<artifact UUID>"},"reversible":true,"in_scope":true,"allowed_kinds":["information","technical_choice"]}}
+   ```
 
-| 仍归你 | 原因 |
-|---|---|
-| 工作范围 | 需求书的沉默不能被读作同意 |
-| 不可逆或对外的后果 | 删除、发布，以及任何离开本机的动作 |
-| 权限与凭据 | 这对搭档不为自己提权 |
-| 花费 | 支出由你批准 |
-| 需求书内部的矛盾 | 哪一半成立只有作者知道 |
+   其他来源为 `{"kind":"context","context_id":"<snapshot UUID>"}` 或 `{"kind":"commit_document","commit":"<完整小写 40/64 位十六进制 commit>","path":"docs/brief.md"}`。文档须是安全的项目相对普通文件，不允许符号链接逃逸或任意实时路径读取。产物与提交文档沿用 4 MiB UTF-8 产物上限；产品快照仍有自己的 64,000 字节上限。策略固定来源身份与内容；没有来源就没有自动决定。
+2. 对实际待处理问题调用 `{"action":"prepare","task_id":"...","question_id":"...","policy_id":"..."}`。返回 `preparation_id`、`deadline`、`launch_before`、`consultation:{tool:"tandem_start",arguments:{...}}`，但不会启动。在期限前明确执行这一精确 think/coordination 请求一次，不加入自己的预设答案。不得重放未知启动，也不能重启以延长问题期限。
+3. 阅读已完成咨询并亲自核对固定来源引文。咨询最终 `answer` 必须是不可变数据包所给 `DecisionAssessment` schema 的精确 JSON。裁定为 `derivable|not_established|contradiction|approval_required`。`{"action":"record","preparation_id":"...","consultation_task_id":"..."}` 读取真实的完成答案，验证咨询、来源、当前问题身份及精确引文；调用者不能另交 verdict/answer。不可变依据在**回复前**保存。真实引文仍不能证明推导正确。
+4. 单独调用 `{"action":"reply","decision_id":"..."}`。记录普通回复是否被接受；精确重复保留身份，拒绝或迟到不等于关闭问题。Derivable 仅适用于获准的局部 information/technical_choice，且有引文、reversible/in_scope、无风险类别。`not_established` 仍未解决，只能以 blocked/partial 结束；contradiction/approval 要交给操作者，独立审查不能走此路径。
+5. `{"action":"list","limit":20,"cursor":0}` 返回有界收件箱，可附 `task_id`。用 `{"action":"read","target":"decision","identifier":"..."}` 读取完整记录；target 为 `policy|preparation|decision|question`，支持 `offset_bytes`、`max_bytes<=8192`、`expected_sha256` 与精确 `next_request`。读完所需页面，最后一次性报告决定、依据、假设及仍待用户回答的问题。
 
-**遇到问题时会发生什么。** 协调方针对被钉住的需求发起一次只读咨询，携带工作方的问题而**不**携带自己拟定的答案，并要求给出唯一裁定：可推出、未确立或矛盾，并引用确切的章节。随后它自己到被钉住的来源中读这些章节：真实的引文仍可能支撑错误的结论，而引文不等于许可。回答之前它会发布依据——任务与问题标识、被钉住需求的版本、引用章节、得出的结论——然后才回答。回答是否被接受单独记录：被拒绝的 `tandem_reply` 不算已了结的问题。
+`reader` 使用 `{tool,arguments}`。`next_request` 是完整的 MCP 参数，包含外层 `request` 对象；原样传给 `tandem_decision`。收件箱游标是继续读取的键，而非自行累加的偏移；回答前一问题不会跳过后续问题。分页接受 `max_bytes=4..8192`，非零偏移必须提供上一页的摘要，每页遵守统一 JSON 响应上限。
 
-当什么都推不出来时，工作方会被告知没有决定；它保存已完成的部分，并以 `blocked` 或 `partial` 结束，在共享工作中阻塞标记落在该步骤自身而非整张卡片。过期的问题不会事后作答，也不会为了再争取一次截止期而重启任务。
+咨询完成评估时调用 `tandem_finish(outcome="success", answer=<序列化 DecisionAssessment JSON>)`，即使裁定不可推出；这只是评估完成，不是原任务成功。Assessment 包含 `preparation_id`、`verdict`、`answer`、`rationale`、`reversible`、`in_scope`、`risks`、`citations:[{source_sha256,start_bytes,end_bytes,quote}]`。遵守数据包 schema，不编造偏移或引文。未确立的关闭返回 `accepted=false, closed_unresolved=true`；过期/陈旧回复返回持久的 `accepted=false, closed_unresolved=false, next_action="operator"`。精确重复返回该拒绝，不是再次尝试回答。
 
-**最后你得到什么。** 一份清单，而不是半途停下：决定了什么、依据是什么、做了哪些假设、还有什么留给你。已发布的依据让每一个自动决定都能在事后被核对。
+工作者 `tandem_ask` 支持 `kind="information"|"technical_choice"|"approval"|"contradiction"`（默认 information）及 `blocking_scope="task"|"shared"`（默认 task）。共享风险必须保持共享，不得降为单步骤阻塞。范围、费用、权限/凭据、对外或不可逆影响始终由用户决定。过期或未解决问题不能支持 success。
 
-**该协议不做什么。** 不保证需求被正确理解：这是这对搭档的行为规则，而不是服务器端的决定准入控制。不在客户端关闭后继续运行，不回答脱离式守护进程工作方的问题，不授予新权限，不重新规划，不自行恢复被搁置的步骤，也不承诺整份需求都会被完成。
+流程不修改 work 卡片阻塞、不授予权限、不重新规划，也不自动启动/恢复。它不维持客户端关闭后的 owner-bound 运行，不保证正确理解需求。独立审查缺上下文仍需新快照，不能输入自由文本决定。报告、决定、验证和验收是不同事实。
 
 <a id="polling-channels-and-webhooks"></a>
 ## 轮询、Channels 与 Webhook
@@ -1809,7 +1831,7 @@ uv run --no-project --python '>=3.12' python -I \
 | 解析后的任务输入 | 最多 200,000 UTF-8 字节，包含上下文 |
 | 产品快照 | 最多 64,000 UTF-8 字节、50 条规则、100 项决策 |
 | 产物 | 最多 4 MiB UTF-8；纯文本、Markdown 或 JSON |
-| 产物分页 | 默认 16,000 个字符，最多 50,000 |
+| 产物分页 | 请求上限默认 16,000 个字符、最多 50,000；实际每页同时限制为 8,192 UTF-8 内容字节和 16,384 JSON 字节 |
 | 审查包 | 最多 256 个文件、每文件 4 MiB、已保存材料总计 16 MiB；不静默截断 |
 | 审查分页 | 默认 16,000 个字符，最多 50,000；遵循 `next_offset` |
 | 问题列表／历史分页 | 默认 50 条，最多 200 |
@@ -1977,7 +1999,7 @@ uv build --wheel
 <a id="real-omp-compatibility"></a>
 ### 真实 OMP 兼容性证据
 
-3.3.0 的精确验证组合为**官方 OMP 18.1.13** 和 Python RPC SDK 提交 **`daf07999c2fee9b22edc7bf8fea1fb6272e0df5e`**，不宣称未测试的版本范围兼容。安装好上述开发依赖后，在仓库根目录复现：
+3.3.0 历史上验证的精确组合是**官方 OMP 18.1.13** 与 SDK 提交 **`daf07999c2fee9b22edc7bf8fea1fb6272e0df5e`**；这不证明当前副本或任意版本范围。当前 pins 见 [`config/omp-compatibility.json`](../config/omp-compatibility.json)，方法边界见 [compatibility](compatibility.md)。旧报告不能替代当前验证。安装开发依赖后可在仓库根目录复现：
 
 ```sh
 uv run --frozen python scripts/verify_omp.py --cache-dir /tmp/tandem-omp-cache --report /tmp/tandem-omp-compatibility.json

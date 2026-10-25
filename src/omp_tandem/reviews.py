@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import difflib
 import fcntl
 import hashlib
 import json
 import os
+import posixpath
+import re
 import sqlite3
 import stat
 import subprocess
@@ -293,13 +296,13 @@ class ReviewStore:
         return db
 
     @contextmanager
-    def _bind(self, directory: str):
+    def _bind(self, directory: str, *, bind_root=False):
         """Hold one descriptor for the whole capture.
 
         Reopening per command would let a directory swapped mid-capture supply a
         different repository for later reads, so the binding is taken once.
         """
-        if not directory:
+        if not directory and not bind_root:
             yield
             return
         with self._descriptor(directory) as fd:
@@ -326,7 +329,7 @@ class ReviewStore:
                 self.scope.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
             )
             descriptors.append(parent)
-            for part in _path(directory).split("/"):
+            for part in _path(directory).split("/") if directory else ():
                 parent = os.open(
                     part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent
                 )
@@ -446,7 +449,7 @@ class ReviewStore:
             return output.read()
 
     def _working(
-        self, path: str, directory: str = ""
+        self, path: str, directory: str = "", *, maximum: int = _MAX_FILE
     ) -> tuple[bytes | None, str | None, tuple | None]:
         """Open every component without following links, including concurrent swaps.
 
@@ -482,13 +485,13 @@ class ReviewStore:
             before = os.fstat(fd)
             if not stat.S_ISREG(before.st_mode):
                 raise ValueError(f"Only regular review files are supported: {path}")
-            if before.st_size > _MAX_FILE:
-                raise ValueError(f"Review file exceeds 4 MiB: {path}")
+            if before.st_size > maximum:
+                raise ValueError(f"Review file exceeds {maximum} bytes: {path}")
             with os.fdopen(os.dup(fd), "rb") as stream:
-                content = stream.read(_MAX_FILE + 1)
+                content = stream.read(maximum + 1)
             after = os.fstat(fd)
-            if len(content) > _MAX_FILE:
-                raise ValueError(f"Review file exceeds 4 MiB: {path}")
+            if len(content) > maximum:
+                raise ValueError(f"Review file exceeds {maximum} bytes: {path}")
             if _signature(before) != _signature(after):
                 raise _Mutation(f"File changed while capturing: {path}")
             mode = "100755" if before.st_mode & 0o111 else "100644"
@@ -698,7 +701,9 @@ class ReviewStore:
         self._contained(selected, directory)
         return selected
 
-    def _blob(self, entry, directory: str = "") -> tuple[bytes | None, str | None]:
+    def _blob(
+        self, entry, directory: str = "", *, maximum: int = _MAX_FILE
+    ) -> tuple[bytes | None, str | None]:
         if entry is None:
             return None, None
         mode, oid, kind = entry
@@ -707,10 +712,10 @@ class ReviewStore:
                 "Selected submodules or unmerged index entries require a separate review"
             )
         size = int(self._git("cat-file", "-s", oid, directory=directory))
-        if size > _MAX_FILE:
-            raise ValueError("Review Git blob exceeds 4 MiB")
+        if size > maximum:
+            raise ValueError(f"Review Git blob exceeds {maximum} bytes")
         return (
-            self._git("cat-file", "blob", oid, maximum=_MAX_FILE, directory=directory),
+            self._git("cat-file", "blob", oid, maximum=maximum, directory=directory),
             mode,
         )
 
@@ -1160,6 +1165,282 @@ class ReviewStore:
                 db.execute("BEGIN")
                 self._corrective_context(db, request.corrective)
 
+    def _context_candidates(self, request, manifest, contents):
+        """Bounded syntactic hints from the selected source, never a capture edit."""
+        directory, identity = request.review_directory, manifest["git"]
+        max_scan, max_bytes, max_file, max_candidates = 128, 1024 * 1024, 65536, 20
+        selected = {row["path"] for row in manifest["files"]}
+        seeds = {
+            path: data for section, path, data in contents if section == "selected"
+        }
+        limitations = [
+            "Static import/name heuristics only; dynamic imports, aliases, package exports and semantic callers may be unresolved.",
+            "Suggestions are not captured or authorized; explicitly refine paths/context_paths and prepare again.",
+        ]
+        entries = {}
+        if request.source == "commit":
+            entries = self._tree({**identity, "base_commit": identity["commit"]})
+        elif identity["kind"] == "git":
+            index = self._index(directory)
+            entries = {
+                path: rows[0]
+                for path, rows in index.items()
+                if len(rows) == 1 and rows[0][2] == "0"
+            }
+            if any(len(rows) != 1 or rows[0][2] != "0" for rows in index.values()):
+                limitations.append("Unmerged index paths were excluded.")
+        inventory = set(entries) | selected
+        undecodable_paths = 0
+        if request.source == "worktree" and identity["kind"] == "git":
+            for value in self._git(
+                "ls-files", "--others", "--exclude-standard", "-z", directory=directory
+            ).split(b"\0"):
+                if not value or value.endswith(b"/"):
+                    continue
+                try:
+                    path = value.decode("utf-8")
+                except UnicodeDecodeError:
+                    undecodable_paths += 1
+                    continue
+                inventory.add(_join(directory, path))
+            if undecodable_paths:
+                limitations.append(
+                    "Untracked names that are not valid UTF-8 were excluded from optional context hints."
+                )
+        if identity["kind"] != "git":
+            limitations.append(
+                "No Git inventory: only explicitly selected/context paths are scanned."
+            )
+        source = {
+            "scope_id": self.scope.key,
+            "source": request.source,
+            "review_directory": directory,
+            "base_commit": identity.get("base_commit"),
+            "commit": identity.get("commit"),
+            "index_sha256": _sha(_json(index).encode())
+            if request.source == "staged"
+            else None,
+        }
+        supported = {
+            ".py",
+            ".js",
+            ".jsx",
+            ".ts",
+            ".tsx",
+            ".mjs",
+            ".cjs",
+            ".mts",
+            ".cts",
+        }
+        paths = sorted(inventory, key=lambda path: (path not in selected, path))
+        scanned, data_by_path, unresolved, unresolved_count, used = {}, {}, [], 0, 0
+
+        def unknown(path, relationship, reason):
+            nonlocal unresolved_count
+            unresolved_count += 1
+            if len(unresolved) < 20:
+                unresolved.append(
+                    {"path": path, "relationship": relationship[:512], "reason": reason}
+                )
+
+        eligible = [path for path in paths if PurePosixPath(path).suffix in supported]
+        for path in sorted(selected):
+            if PurePosixPath(path).suffix not in supported:
+                unknown(path, "language", "unsupported_language")
+        for path in eligible[:max_scan]:
+            try:
+                self._contained([_path(path)], directory)
+                if path in seeds:
+                    data = seeds[path]
+                    if request.source == "staged":
+                        current, _ = self._blob(entries.get(path), directory)
+                        if current != data:
+                            unknown(
+                                path,
+                                "source",
+                                "index_changed_since_selection_prepare_again",
+                            )
+                            continue
+                elif request.source == "worktree":
+                    data, _, _ = self._working(path, directory, maximum=max_file)
+                else:
+                    entry = entries.get(path)
+                    if entry and entry[0] not in ("100644", "100755"):
+                        raise ValueError("Non-regular source entry")
+                    data, _ = self._blob(entry, directory, maximum=max_file)
+                if data is None:
+                    unknown(path, "source", "missing_in_selected_source")
+                    continue
+                if len(data) > max_file:
+                    unknown(path, "source", "file_byte_limit")
+                    continue
+                if used + len(data) > max_bytes:
+                    limitations.append(
+                        "Scan byte limit reached; remaining paths were not examined."
+                    )
+                    break
+                used += len(data)
+                text = data.decode("utf-8")
+                data_by_path[path] = data
+                relationships = []
+                if path.endswith(".py"):
+                    tree = ast.parse(text)
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.Import):
+                            relationships.extend(
+                                (alias.name, 0) for alias in node.names
+                            )
+                        elif isinstance(node, ast.ImportFrom):
+                            module = node.module or ""
+                            relationships.append((module, node.level))
+                            relationships.extend(
+                                (
+                                    ".".join(filter(None, (module, alias.name))),
+                                    node.level,
+                                )
+                                for alias in node.names
+                                if alias.name != "*"
+                            )
+                else:
+                    # Deliberately lexical, not a JS/TS resolver; report this limitation.
+                    relationships = [
+                        (match.group(1), 0)
+                        for match in re.finditer(
+                            r"""(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\(\s*)['"]([^'"\n]+)['"]""",
+                            text,
+                        )
+                    ]
+                scanned[path] = relationships
+            except (ValueError, UnicodeError, SyntaxError, RecursionError) as exc:
+                unknown(
+                    path,
+                    "scan",
+                    type(exc).__name__ + ": unsafe, oversized or unparseable source",
+                )
+        if len(eligible) > max_scan:
+            limitations.append(
+                "Scan file limit reached; reverse importers/tests outside the scanned paths are unknown."
+            )
+        candidates = {}
+
+        def suggest(path, reason, related):
+            if path in selected or path not in data_by_path:
+                return
+            item = candidates.setdefault(
+                path,
+                {
+                    "path": path,
+                    "reasons": [],
+                    "source_identity": {
+                        **source,
+                        "sha256": _sha(data_by_path[path]),
+                        "git_blob": entries[path][1]
+                        if path in entries and request.source != "worktree"
+                        else None,
+                    },
+                },
+            )
+            descriptor = {"kind": reason, "related_path": related}
+            if descriptor not in item["reasons"] and len(item["reasons"]) < 4:
+                item["reasons"].append(descriptor)
+
+        def targets(path, module, level):
+            parent = posixpath.dirname(path)
+            if path.endswith(".py"):
+                if level:
+                    root = parent
+                    for _ in range(level - 1):
+                        root = posixpath.dirname(root)
+                    roots = [root]
+                else:
+                    roots = [directory, _join(directory, "src"), parent]
+                stems = [
+                    posixpath.join(root, module.replace(".", "/")) for root in roots
+                ]
+                variants = [
+                    candidate
+                    for stem in stems
+                    for candidate in (stem + ".py", posixpath.join(stem, "__init__.py"))
+                ]
+            elif module.startswith("."):
+                stem = posixpath.normpath(posixpath.join(parent, module))
+                bases = [stem]
+                if PurePosixPath(stem).suffix in {".js", ".mjs", ".cjs"}:
+                    bases.append(str(PurePosixPath(stem).with_suffix("")))
+                variants = [
+                    candidate
+                    for base in bases
+                    for candidate in (
+                        base,
+                        *(base + suffix for suffix in sorted(supported - {".py"})),
+                        *(
+                            posixpath.join(base, "index" + suffix)
+                            for suffix in (".ts", ".tsx", ".js", ".jsx")
+                        ),
+                    )
+                ]
+            else:
+                return []
+            return sorted(
+                {
+                    candidate
+                    for candidate in variants
+                    if candidate in inventory
+                    and _inside(directory, candidate) is not None
+                    and not candidate.startswith("../")
+                }
+            )
+
+        for path, relationships in scanned.items():
+            for module, level in relationships:
+                resolved = targets(path, module, level)
+                if path in selected and not resolved:
+                    unknown(
+                        path, "." * level + module, "external_alias_dynamic_or_missing"
+                    )
+                for target in resolved:
+                    if path in selected:
+                        suggest(target, "import", path)
+                        if target not in data_by_path:
+                            unknown(path, target, "resolved_path_not_scanned")
+                    if target in selected:
+                        suggest(path, "reverse_importer", target)
+        for path in data_by_path.keys() - selected:
+            name = PurePosixPath(path).name
+            for target in sorted(selected):
+                stem = PurePosixPath(target).stem
+                if name in {f"test_{stem}.py", f"{stem}_test.py"} or any(
+                    name == f"{stem}.{kind}{suffix}"
+                    for kind in ("test", "spec")
+                    for suffix in supported - {".py"}
+                ):
+                    suggest(path, "test_name_match", target)
+        ordered = sorted(candidates.values(), key=lambda item: item["path"])
+        return {
+            "context_candidates": ordered[:max_candidates],
+            "context_scan": {
+                "source_identity": source,
+                "complete": False,
+                "semantic_completeness": "not_established",
+                "scanned_files": len(scanned),
+                "scanned_bytes": used,
+                "inventory_files": len(inventory),
+                "undecodable_inventory_paths": undecodable_paths,
+                "limits": {
+                    "files": max_scan,
+                    "bytes": max_bytes,
+                    "file_bytes": max_file,
+                    "candidates": max_candidates,
+                    "unresolved": 20,
+                },
+                "candidate_count": len(ordered),
+                "candidates_omitted": max(0, len(ordered) - max_candidates),
+                "unresolved": unresolved,
+                "unresolved_omitted": max(0, unresolved_count - len(unresolved)),
+                "limitations": limitations,
+            },
+        }
+
     def prepare(self, request: ReviewRequest) -> dict:
         """Classify the declared selection without publishing a snapshot.
 
@@ -1170,9 +1451,19 @@ class ReviewStore:
             request = ReviewRequest.model_validate(request)
         with self._bind(request.review_directory):
             try:
-                manifest, _ = self._capture(request, request.review_directory)
+                manifest, contents = self._capture(request, request.review_directory)
             except SelectionConflict as conflict:
-                return conflict.diagnostics
+                return {
+                    **conflict.diagnostics,
+                    "context_candidates": [],
+                    "context_scan": {
+                        "complete": False,
+                        "limitations": [
+                            "Repair selection conflicts before scanning context."
+                        ],
+                    },
+                }
+            context = self._context_candidates(request, manifest, contents)
         roles = [row["role"] for row in manifest["files"]]
         return {
             **self._conflicts(request, manifest["git"], [], True),
@@ -1180,6 +1471,7 @@ class ReviewStore:
             "proposed_selection_patch": None,
             "change_count": roles.count("change"),
             "context_count": roles.count("context"),
+            **context,
         }
 
     def create(

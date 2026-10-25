@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -30,7 +31,7 @@ from .focus_tools import (
 from .models import decode_outcome, outcome_schema, parse_outcome
 from .observation import CANCELLATION_CADENCE, step_interval
 from .project_context import ContextReadRequest, read_task_context
-from .prompts import WORKER_INSTRUCTIONS
+from .prompts import worker_instructions
 from .runtime_identity import register_schemas
 from .runtime_models import (
     MAX_EVENT_HISTORY,
@@ -61,6 +62,41 @@ NATIVE_SCHEMAS = {
 register_schemas("native", NATIVE_SCHEMAS)
 
 
+class _OwnedRpcClient(RpcClient):
+    """Retain owned handles across the pinned SDK's best-effort stop."""
+
+    def __init__(self, *args, **kwargs):
+        self._owned_process = None
+        self._owned_pgid = None
+        super().__init__(*args, **kwargs)
+
+    def stop(self):
+        if self._process is not None:
+            self._owned_process = self._process
+            # The pinned SDK spawns with start_new_session=True. Capture before
+            # stop clears its handles, including when startup itself calls stop.
+            self._owned_pgid = self._pgid or self._process.pid
+        super().stop()
+
+    def termination_confirmed(self, *, timeout=2.0):
+        process = self._owned_process
+        if process is None:
+            return self._process is None
+        until = time.monotonic() + timeout
+        while True:
+            if process.poll() is not None:
+                try:
+                    os.killpg(self._owned_pgid, 0)
+                except ProcessLookupError:
+                    return True
+                except OSError:
+                    return False
+            remaining = until - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.02, remaining))
+
+
 class NativeWorker:
     def __init__(
         self,
@@ -86,7 +122,12 @@ class NativeWorker:
     def worker_tools(self, task):
         task_id = task["task_id"]
         work_tools = ()
-        if self.work_items is not None:
+        purpose = (
+            json.loads(task.get("execution_json") or "{}")
+            .get("effective", {})
+            .get("purpose", "work")
+        )
+        if self.work_items is not None and purpose != "coordination":
             attempt = self.work_items.native_attempt(task_id)
             claims = {}
 
@@ -561,7 +602,7 @@ class NativeWorker:
                     "--config",
                     str(Path(__file__).parent / "resources" / "focus-tools.yml"),
                 ]
-            client = RpcClient(
+            client = _OwnedRpcClient(
                 executable=self.executable,
                 cwd=task["cwd"],
                 provider=TEAM_MODEL_PROVIDER if subscription_locked else None,
@@ -577,7 +618,7 @@ class NativeWorker:
                 extra_args=args,
                 startup_timeout=min(45, remaining),
                 request_timeout=min(30, remaining),
-                append_system_prompt=WORKER_INSTRUCTIONS
+                append_system_prompt=worker_instructions(task, managed=bool(managed))
                 + (
                     "\nManaged assignment: respect its exact workspace and grants. "
                     "A reviewer never edits source; shell checks require the explicit allow_shell grant."
@@ -768,6 +809,10 @@ class NativeWorker:
             try:
                 if client is not None:
                     client.stop()
+                    if not client.termination_confirmed():
+                        raise RuntimeError(
+                            "Native process-group termination is unconfirmed; execution capacity remains held"
+                        )
             except Exception as exc:
                 logger.exception("OMP teardown failed: %s", task_id)
                 status, error = "failed", f"Worker teardown failed: {exc}"
@@ -826,3 +871,4 @@ class NativeWorker:
                     "Stopped by request; already-applied edits are not rolled back.",
                 )
             self.tasks.finish(task_id, status, answer, error, artifact_ids)
+        return teardown_confirmed

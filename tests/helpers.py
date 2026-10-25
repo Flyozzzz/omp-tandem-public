@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shlex
 import sys
 import tempfile
@@ -208,8 +209,8 @@ class RpcHarness(unittest.IsolatedAsyncioTestCase):
         await self.client.__aexit__(None, None, None)
         await asyncio.to_thread(self.bridge.shutdown)
 
-    async def call(self, name, **args):
-        result = await self.client.call_tool(name, args)
+    async def call(self, tool_name, **args):
+        result = await self.client.call_tool(tool_name, args)
         return to_jsonable_python(result.data)
 
     async def start(self, scenario="question", **args):
@@ -229,3 +230,22 @@ class RpcHarness(unittest.IsolatedAsyncioTestCase):
             self.call("tandem_result", task_id=task_id, wait_seconds=20, **args),
             timeout=6,
         )
+
+    async def read_section(self, descriptor):
+        arguments = descriptor["arguments"]
+        parts = []
+        expected_offset = None
+        while True:
+            page = await self.call(descriptor["tool"], **arguments)
+            self.assertNotEqual(page.get("status"), "digest_mismatch")
+            self.assertLessEqual(len(json.dumps(page).encode("utf-8")), 16384)
+            if expected_offset is not None:
+                self.assertEqual(page["offset_bytes"], expected_offset)
+            parts.append(page["content"])
+            following = page["next_request"]
+            if following is None:
+                content = "".join(parts)
+                return content if page["format"] == "text" else json.loads(content)
+            self.assertGreater(page["returned_bytes"], 0)
+            expected_offset = page["offset_bytes"] + page["returned_bytes"]
+            arguments = following

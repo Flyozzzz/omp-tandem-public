@@ -200,3 +200,26 @@ class CandidateStateTests(unittest.TestCase):
             self.assertEqual(
                 db.execute("PRAGMA user_version").fetchone()[0], STATE_SCHEMA_VERSION
             )
+
+    def test_prior_guarded_schema_preserves_interrupted_work_on_upgrade(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            scope = resolve_scope(root / "state", root)
+            database = initialize_database(scope)
+            with sqlite3.connect(database) as db:
+                db.execute("PRAGMA user_version=1")
+                db.execute(
+                    "INSERT INTO tasks(task_id,conversation_id,created,updated,cwd,mode,model,prompt,status,answer) "
+                    "VALUES ('saved-task','saved-conversation',1,2,?,'think','unused','original goal','interrupted','saved evidence')",
+                    (str(root),),
+                )
+            initialize_database(scope)
+            with sqlite3.connect(database) as db:
+                self.assertEqual(
+                    db.execute("PRAGMA user_version").fetchone()[0],
+                    STATE_SCHEMA_VERSION,
+                )
+                self.assertEqual(
+                    db.execute("SELECT task_id,status,answer FROM tasks").fetchall(),
+                    [("saved-task", "interrupted", "saved evidence")],
+                )

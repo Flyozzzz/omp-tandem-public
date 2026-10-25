@@ -52,6 +52,10 @@ def profile_catalog() -> dict:
 class ExecutionOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    purpose: Literal["work", "coordination"] = Field(
+        default="work",
+        description="Turn-local lane: coordination is reserved for think-only consultation, never work or extra permissions. Not inherited.",
+    )
     profile: Literal["quick", "balanced", "deep"] = Field(
         default="balanced",
         description=(
@@ -152,6 +156,7 @@ def resolve_execution(options=None, *, previous=None, model=None, timeout_second
     requested = options.model_dump(exclude_unset=True, exclude_none=True)
     effective = {
         "profile": "balanced",
+        "purpose": options.purpose,
         "model": model or None,
         **PROFILES["balanced"],
     }
@@ -160,7 +165,7 @@ def resolve_execution(options=None, *, previous=None, model=None, timeout_second
             {
                 key: value
                 for key, value in previous.items()
-                if key not in {"routing", "focus"}
+                if key not in {"routing", "focus", "purpose"}
             }
         )
     if "profile" in requested:

@@ -83,14 +83,18 @@ class WorkspaceTests(unittest.TestCase):
         pools = WorkerSlots(first.base), WorkerSlots(second.base)
         with ExitStack() as stack:
             leases = [
-                stack.enter_context(pools[index % 2].acquire()) for index in range(4)
+                stack.enter_context(pools[index % 2].acquire(purpose="work"))
+                for index in range(3)
             ]
             with self.assertRaises(ValueError):
-                pools[1].acquire()
-            leases[0].close()
-            stack.enter_context(pools[1].acquire())
+                pools[1].acquire(purpose="work")
+            stack.enter_context(pools[1].acquire(purpose="coordination"))
             with self.assertRaises(ValueError):
-                pools[0].acquire()
+                pools[0].acquire(purpose="coordination")
+            leases[0].close()
+            stack.enter_context(pools[1].acquire(purpose="work"))
+            with self.assertRaises(ValueError):
+                pools[0].acquire(purpose="work")
 
 
 class ProjectIsolationTests(unittest.IsolatedAsyncioTestCase):

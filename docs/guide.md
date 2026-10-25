@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Package 3.13.1** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Package 3.14.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -358,10 +358,10 @@ Code captures the snapshot, launches only `think`, preserves the independent ans
 While running, use only the returned `run_id`:
 
 ```json
-{"action":"status","run_id":"<run_id>","wait_seconds":25}
+{"action":"status","run_id":"<run_id>"}
 ```
 
-Running responses contain compact `stage_statuses` and `full_result_pending`, not repeated long answers. Terminal responses contain complete `independent.answer` and optional `comparison.answer`, findings, current applicability and stage IDs. Questions include their context and any relevant completed stage. Code assembles full answers; the coordinator still judges their substance, disagreements and uncertainty.
+Running responses contain compact `stage_statuses` and `full_result_pending`, not repeated long answers. Terminal responses expose stage projections, findings, applicability and stage IDs. Read complete `independent`/`comparison` sections through returned `readers` and `tandem_read_result` continuations when truncated; do not restart a review for its full answer. Questions include relevant context. Code retains full answers; the coordinator still judges their substance, disagreements and uncertainty.
 
 For an actual pending question:
 
@@ -402,6 +402,18 @@ The two participant seats are `claude` and `omp`. The host MCP seat defaults to 
 
 <a id="compact-contracts"></a>
 ### Compact contracts, identity and closure
+
+**Available since 3.14.0.** Inspect the loaded runtime before using these surfaces. Old checked-in compatibility reports remain evidence for their recorded versions, not proof of the currently loaded server.
+
+Task/review MCP projections are bounded to 16,384 UTF-8 JSON bytes, including `details=true`. `readers[section]` gives `{tool, arguments}`; `truncated_fields`/`omitted_fields` identify incomplete inline data. Call `tandem_read_result(target, identifier, section, offset_bytes=0, max_bytes=8192, expected_sha256=None)`: task sections are `result|answer|report|contract`, review-run sections `result|independent|comparison`. `answer` is text; other sections are canonical JSON. Pages return `encoding`, `format`, `sha256`, `total_bytes`, `offset_bytes`, `returned_bytes`, `content`, `next_offset_bytes`, `next_request`, `next_action`. Same-tool `next_request`/`restart_request` contain direct keyword arguments, not a tool envelope; nonzero offsets require the digest. Concatenate all content before JSON decoding. A changed source returns `status="digest_mismatch"`, no content and `restart_request`; restart, never mix pages. Artifact `offset`/`next_offset` still count Unicode characters even when UTF-8 budgets shorten a page.
+
+`tandem_overview(limit=20, cursor=None)` is coordinator-only, read-only discovery, not a wait or repair. Its byte-bounded pages (limit at most 100) return `scope_id`, `participant`, `items`, `next_cursor`, `next_request`, `read_only=true`, `replay_authorized=false`. Each item has `kind` (`task|team|review_run|review|work`), `id`, `status`, `category` (`pending_question|operator_required_recovery|active_work|ready_result`), `next_observation:{tool,arguments}`, and `saved_evidence` read descriptors. Optional question/recovery/revision metadata is scope/stage-filtered. Follow exact descriptors, not guessed mutations. This is a live keyset cursor; restart from the first page to discover newly inserted earlier entries. Reads never claim, cancel, grant, reconcile or resume.
+
+For a read-only consultation explicitly use `tandem_start(mode="think", execution={"purpose":"coordination"}, ...)`. `purpose` defaults to `work` and is **not inherited** on continuation. The global kernel-leased pool has three ordinary slots plus one reserved coordination slot, across processes/projects sharing its state base. Coordination cannot declare owned files, writes or shell, be a managed assignment or team step, or use `tandem_work`; it gives no extra permissions. Ordinary questions retain their slot. Teams accept `max_parallel<=4` but launch at most three ordinary turns; `capacity` exposes requested/effective parallelism and pending steps' `queue_reason`. Preflight observes capacity but reserves nothing. No fifth-worker fallback or hidden retry.
+
+`tandem_review(action="prepare", request=...)` also returns source-bound `context_candidates`: `{path,reasons:[{kind,related_path}],source_identity}`. Reasons include `import`, `reverse_importer`, `test_name_match`. Python AST and JS/TS lexical local relationships are hints, not semantic completeness. `context_scan` reports source identity, file/byte/candidate budgets, omissions, unresolved relationships and limitations; `complete=false`, `semantic_completeness="not_established"` remain explicit. Current limits are 128 files, 1 MiB total, 64 KiB/file and 20 candidates/unresolved details. Index/commit sources never substitute live worktree bytes; non-Git scans use explicitly selected files only. Inspect candidates and deliberately add selected paths to a new request/capture; preparation never widens access, includes context or recaptures automatically.
+
+Protocol refusals identify `code`, `fields`, `reasons`, `allowed_fix`, `retryable` and, when available, `next_request`. Supply the missing exact IDs/declarations, reread stale state or use the named repair; never treat an example/hint or retry flag as consent to replay uncertain effects. Cross-tool descriptors use `{tool,arguments}`. The work-evidence/question-closure semantics introduced in 3.14.0 require state schema 2 / work protocol `work-v3-evidence`; do not run older guarded binaries against upgraded state or assume checkout updates replace live processes. Stop/inspect and back up before an intentional upgrade; no migration restores grants or restarts work.
 
 Presentation parameters are siblings of `request`: `view="summary"|"plan"|"step"|"full"`, `format="json"|"markdown"`, `limit`, `cursor`, `include_snapshots`. For a selected step, set `request.step_id`. History is paged and omits snapshots by default; follow the returned continuation rather than assuming the first page is complete. Cursors are bound to work, revision, section and visibility; `cursor_stale` requires a fresh read. `next_actions` includes prerequisites and current identifiers, but does not grant authority or justify automatic retries. Mutation CAS and `operation_id` semantics are unchanged.
 
@@ -869,7 +881,13 @@ A task that declares no set is reported as `assessment: "not_declared"`, with th
 
 **What this never claims.** The projection counts declarations and runs. It does not establish that a mapped check asserts the right behaviour, that the declared obligations exhaust the criterion, or that a passing run means the requirement is met — `semantic_sufficiency` and `acceptance` stay `not_assessed` in every response, including when every unit has a current pass. A participant can declare a mapping its test does not honour, and no schema detects that; the projection makes the assertion explicit and reviewable, which is a different thing from certifying it.
 
-Declared acceptance-set coverage remains task-local. Work steps refuse those mappings with `acceptance_coverage_unsupported_surface`, and a work-bound task reports `assessment: "unsupported_surface"` instead of applying its own set to a different plan. Supervisor review execution records actual declared checks; it does not add acceptance-set mapping to work cards or prove semantic sufficiency.
+**Shared-work coverage (since 3.14.0).** `WorkStep.acceptance_set` declares the step's exact `acceptance` strings; `WorkPlan.acceptance_set` declares the plan's exact `acceptance` strings, using the same `AcceptanceSet` identities, obligations and content revision. Step `verification`/`review_verification` and global `WorkPlan.verification` use the existing `VerificationPlan`: check `acceptance_refs`, `acceptance_coverage="report_only"|"require_current_evidence"` and `coverage_scope`. Do not create a second checklist or use a native task's denominator for the plan.
+
+`WorkCommand.check_runs` supplies append-only `CheckRun` evidence for `submit`, `report`, `accept` or `reject`; other actions do not accept it, and participants cannot assert `machine_observed`. Runs retain exact criterion/check identities, plan revision, submitted commit and environment. Current local implementation/review and global obligations are assessed separately; the global target is the final integration submission, never the count of accepted steps. A required supervisor check must settle under its real grant; that acceptance path also requires comparison. `next_actions` reflects those gates, not wishful availability.
+
+Work `acceptance_coverage` contains `subject:{kind:"work",work_id,plan_revision}`, `global`, `steps:[{step_id,implementation,review}]`, `history:[{attempt_id,step_id,plan_revision,current_plan,current_submission,runs}]` and `stale_plan_attempt_ids`. `submitted_identity` binds `submission_id`, `commit`, `tree_hash` and `plan_revision`; an exact captured tree can establish equivalent bytes to its submitted commit, without guessing a future commit before capture. Read `section="acceptance_coverage"` for complete history; independent-stage disclosure restrictions still apply. All views, including `full|plan|step`, may page sections; a complete step uses `section="step"` with `request.step_id` and the returned character/digest cursor. Unknown, unmapped, stale and failed evidence remain visible. Report-only remains the default; opted-in current-evidence gates apply to native stage reports, supervisor captured output, independent acceptance and review finalization, without blocking honest rejection/partial/blocked closure. `semantic_sufficiency` and `acceptance` remain `not_assessed`; even complete current coverage is not independent acceptance or application.
+
+Action descriptors name `tool="tandem_work"`, `arguments={request:{action,work_id,step_id?,expected_revision,submission_id?}}` and `required_fields` for missing semantic inputs. Read them as current prerequisites, not completed requests or authority; provide actual evidence/decisions rather than replaying a hint.
 
 Shared steps have separate `requirements`/`verification` for implementation and `review_requirements`/`review_verification` for the reviewer. Review write requirements are invalid. A required shell check does not bypass snapshot-only review or an absent grant; unresolved checks must remain blocked/partial, not silently waived.
 
@@ -1190,7 +1208,7 @@ Exports are recipient-bound. A third project cannot import one instead of B; sou
 This mechanism is local to the same state-base. Transfer packages persist until operator removal; there is no automatic expiry. Treat package contents and transfer IDs as sensitive, not public download links.
 
 <a id="team-mode"></a>
-## Interactive team mode (unreleased)
+## Interactive team mode
 
 `tandem_team` runs a complete bounded plan for development, investigation, writing or review.
 It complements ordinary peer consultation; it does not replace `tandem_work` grants,
@@ -1199,7 +1217,8 @@ in the loaded runtime; this feature is new in 3.12.0.
 
 The coordinator supplies 2–16 steps with existing `TaskContract` declarations.
 `depends_on` must form an acyclic graph with one final integration sink covering
-every step. `max_parallel` defaults to three and is capped at four shared OMP slots.
+every step. `max_parallel` defaults to three and accepts at most four; since 3.14.0,
+only three ordinary slots launch team steps, with the fourth reserved for coordination.
 The default `budget_seconds=1800` covers classification, startup, execution and waiting
 for decisions; it is a time bound, not an invoice-hard spending ceiling.
 
@@ -1308,12 +1327,15 @@ The compact review scenario is the default entry for changes review; `tandem_wor
 | Tool | Main inputs | Purpose |
 |---|---|---|
 | `tandem_scope` | None | Inspect project binding, migration and computation-profile defaults |
-| `tandem_team` (unreleased) | `action=models/start/status/list/assign/cancel/read`, `plan`, `run_id`, `assignments`, section/cursor paging | Bounded team execution, subscription assignments and lossless evidence recovery |
+| `tandem_team` | `action=models/start/status/list/assign/cancel/read`, `plan`, `run_id`, `assignments`, section/cursor paging | Bounded team execution, subscription assignments and lossless evidence recovery |
 | `tandem_start` | `cwd`, `prompt` or `contract`, `mode`, timeouts, `execution`, review/context binding, `preflight` | Inspect admission or explicitly start a task |
 | `tandem_continue` | `conversation_id`, `prompt` or `contract`, timeouts, execution/context binding, `continuation`, `handoff`, `preflight` | Resume history or explicitly start a fresh bounded context |
 | `tandem_result` | `task_id`, `wait_seconds`, `details` | Read answer, outcome, question, artifacts, and diagnostics |
+| `tandem_read_result` (since 3.14.0) | `target`, `identifier`, `section`, `offset_bytes`, `max_bytes`, `expected_sha256` | Complete digest-bound task/review data |
+| `tandem_overview` (since 3.14.0) | `limit`, `cursor` | Scoped read-only actionable inbox |
+| `tandem_decision` (since 3.14.0) | `request` with `action=policy/prepare/record/reply/list/read` | Opt-in pinned-brief decision provenance and controlled reply |
 | `tandem_audit` | `task_id`, `offset=0`, `limit=5` (1–10) | Opt-in Jev triage of reported evidence; advisory only, never acceptance |
-| `tandem_recommend` (unreleased) | `request`, `preview=true`, `expected_input_sha256` | Advisory choice from supplied skills or review directions; no discovery or execution |
+| `tandem_recommend` | `request`, `preview=true`, `expected_input_sha256` | Advisory choice from supplied skills or review directions; no discovery or execution |
 | `tandem_wait` | `task_ids`, `wait_seconds` | Wait for any selected result/question |
 | `tandem_list` | `limit` | Recent tasks in this namespace without large bodies |
 | `tandem_reply` | `task_id`, `question_id`, `answer` | Answer the exact pending question |
@@ -1325,7 +1347,7 @@ The compact review scenario is the default entry for changes review; `tandem_wor
 | `tandem_export_context` | `context_id`, `target_project_root` | Offer a snapshot to a specific recipient |
 | `tandem_import_context` | `transfer_id`, `expected_revision` | Accept an addressed snapshot |
 | `tandem_channel` | `action=status/probe/ack/pending/recover`, relevant IDs/token, `include_previous`, `limit` | Manage optional delivery |
-| `tandem_review` | `action=create/read/assess`, request or review ID, section/path, paging | Immutable review materials and current applicability |
+| `tandem_review` | `action=prepare/create/read/assess`, request or review ID, section/path, paging | Source-bound context suggestions, immutable review materials and applicability |
 | `tandem_review_run` | `action=start/status/reply/cancel`, request/key or run ID, total budget, execution, bounded wait | Capture and orchestrate a complete read-only review |
 | `tandem_work` | `request: WorkCommand`, bounded `wait_seconds` | Shared plan/checklist, role-bound claims, blockers, immutable submissions and acceptance; no autonomous permission grants |
 | `tandem_findings` | `action=create/update/get/list/pin/project`, IDs, draft/change, revision, paging, `set_id`/`finding_ids` | Snapshot-bound findings, append-only history, and pinned correction sets |
@@ -1403,7 +1425,8 @@ Changed or overlapping pages are different requests and may incur another charge
 Usage/cost are reported only when observed from the provider, otherwise unknown.
 Ordinary `tandem_result`, waiting and report submission never invoke Jev.
 
-### Optional Jev candidate recommendation (unreleased)
+<a id="optional-jev-candidate-recommendation-unreleased"></a>
+### Optional Jev candidate recommendation (since 3.12.0)
 
 3.12.0 adds `tandem_recommend`; 3.11.0 has evidence audit only.
 Inspect `tandem_scope.jev_recommend` in the actual runtime before using it. Do not
@@ -1473,9 +1496,10 @@ acceptance, finding or grant changes. Restricted workers and native independent
 reviewers do not receive this tool. Do not inject its advice or author-derived
 descriptions into an independent snapshot-review stage.
 
-### Task-start shadow model routing (unreleased)
+<a id="task-start-shadow-model-routing-unreleased"></a>
+### Task-start shadow model routing (since 3.12.0)
 
-This checkout also integrates a **shadow-only** model router into ordinary new
+Since 3.12.0, Tandem integrates a **shadow-only** model router into ordinary new
 task startup. It is not another standalone recommendation tool and does not
 switch the actual model. There is no active-routing mode in this feature.
 Read `tandem_scope.model_routing` from the loaded runtime, not the checkout alone.
@@ -1604,7 +1628,8 @@ Shadow records permit later evaluation; they do not establish that another model
 would have succeeded, saved money or been faster. Live Jev quality and savings
 remain unmeasured until separately authorized, credentialed evaluation.
 
-### Optional Jev context, tools and output focus (unreleased)
+<a id="optional-jev-context-tools-and-output-focus-unreleased"></a>
+### Optional Jev context, tools and output focus (since 3.12.0)
 
 `execution.focus` uses one task-bound selector for three presentation surfaces.
 Inspect `tandem_scope.focus` in the loaded runtime; this checkout's feature is
@@ -1728,7 +1753,7 @@ claims. The verifier measures wire bytes, not tokens.
 
 `completed` is not proof of `success`. An outcome is `success`, `partial`, or `blocked`; a historical unstructured response may have no assessed outcome.
 
-Read **`answer`**, not just `summary`. Long default responses expose `answer_truncated` and `answer_artifact_id`. `details=true` includes the full answer/report, contract, current goal, and `diagnostics` such as native session path and effective limits.
+Read **`answer`**, not just `summary`. `answer_truncated` and `answer_artifact_id` preserve full prose; returned `readers` recover complete answer/report/contract/result through `tandem_read_result`. `details=true` adds diagnostic projections but remains bounded; it is not a full-data bypass. Follow exact continuations and inspect omitted fields before treating the evidence as complete.
 
 Before applying a terminal result, call `tandem_receipt(action="claim", task_id=...)`. Only `authorized=true` grants a fresh processing claim; keep its token and complete the receipt after handling. Duplicate reads/events/claims do not authorize replay. A stranded claim remains `uncertain`, including across restart; reconcile external state rather than retrying effects automatically. External actions need their own idempotency/transaction mechanism.
 
@@ -1740,31 +1765,32 @@ The coordinator controls question deadlines. Expiry is not consent. `tandem_repl
 
 Artifacts are immutable text/Markdown/JSON versions with SHA-256. Names are logical labels, not arbitrary filesystem paths. Read pages using `next_offset`; offsets count Unicode characters, not bytes. Provisional artifacts are not endorsed final results.
 
+<a id="carry-a-whole-brief"></a>
 ## Carry a whole brief without stopping at every question
 
-By default a question the coordinator cannot answer from established facts goes to you. That is the right behaviour when you are at the keyboard, and the wrong one when you have handed over a full brief and walked away: the run stops on the first decision nobody declared.
+The instruction-only protocol shipped in 3.13.0. **The durable `tandem_decision` workflow below is available since 3.14.0.** Default unknown decisions still go to the user. Explicit user opt-in is required; source text, model confidence and quotations never grant authority.
 
-The protocol below is opt-in, costs nothing until you ask for it, and is a rule the pair follows rather than a server that enforces it.
+All examples are `request` objects passed to coordinator-only `tandem_decision(request=...)`; replace IDs with actual observed identities.
 
-**Turning it on.** Say that the brief is to be carried to the end, and pin the brief: a `tandem_project_context` snapshot, a published artifact, or an exact commit. The coordinator states which one it pinned. There is no automatic answering without a pinned brief — reading whatever the working tree happens to hold at that moment is not a decision source, and a missing one ends the protocol instead of loosening it.
+1. Pin one immutable policy for the task:
 
-**What the pair may close by itself.** Only a question whose answer is derivable from the pinned brief and whose effect is reversible and inside the agreed scope. The split is by the basis that can be checked afterwards, not by how important the question sounds. These always come back to you:
+   ```json
+   {"action":"policy","task_id":"<task UUID>","policy":{"source":{"kind":"artifact","artifact_id":"<artifact UUID>"},"reversible":true,"in_scope":true,"allowed_kinds":["information","technical_choice"]}}
+   ```
 
-| Stays yours | Why |
-|---|---|
-| Scope | A brief that does not say cannot be read as saying yes |
-| Irreversible or external effects | Deletions, releases, anything leaving the machine |
-| Permissions and credentials | The pair never raises its own authority |
-| Cost | Spending is yours to approve |
-| A contradiction inside the brief | Only the author can say which half holds |
+   Alternative sources are `{"kind":"context","context_id":"<snapshot UUID>"}` and `{"kind":"commit_document","commit":"<full lowercase 40/64-hex commit>","path":"docs/brief.md"}`. The document must be a safe project-relative regular file, not a symlink escape or arbitrary live path. Artifact/commit briefs use the existing 4 MiB UTF-8 artifact limit; product snapshots retain their own 64,000-byte limit. Policy pins source identity/content; no source means no automatic decision.
+2. Prepare an actual pending question with `{"action":"prepare","task_id":"...","question_id":"...","policy_id":"..."}`. The result returns `preparation_id`, `deadline`, `launch_before` and `consultation:{tool:"tandem_start",arguments:{...}}`. It launches nothing. Explicitly execute that exact think-only coordination request once, before its bound deadline, without adding a proposed answer. Never replay an uncertain launch or restart to extend the question.
+3. Read the completed consultation and cited pinned source yourself. Its final `answer` must be the exact `DecisionAssessment` JSON schema supplied in the immutable consultation packet. Verdicts are `derivable|not_established|contradiction|approval_required`. Record with `{"action":"record","preparation_id":"...","consultation_task_id":"..."}`. The service reads the actual completed answer and checks consultation/source/question identity and exact quotes; callers cannot supply a replacement verdict or answer. The immutable basis is stored **before** any reply. A valid quotation still does not prove semantic entailment.
+4. Reply separately with `{"action":"reply","decision_id":"..."}`. It records whether the ordinary reply was accepted; exact repeats retain identity, and a refused/late reply is not closure. Derivable closure requires an allowed task-local information/technical-choice question, citations, reversible/in-scope declarations and no risk classes. `not_established` can resume only as unresolved, so the worker must finish blocked/partial. Contradiction/approval require the operator; independent reviews cannot use this path.
+5. `{"action":"list","limit":20,"cursor":0}` gives a bounded inbox, optionally filtered by `task_id`. `{"action":"read","target":"decision","identifier":"..."}` recovers complete records; targets are `policy|preparation|decision|question`, with `offset_bytes`, `max_bytes<=8192`, `expected_sha256` and exact `next_request` continuations. Read all needed pages and report decisions, bases, assumptions and remaining user questions once.
 
-**What happens on a question.** The coordinator starts one read-only consultation against the pinned brief, carrying the worker's question and not its own proposed answer, and asks for one verdict: derivable, not established, or contradiction, with the exact sections quoted. It then reads those sections in the pinned source itself, because a real quotation can still carry a wrong conclusion and a quotation is not permission. Before answering it publishes the basis — task and question IDs, the pinned brief's identity, the quoted sections, the conclusion — and only then replies. Whether the reply was accepted is recorded separately: a refused `tandem_reply` is not a closed question.
+`reader` descriptors use `{tool,arguments}`. Returned `next_request` values are complete MCP arguments, including the outer `request` object: pass them unchanged to `tandem_decision`. Inbox cursors are advancing keys, not offsets to increment; answering an earlier question does not skip later questions. Read pages accept `max_bytes=4..8192`; nonzero offsets require the previous digest. Every returned page fits the common JSON response bound.
 
-When nothing is derivable, the worker is told there is no decision, preserves what it has, and ends `blocked` or `partial`; in shared work that step gets its own blocker rather than the whole card. An expired question is not answered afterwards and the task is not relaunched to get a second run at the deadline.
+The consultation reports `tandem_finish(outcome="success", answer=<serialized DecisionAssessment JSON>)` when its assessment is complete, even if the assessed verdict is non-derivable; this does not make the original task successful. The assessment contains `preparation_id`, `verdict`, `answer`, `rationale`, `reversible`, `in_scope`, `risks`, and `citations:[{source_sha256,start_bytes,end_bytes,quote}]`. Read its supplied schema rather than inventing offsets or quotes. A non-established closure returns `accepted=false, closed_unresolved=true`; stale/expired reply returns a durable `accepted=false, closed_unresolved=false, next_action="operator"`. Repeating that decision returns the recorded refusal, not a new attempt at answering.
 
-**What you get at the end.** One list instead of a halt in the middle: what was decided and on what basis, what was assumed, and what is still yours to answer. The published bases make each automatic decision checkable after the fact.
+Worker `tandem_ask` has `kind="information"|"technical_choice"|"approval"|"contradiction"` (default information) and `blocking_scope="task"|"shared"` (default task). Shared risk stays shared; a decision never silently demotes it to a step blocker. Approval, scope, cost, permissions/credentials, external or irreversible effects always remain with the user. Expired or unresolved questions cannot support success.
 
-**What it does not do.** It does not guarantee the brief was interpreted correctly — this is a protocol the pair follows, not admission control in the server. It does not keep a run alive after the client closes, does not answer questions from workers of a detached daemon, grants nothing new, replans nothing, does not resume parked steps by itself, and does not promise that the whole brief will be finished.
+This workflow never edits work-card blockers, grants rights, replans, resumes or launches automatically. It does not keep an owner-bound run alive after client closure or guarantee interpretation of the brief. Missing independent-review context still requires a new capture, never free-text decision input. Reports, decisions, verification and acceptance are distinct.
 
 ## Polling, Channels, and webhooks
 
@@ -1915,7 +1941,7 @@ The bootstrap additionally handles `--doctor` and `--prepare`. Runtime options c
 | Resolved task input | Up to 200,000 UTF-8 bytes including context |
 | Product snapshot | Up to 64,000 UTF-8 bytes, 50 rules, 100 decisions |
 | Artifact | Up to 4 MiB UTF-8; plain text, Markdown, or JSON |
-| Artifact page | Default 16,000 characters, maximum 50,000 |
+| Artifact page | Requested limit: default 16,000 characters, maximum 50,000; actual page also fits 8,192 UTF-8 content bytes and 16,384 JSON bytes |
 | Review capture | 256 selected paths; 4 MiB per file; 16 MiB saved material |
 | Review scenario | At most 2 native stages; default total 600 seconds, public range 10–7200 |
 | Concurrent scenario captures | 4 per owning MCP instance; no automatic queue |
@@ -2066,7 +2092,7 @@ claude plugin validate .claude-plugin/marketplace.json
 uv build --wheel
 ```
 
-Regression tests retain deterministic RPC fault peers for state/race/error coverage. CI additionally downloads a checksum-pinned **real OMP 18.1.13 binary** and drives it through a deterministic localhost HTTP model provider, with isolated HOME and no paid credentials. It exercises actual host-tool registration/execution, completion, continuation, cancellation and access-mode refusals. The exact SDK revision and tested platform evidence are described in [compatibility](compatibility.md); do not infer an untested version range.
+Regression tests retain deterministic RPC fault peers for state/race/error coverage. The compatibility verifier uses a checksum-pinned real OMP binary and a deterministic localhost HTTP model provider, isolated HOME and no paid credentials. Checked-in reports are historical evidence for their recorded package/SDK/binary, not proof of this checkout. Read the current [`config/omp-compatibility.json`](../config/omp-compatibility.json) and [compatibility method](compatibility.md) for exact pins and boundaries; do not infer an untested version range or an unrun current result.
 
 Reproduce the compatibility check:
 

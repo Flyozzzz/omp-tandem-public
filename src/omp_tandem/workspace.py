@@ -9,6 +9,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 from urllib.parse import unquote, urlsplit
 
 
@@ -157,14 +158,24 @@ class TaskAdmissionBusy(ValueError):
 
 
 class WorkerSlots:
-    """Four kernel-held leases shared across projects, without exposing their tasks."""
+    """Three ordinary and one think-only kernel leases, global to the state base."""
+
+    LIMITS: ClassVar[dict[str, int]] = {"work": 3, "coordination": 1}
+
+    @staticmethod
+    def _indices(purpose):
+        if purpose == "work":
+            return range(3)
+        if purpose == "coordination":
+            return range(3, 4)
+        raise ValueError("Worker purpose must be work or coordination")
 
     def __init__(self, base: Path):
         self.directory = base / "worker-slots"
         _directory(self.directory)
 
-    def acquire(self):
-        for index in range(4):
+    def acquire(self, *, purpose):
+        for index in self._indices(purpose):
             handle = _private_lock(self.directory / f"{index}.lock")
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -176,5 +187,25 @@ class WorkerSlots:
             else:
                 return handle
         raise TaskAdmissionBusy(
-            "All four shared OMP worker slots are busy; try again after work finishes"
+            f"Shared {purpose} capacity is busy ({self.LIMITS[purpose]} slots); "
+            "wait for an owned worker to terminate. The reserved coordination lane cannot run ordinary work."
         )
+
+    def capacity(self):
+        """A non-reserving observation; only acquire() authorizes a launch."""
+        lanes = {}
+        for purpose, limit in self.LIMITS.items():
+            available = 0
+            for index in self._indices(purpose):
+                with _private_lock(self.directory / f"{index}.lock") as handle:
+                    try:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        continue
+                    available += 1
+            lanes[purpose] = {
+                "limit": limit,
+                "available": available,
+                "busy": limit - available,
+            }
+        return {"total_limit": 4, "reservation": False, **lanes}

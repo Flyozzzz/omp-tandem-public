@@ -18,6 +18,7 @@ from fastmcp.exceptions import ToolError
 from omp_tandem.api import build_server
 from omp_tandem.bridge import Bridge
 from omp_tandem.models import acceptance_revision
+from omp_tandem.presentation import MAX_RESPONSE_BYTES, wire_size
 from omp_tandem.task_contracts import current_task
 from tests.helpers import RpcHarness
 
@@ -83,7 +84,11 @@ class CollaborationTests(RpcHarness):
         stored = await self.call(
             "tandem_read_artifact", artifact_id=outcome_artifact["artifact_id"]
         )
-        self.assertEqual(json.loads(stored["content"]), result["report"])
+        report = await self.call(
+            "tandem_read_result", **result["readers"]["report"]["arguments"]
+        )
+        self.assertEqual(json.loads(stored["content"]), json.loads(report["content"]))
+        self.assertNotIn("answer", result["report"])
 
     async def test_an_expired_question_cannot_be_reported_as_success(self):
         """The instruction after an expiry is now a rule the server enforces.
@@ -140,7 +145,8 @@ class CollaborationTests(RpcHarness):
         self.assertEqual(result["status"], "completed", result)
         self.assertTrue(result["answer_truncated"])
         expected = "雪界𝄞" * 6000
-        self.assertEqual(result["answer"], expected[:16000])
+        self.assertTrue(expected.startswith(result["answer"]))
+        self.assertLessEqual(wire_size(result), MAX_RESPONSE_BYTES)
         parts, offset = [], 0
         while True:
             page = await self.call(
@@ -150,15 +156,32 @@ class CollaborationTests(RpcHarness):
                 limit=7000,
             )
             parts.append(page["content"])
+            self.assertLessEqual(wire_size(page), MAX_RESPONSE_BYTES)
             if page["next_offset"] is None:
                 break
             offset = page["next_offset"]
         self.assertEqual("".join(parts), expected)
-        complete = await self.call(
-            "tandem_result", task_id=job["task_id"], details=True
-        )
-        self.assertEqual(complete["answer"], expected)
-        self.assertFalse(complete["answer_truncated"])
+        details = await self.call("tandem_result", task_id=job["task_id"], details=True)
+        self.assertLessEqual(wire_size(details), MAX_RESPONSE_BYTES)
+        self.assertTrue(details["answer_truncated"])
+        for section in ("answer", "report", "contract"):
+            request = details["readers"][section]["arguments"]
+            parts = []
+            while request is not None:
+                page = await self.call("tandem_read_result", **request)
+                self.assertLessEqual(wire_size(page), MAX_RESPONSE_BYTES)
+                parts.append(page["content"])
+                request = page["next_request"]
+            recovered = "".join(parts)
+            if section == "answer":
+                self.assertEqual(recovered, expected)
+            elif section == "report":
+                self.assertEqual(json.loads(recovered)["answer"], expected)
+            else:
+                self.assertEqual(
+                    json.loads(recovered),
+                    self.bridge.view(job["task_id"], details=True)["contract"],
+                )
 
     async def test_actual_answer_is_delivered_instead_of_acknowledgment(self):
         job = await self.start("paragraph")

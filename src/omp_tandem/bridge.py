@@ -9,6 +9,7 @@ from . import migration
 from .artifacts import ArtifactStore
 from .channel import ChannelDelivery
 from .context_transfer import ContextTransfer
+from .decisions import DecisionService
 from .desktop import DesktopQA, DesktopQAConfig
 from .diagnostics import Diagnostics
 from .findings import FindingStore
@@ -19,8 +20,10 @@ from .jev_recommend import JevRecommendations
 from .model_routing import ModelRouter
 from .model_routing_state import RoutingPolicy
 from .native_worker import NativeWorker
+from .presentation import ResultPresentation
 from .project_context import ProjectContextStore
 from .receipts import ReceiptStore
+from .recovery import RecoveryOverview
 from .review_runs import ReviewRuns
 from .reviews import ReviewStore
 from .runtime_models import ACTIVE, PublishRequest
@@ -165,6 +168,9 @@ class Bridge:
             self.team_selection,
             self.channel.owner,
         )
+        self.presentation = ResultPresentation(self)
+        self.decisions = DecisionService(self)
+        self.overview = RecoveryOverview(self)
 
     def work_observation(self, request):
         from .work_access import observation_token

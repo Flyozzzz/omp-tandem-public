@@ -12,19 +12,22 @@ from pydantic import Field
 from .binding import BridgeBinding, RuntimeOptions
 from .bridge import Bridge
 from .channel import ChannelFastMCP
+from .decisions import DecisionRequest
 from .desktop import DesktopRequest
+from .errors import ProtocolError, require_fields
 from .execution import ExecutionOptions, profile_catalog
 from .findings import FindingChange, FindingDraft
 from .jev_recommend import JevRecommendationRequest
 from .models import ArtifactInfo, ConversationHandoff, TaskContract, TurnContract
 from .observation import MAX_WAIT_SECONDS, Observation
+from .presentation import MAX_READ_BYTES
 from .project_context import ContextReadRequest, ProjectContext, read_task_context
 from .prompts import coordinator_instructions
 from .reviews import PublicationBusy, ReviewRequest, publication_lock
 from .runtime_identity import register_schemas, runtime_identity
 from .runtime_models import ACTIVE, Mode, TaskSummary
 from .team_models import TeamAssignment, TeamPlan
-from .team_presentation import MAX_READ_BYTES, TeamPresentation
+from .team_presentation import TeamPresentation
 from .team_runs import ACTIVE_TEAM
 from .work_items import WorkCommand, WorkPresentation
 from .workspace import client_root_paths
@@ -208,6 +211,62 @@ def build_server(configuration: Bridge | RuntimeOptions):
         return mcp
 
     @mcp.tool()
+    async def tandem_read_result(
+        target: Literal["task", "review_run"],
+        identifier: str,
+        section: Literal[
+            "result", "answer", "report", "contract", "independent", "comparison"
+        ],
+        ctx: Context,
+        offset_bytes: Annotated[int, Field(ge=0)] = 0,
+        max_bytes: Annotated[int, Field(ge=4, le=MAX_READ_BYTES)] = MAX_READ_BYTES,
+        expected_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None = None,
+    ) -> dict:
+        """Recover a complete task or review section through digest-bound UTF-8 pages.
+
+        Follow the returned next_request unchanged and concatenate content before
+        decoding a JSON section. A stale digest requires a new read, never combining
+        pages from different observations. Reads do not rerun, accept or apply work.
+        """
+        bridge = await runtime.get(ctx)
+        return await asyncio.to_thread(
+            bridge.presentation.read,
+            target,
+            identifier,
+            section,
+            offset_bytes=offset_bytes,
+            max_bytes=max_bytes,
+            expected_sha256=expected_sha256,
+        )
+
+    @mcp.tool()
+    async def tandem_overview(
+        ctx: Context,
+        limit: Annotated[int, Field(ge=1, le=100)] = 20,
+        cursor: Annotated[str, Field(max_length=2048)] | None = None,
+    ) -> dict:
+        """Read this project's paged inbox of questions, results and recovery needs.
+
+        Follow exact reader descriptors for complete evidence. This observation
+        never acquires a claim, grants permission, reconciles or restarts execution.
+        """
+        bridge = await runtime.get(ctx)
+        return await asyncio.to_thread(bridge.overview.get, limit=limit, cursor=cursor)
+
+    @mcp.tool()
+    async def tandem_decision(request: DecisionRequest, ctx: Context) -> dict:
+        """Record and answer a pending clarification against an explicitly pinned brief.
+
+        Policy is opt-in. Prepare returns a read-only coordination consultation,
+        never starts it. Record its source-backed basis before reply. Approval,
+        scope, cost, irreversible effects and contradictions remain with the user.
+        Source identity and quotes are checked, not semantic entailment. Independent
+        review requires recapture, and expired questions cannot be answered.
+        """
+        bridge = await runtime.get(ctx)
+        return await asyncio.to_thread(bridge.decisions.perform, request)
+
+    @mcp.tool()
     async def tandem_team(
         ctx: Context,
         action: Literal[
@@ -280,24 +339,37 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 presentation.recent, bridge.channel, limit=limit, cursor=cursor
             )
         if action == "start":
-            if (
-                plan is None
-                or request_key is None
-                or run_id is not None
-                or assignments is not None
-            ):
-                raise ValueError(
-                    "start requires request_key and plan, without run_id or assignments"
+            require_fields(action, {"request_key": request_key, "plan": plan})
+            if run_id is not None or assignments is not None:
+                raise ProtocolError(
+                    "unexpected_fields",
+                    "start does not accept run_id or assignments",
+                    fields=("run_id", "assignments"),
+                    allowed_fix="Start a new logical run with its plan and request_key, or inspect the existing run by run_id.",
                 )
             result = await asyncio.to_thread(bridge.team_runs.start, request_key, plan)
             return presentation.present(result, bridge.channel, details=details)
-        if run_id is None or plan is not None or request_key is not None:
-            raise ValueError(
-                "status/assign/cancel/read require run_id, without creation fields"
+        require_fields(
+            action,
+            {"run_id": run_id},
+            next_request={"tool": "tandem_team", "arguments": {"action": "list"}},
+        )
+        if plan is not None or request_key is not None:
+            raise ProtocolError(
+                "unexpected_fields",
+                "Existing-run operations do not accept creation fields",
+                fields=("plan", "request_key"),
+                allowed_fix="Use the existing run_id; do not start a replacement run to observe it.",
             )
         if action == "read":
-            if assignments is not None or section is None:
-                raise ValueError("read requires section, without assignments")
+            require_fields(action, {"section": section})
+            if assignments is not None:
+                raise ProtocolError(
+                    "unexpected_fields",
+                    "read does not accept assignments",
+                    fields=("assignments",),
+                    allowed_fix="Follow the current reader request without mutation fields.",
+                )
             return await asyncio.to_thread(
                 presentation.read,
                 run_id,
@@ -309,8 +381,18 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 expected_sha256=expected_sha256,
             )
         if action == "assign":
-            if not assignments:
-                raise ValueError("assign requires model assignments with reasons")
+            require_fields(
+                action,
+                {"assignments": assignments or None},
+                next_request={
+                    "tool": "tandem_team",
+                    "arguments": {
+                        "action": "read",
+                        "run_id": run_id,
+                        "section": "selection",
+                    },
+                },
+            )
             result = await asyncio.to_thread(
                 bridge.team_runs.assign,
                 run_id,
@@ -409,7 +491,9 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 "focus": bridge.focus.status(),
                 "team": {
                     "available": True,
-                    "max_parallel": 4,
+                    "max_parallel": 3,
+                    "max_requested_parallel": 4,
+                    "coordination_slots": 1,
                     "max_steps": 16,
                     "lifecycle": "mcp_owner",
                     "model_selection": bridge.team_selection.status(),
@@ -426,6 +510,20 @@ def build_server(configuration: Bridge | RuntimeOptions):
                     "requires_local_engine": True,
                     "requires_pinned_image": True,
                     "default_network": "none",
+                },
+                "capacity": bridge.runtime.slots.capacity(),
+                "result_delivery": {
+                    "max_response_bytes": 16384,
+                    "reader": "tandem_read_result",
+                    "complete_recovery": "digest-bound UTF-8 pages",
+                },
+                "overview": {"available": True, "tool": "tandem_overview"},
+                "decisions": {
+                    "available": True,
+                    "tool": "tandem_decision",
+                    "requires_pinned_policy": True,
+                    "semantic_entailment": "not_verified",
+                    "grants_permissions": False,
                 },
             }
         )
@@ -573,7 +671,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
         )
         if preflight:
             return {**result, "runtime_identity": runtime_identity()}
-        return bridge.channel.decorate(result)
+        return bridge.presentation.task(result)
 
     @mcp.tool()
     async def tandem_continue(
@@ -621,7 +719,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
         )
         if preflight:
             return {**result, "runtime_identity": runtime_identity()}
-        return bridge.channel.decorate(result)
+        return bridge.presentation.task(result)
 
     @mcp.tool()
     async def tandem_result(
@@ -633,24 +731,14 @@ def build_server(configuration: Bridge | RuntimeOptions):
         details: bool = False,
         wait_mode: Literal["auto", "bounded"] = "bounded",
     ) -> dict:
-        """Get the actual answer, work outcome and next_action. Questions return immediately.
+        """Wait for the actual answer or a question, with a bounded response.
 
-        By default this waits for the state itself, up to 1200 seconds: a terminal state, a
-        question or an expiry returns earlier. That is one model turn instead of a chain of
-        short naps, each of which re-reads your whole context. Pass wait_seconds=0 to peek at
-        the current state without waiting, and wait_mode="auto" when you have complementary
-        work and want delivery coverage to release you early.
-
-        wait_seconds: 0..1200, served in full by the server. A client may stop holding the
-        call in the foreground first, and what it does then differs by client: if it answers
-        that it moved the request to a background task, read that result instead of retrying;
-        one measured Claude Code run handed off at 120 seconds and delivered every result. wait_mode="auto" also returns as soon as event delivery covers this
-        task; "bounded" waits for the task itself, which costs one call instead of many
-        when the client cannot use the waiting time. Either way the wait is finite and
-        cancellable, and expiry is reported in `wait`, never as a task state.
-        completed is turn completion, not proof of success. answer holds the requested
-        text; summary only describes the work. When answer_truncated, read
-        answer_artifact_id. details=true includes the full answer/report/contract/diagnostics.
+        Default: one bounded wait up to 1200 seconds. Questions and completion return
+        earlier. Use wait_seconds=0 for one observation, or wait_mode="auto" while
+        doing complementary work. A client's background handoff is not a failed
+        launch: retain that handle rather than starting another wait or worker.
+        Completion is not acceptance. details=true adds bounded report metadata;
+        follow readers/next_request for complete answer, report and contract.
         """
         bridge = await runtime.get(ctx)
         await bridge.channel.bind(ctx)
@@ -669,7 +757,7 @@ def build_server(configuration: Bridge | RuntimeOptions):
             else:
                 await observation.pause()
                 continue
-            result = await asyncio.to_thread(bridge.view, task_id, details)
+            result = await asyncio.to_thread(bridge.view, task_id, True)
             # A task that ends while the response is being built has ended; the
             # predicate that released the wait must not outrank what was read.
             if result["status"] == "waiting_input":
@@ -682,7 +770,9 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 result["status"],
                 result.get("question", {}).get("question_id"),
             )
-            return bridge.channel.decorate(observation.record(result, reason))
+            return bridge.presentation.task(
+                observation.record(result, reason), details=details
+            )
 
     @mcp.tool()
     async def tandem_reply(
@@ -698,14 +788,14 @@ def build_server(configuration: Bridge | RuntimeOptions):
         await asyncio.to_thread(
             bridge.channel.seen, task_id, "waiting_input", question_id
         )
-        return bridge.channel.decorate(result)
+        return bridge.presentation.task(result)
 
     @mcp.tool()
     async def tandem_cancel(task_id: str, ctx: Context) -> dict:
         """Stop a task, including while it waits for clarification. Does not undo edits."""
         bridge = await runtime.get(ctx)
         await bridge.channel.bind(ctx)
-        return bridge.channel.decorate(await asyncio.to_thread(bridge.cancel, task_id))
+        return bridge.presentation.task(await asyncio.to_thread(bridge.cancel, task_id))
 
     @mcp.tool()
     async def tandem_list(
@@ -993,14 +1083,26 @@ def build_server(configuration: Bridge | RuntimeOptions):
         """
         bridge = await runtime.get(ctx)
         if action in ("create", "prepare"):
-            if request is None or review_id is not None:
-                raise ValueError(f"{action} requires request and no review_id")
+            require_fields(action, {"request": request})
+            if review_id is not None:
+                raise ProtocolError(
+                    "unexpected_fields",
+                    f"{action} does not accept review_id",
+                    fields=("review_id",),
+                    allowed_fix="Prepare or create a new explicit selection; read an existing snapshot by review_id.",
+                )
             worker = (
                 bridge.reviews.create if action == "create" else bridge.reviews.prepare
             )
             return await asyncio.to_thread(worker, request)
-        if review_id is None or request is not None:
-            raise ValueError("read/assess require review_id and no request")
+        require_fields(action, {"review_id": review_id})
+        if request is not None:
+            raise ProtocolError(
+                "unexpected_fields",
+                "read/assess do not accept a new capture request",
+                fields=("request",),
+                allowed_fix="Read the existing review_id, or prepare a separate explicitly expanded capture.",
+            )
         if action == "assess":
             return await asyncio.to_thread(bridge.reviews.assess, review_id)
         return await asyncio.to_thread(
@@ -1044,9 +1146,13 @@ def build_server(configuration: Bridge | RuntimeOptions):
         bridge = await runtime.get(ctx)
         await bridge.channel.bind(ctx)
         if action == "start":
-            if request is None or request_key is None or run_id is not None:
-                raise ValueError(
-                    "start requires request_key and request, without run_id"
+            require_fields(action, {"request_key": request_key, "request": request})
+            if run_id is not None:
+                raise ProtocolError(
+                    "unexpected_fields",
+                    "start does not accept run_id",
+                    fields=("run_id",),
+                    allowed_fix="Use status for an existing run; use a new request_key only for a new logical review.",
                 )
             if question_id is not None or answer is not None:
                 raise ValueError("Question fields are only valid for reply")
@@ -1060,8 +1166,11 @@ def build_server(configuration: Bridge | RuntimeOptions):
             )
             run_id = result["run_id"]
         else:
-            if run_id is None:
-                raise ValueError("status/reply/cancel require run_id")
+            require_fields(
+                action,
+                {"run_id": run_id},
+                next_request={"tool": "tandem_overview", "arguments": {}},
+            )
             if any(
                 value is not None
                 for value in (
@@ -1074,8 +1183,18 @@ def build_server(configuration: Bridge | RuntimeOptions):
             ):
                 raise ValueError("Creation options are only valid for start")
             if action == "reply":
-                if question_id is None or answer is None:
-                    raise ValueError("reply requires question_id and answer")
+                require_fields(
+                    action,
+                    {"question_id": question_id, "answer": answer},
+                    next_request={
+                        "tool": "tandem_review_run",
+                        "arguments": {
+                            "action": "status",
+                            "run_id": run_id,
+                            "wait_seconds": 0,
+                        },
+                    },
+                )
                 result = await asyncio.to_thread(
                     bridge.review_runs.reply,
                     run_id,
@@ -1123,27 +1242,13 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 if (observed := result.get(stage))
             ],
         )
-        if result["status"] in ("starting", "running"):
-            result["stage_statuses"] = {
-                stage: {
-                    key: value
-                    for key, value in result[stage].items()
-                    if key in ("task_id", "status", "outcome")
-                }
-                if result.get(stage)
-                else None
-                for stage in ("independent", "comparison")
-            }
-            for field in ("independent", "comparison", "findings"):
-                result.pop(field, None)
-            result["full_result_pending"] = True
         if reason is not None:
             if result["status"] == "waiting_input":
                 reason = "question"
             elif result["status"] not in ACTIVE:
                 reason = "terminal"
             observation.record(result, reason)
-        return bridge.channel.decorate(result)
+        return bridge.presentation.review(result)
 
     @mcp.tool()
     async def tandem_findings(
@@ -1176,18 +1281,20 @@ def build_server(configuration: Bridge | RuntimeOptions):
         bridge = await runtime.get(ctx)
         store = bridge.findings
         if action == "pin":
-            if review_id is None:
-                raise ValueError("pin requires the review_id whose findings are pinned")
+            require_fields(action, {"review_id": review_id})
             return await asyncio.to_thread(store.pin, review_id, finding_ids)
         if action == "project":
-            if set_id is None:
-                raise ValueError("project requires set_id")
+            require_fields(action, {"set_id": set_id})
             return await asyncio.to_thread(store.project, set_id, review_id)
         if action == "create":
-            if conversation_id is None or review_id is None or finding is None:
-                raise ValueError(
-                    "create requires conversation_id, review_id and finding"
-                )
+            require_fields(
+                action,
+                {
+                    "conversation_id": conversation_id,
+                    "review_id": review_id,
+                    "finding": finding,
+                },
+            )
             return await asyncio.to_thread(
                 store.create,
                 conversation_id,
@@ -1196,10 +1303,14 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 task_id=task_id,
             )
         if action == "update":
-            if finding_id is None or change is None or expected_revision is None:
-                raise ValueError(
-                    "update requires finding_id, change and expected_revision"
-                )
+            require_fields(
+                action,
+                {
+                    "finding_id": finding_id,
+                    "change": change,
+                    "expected_revision": expected_revision,
+                },
+            )
             return await asyncio.to_thread(
                 store.update,
                 finding_id,
@@ -1232,8 +1343,10 @@ def build_server(configuration: Bridge | RuntimeOptions):
             return await asyncio.to_thread(
                 store.get, finding_id, history_offset=offset, history_limit=limit
             )
-        if conversation_id is None or number is None:
-            raise ValueError("get requires finding_id OR conversation_id and number")
+        require_fields(
+            action,
+            {"conversation_id": conversation_id, "number": number},
+        )
         return await asyncio.to_thread(
             store.get_by_number,
             conversation_id,
@@ -1292,8 +1405,14 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 task_id,
                 bridge.channel.owner,
             )
-        if token is None:
-            raise ValueError("complete requires the token from the authorized claim")
+        require_fields(
+            action,
+            {"token": token},
+            next_request={
+                "tool": "tandem_receipt",
+                "arguments": {"action": "status", "task_id": task_id},
+            },
+        )
         return await asyncio.to_thread(
             bridge.receipts.complete,
             task_id,

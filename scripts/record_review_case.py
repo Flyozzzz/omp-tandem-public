@@ -145,7 +145,8 @@ def main():
         + ". Continue using action=status with the returned run_id until a terminal scenario result; "
         "do not start another run, manually switch stages, edit files, or call unrelated tools. "
         "If clarification cannot be answered from the supplied facts, report the blocker and cancel "
-        "the run instead of inventing context. Read every available complete stage answer. Briefly explain the "
+        "the run instead of inventing context. Read every available complete stage answer using the "
+        "returned readers through tandem_read_result; concatenate digest-bound pages before decoding JSON. Briefly explain the "
         "independent observations, comparison/disagreements, current applicability and any remaining "
         "limits. Do not portray peer-only cost as whole-process cost or a successful review as proof "
         "that the code has no bugs. This recording is one episode, not a comparative benchmark."
@@ -168,6 +169,7 @@ def main():
         "--allowedTools",
         "mcp__omp-tandem__tandem_scope",
         "mcp__omp-tandem__tandem_review_run",
+        "mcp__omp-tandem__tandem_read_result",
         "--output-format",
         "stream-json",
         "--verbose",

@@ -801,6 +801,53 @@ class TeamRunTests(RpcHarness):
         self.assertFalse((self.root / "first.entered").exists())
         self.assertEqual(self.models.calls, 1)
 
+    async def test_four_requested_workers_queue_behind_three_ordinary_leases(self):
+        names = ("first", "second", "third", "fourth")
+        run = await self.begin(
+            self.plan(
+                *(self.step(name, gate=True) for name in names),
+                self.step("final", depends=names),
+                max_parallel=4,
+            )
+        )
+        for name in names[:3]:
+            await self.entered(name)
+        queued = await self.until(
+            lambda: next(
+                (
+                    step
+                    for step in self.runs.view(run["run_id"])["steps"]
+                    if step["id"] == "fourth" and step["queue_reason"]
+                ),
+                None,
+            )
+        )
+        self.assertEqual(queued["status"], "pending")
+        self.assertIsNone(queued["task_id"])
+        self.assertFalse((self.root / "fourth.entered").exists())
+        capacity = self.runs.view(run["run_id"])["capacity"]
+        self.assertEqual(capacity["effective_parallel"], 3)
+        self.assertEqual(capacity["work"]["available"], 0)
+        self.assertEqual(capacity["coordination"]["available"], 1)
+        self.release("first")
+        await self.entered("fourth")
+        for name in names[1:]:
+            self.release(name)
+        finished = await self.finished(run["run_id"])
+        self.assertEqual(finished["status"], "completed", finished)
+        self.assertEqual(self.models.calls, 1)
+
+    async def test_team_coordination_lane_is_rejected_before_selection_or_execution(
+        self,
+    ):
+        first = self.step("first")
+        first["mode"] = "think"
+        first["execution"] = {"purpose": "coordination"}
+        with self.assertRaises(ValueError):
+            await self.begin(self.plan(first, self.step("final", depends=("first",))))
+        self.assertEqual(self.models.calls, 0)
+        self.assertFalse((self.root / "first.entered").exists())
+
     async def test_capacity_busy_queues_but_uncertain_admission_never_replays(self):
         original = self.runs.start_task
         attempts = []

@@ -578,8 +578,9 @@ class JevAuditTests(RpcHarness):
 
     async def test_utf8_oversize_rejects_the_whole_answer_without_truncation(self):
         started, result = await self.completed("long-answer")
-        self.assertLess(len(result["answer"]), 32000)
-        self.assertGreater(len(result["answer"].encode("utf-8")), 32000)
+        answer = await self.read_section(result["readers"]["answer"])
+        self.assertLess(len(answer), 32000)
+        self.assertGreater(len(answer.encode("utf-8")), 32000)
         before = self.bridge.artifacts.for_task(started["task_id"])
         preview = await self.audit(started["task_id"], preview=True)
         self.assertEqual(preview["status"], "not_assessable")

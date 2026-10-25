@@ -10,8 +10,10 @@ from contextlib import closing
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from .presentation import MAX_READ_BYTES, MAX_RESPONSE_BYTES, utf8_prefix, wire_size
+
 _METADATA = "artifact_id, conversation_id, task_id, context_id, name, version, sha256, media_type, characters, created"
-_MAX_BYTES = 4 * 1024 * 1024
+MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
 _MEDIA_TYPES = {"text/plain", "text/markdown", "application/json"}
 
 
@@ -117,7 +119,7 @@ class ArtifactStore:
         if not isinstance(content, str):
             raise TypeError("Artifact content must be text")
         encoded = content.encode("utf-8")
-        if len(encoded) > _MAX_BYTES:
+        if len(encoded) > MAX_ARTIFACT_BYTES:
             raise ValueError("Artifact content exceeds the 4 MiB UTF-8 limit")
         if media_type == "application/json":
             try:
@@ -217,7 +219,15 @@ class ArtifactStore:
         result = dict(row)
         # Python slicing counts Unicode code points even after embedded NULs,
         # unlike SQLite's text substr()/length() functions.
-        result["content"] = result["content"][offset : offset + limit]
-        end = offset + len(result["content"])
-        result["next_offset"] = end if end < result["characters"] else None
+        content = result["content"][offset : offset + limit]
+        # Keep the public character cursor, but never return an unbounded wire
+        # page for multibyte text, JSON escapes, or embedded control characters.
+        content = utf8_prefix(content, MAX_READ_BYTES)
+        while True:
+            result["content"] = content
+            end = offset + len(content)
+            result["next_offset"] = end if end < result["characters"] else None
+            if wire_size(result) <= MAX_RESPONSE_BYTES:
+                break
+            content = content[: max(1, len(content) // 2)]
         return result

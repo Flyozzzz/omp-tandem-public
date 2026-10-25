@@ -326,12 +326,11 @@ raise SystemExit(main())
         with patch.object(
             self.runs,
             "start_task",
-            side_effect=ValueError("All four worker slots are occupied"),
+            side_effect=ValueError("Worker admission was refused"),
         ):
             run = await asyncio.to_thread(self.runs.start, key, self.request())
             result = await self.wait_run(run["run_id"])
         self.assertEqual(result["status"], "failed")
-        self.assertIn("four worker slots", result["error"])
         self.assertIsNone(result["independent"])
         self.assertIsNotNone(result["task_id"])
         repeat = self.runs.start(key, self.request())
@@ -537,9 +536,7 @@ raise SystemExit(main())
             request=self.request(),
             wait_seconds=0,
         )
-        self.assertTrue(started["full_result_pending"])
-        self.assertNotIn("independent", started)
-        self.assertNotIn("comparison", started)
+        self.assertLessEqual(len(json.dumps(started).encode("utf-8")), 16384)
         repeated = await self.call(
             "tandem_review_run",
             action="start",
@@ -556,7 +553,7 @@ raise SystemExit(main())
         self.assertEqual(cancelled["status"], "cancelled")
         self.assertIsNone(cancelled["comparison"])
 
-    async def test_mcp_terminal_result_contains_both_complete_answers(self):
+    async def test_mcp_terminal_readers_recover_both_complete_answers(self):
         (self.root / "scenario").write_text("long-answer")
         result = await self.call(
             "tandem_review_run",
@@ -566,9 +563,13 @@ raise SystemExit(main())
             wait_seconds=25,
         )
         self.assertEqual(result["status"], "completed")
+        self.assertLessEqual(len(json.dumps(result).encode("utf-8")), 16384)
+        recovered = await self.read_section(result["readers"]["result"])
         for stage in ("independent", "comparison"):
-            self.assertEqual(result[stage]["answer"], "雪界𝄞" * 6000)
-            self.assertFalse(result[stage]["answer_truncated"])
+            full = await self.read_section(result["readers"][stage])
+            self.assertEqual(full["answer"], "雪界𝄞" * 6000)
+            self.assertEqual(recovered[stage]["answer"], full["answer"])
+            self.assertFalse(full["answer_truncated"])
         self.assertIsNone(result["usage"]["coordinator"])
         self.assertIsNone(result["usage"]["total_cost"])
 

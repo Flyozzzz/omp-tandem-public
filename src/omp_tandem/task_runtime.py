@@ -60,6 +60,8 @@ class TaskRuntime:
         self.focus = focus
         self.threads: dict[str, threading.Thread] = {}
         self.guard = threading.Lock()
+        # Unknown native teardown retains both leases until this owner exits.
+        self.unsettled_leases = {}
         self.closing = False
 
     def preflight(
@@ -133,7 +135,9 @@ class TaskRuntime:
                 prepared = self._prepare(**arguments)
                 record = prepared["record"]
                 record.update(task_id=task_id, conversation_id=destination)
-                slot = self.slots.acquire()
+                slot = self.slots.acquire(
+                    purpose=prepared["settings"]["effective"]["purpose"]
+                )
                 self.tasks.insert(
                     record,
                     prepared["owned"],
@@ -387,6 +391,18 @@ class TaskRuntime:
             or {}
         )
         needs_shell = requirements.requires_shell or verification["requires_shell"]
+        if settings["effective"]["purpose"] == "coordination" and (
+            mode != "think"
+            or policy.scope.owned_files
+            or needs_shell
+            or requirements.requires_write
+            or attempt is not None
+            or team_run_id is not None
+        ):
+            raise ValueError(
+                "Coordination requires a think-only consultation without owned files, "
+                "shell/write requirements, team steps or managed assignment; no worker launched"
+            )
         if attempt:
             shell = shell_permission(attempt) and not (
                 attempt["kind"] == "review"
@@ -519,6 +535,15 @@ class TaskRuntime:
             if self.focus is not None
             else None
         )
+        capacity = self.slots.capacity()
+        purpose = settings["effective"]["purpose"]
+        capacity.update(
+            purpose=purpose,
+            available_for_turn=capacity[purpose]["available"] > 0,
+            reason=None
+            if capacity[purpose]["available"]
+            else f"{purpose}_capacity_busy",
+        )
         result = {
             "admissible": True,
             "reservation": False,
@@ -528,6 +553,7 @@ class TaskRuntime:
             "previous_task_id": record["previous_task_id"],
             "previous_conversation_id": source_id,
             "execution": settings,
+            "capacity": capacity,
             "requirements": requirements.model_dump(),
             "verification": verification,
             "repository_observations": observations,
@@ -618,12 +644,18 @@ class TaskRuntime:
                     )
 
     def _run(self, task_id, handle, slot):
+        settled = False
         try:
-            self.worker.execute(task_id)
+            settled = self.worker.execute(task_id) is True
         finally:
-            handle.close()
-            slot.close()
             with self.guard:
+                if settled:
+                    handle.close()
+                    slot.close()
+                else:
+                    # A terminal record or a failed stop request is not proof
+                    # that the owned native process has actually terminated.
+                    self.unsettled_leases[task_id] = (handle, slot)
                 self.threads.pop(task_id, None)
 
     def shutdown(self):

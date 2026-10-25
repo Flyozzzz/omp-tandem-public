@@ -15,12 +15,14 @@ from typing import Literal
 from uuid import uuid4
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.utilities.cli import log_server_banner
 from fastmcp.utilities.logging import temporary_log_level
 from mcp.server.lowlevel.server import NotificationOptions
 from mcp.server.stdio import stdio_server
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
+from .errors import protocol_error_response
 from .events import EventConflict, EventStore, QueueFull
 from .prompts import POLLING_INSTRUCTIONS, PUSH_INSTRUCTIONS
 from .watchdog import Watchdog
@@ -45,6 +47,15 @@ class ChannelFastMCP(FastMCP):
         tools = await super()._list_tools_mcp()
         await self.binding.discover(self._mcp_server.request_context.session)
         return tools
+
+    async def _call_tool_mcp(self, key, arguments):
+        try:
+            return await super()._call_tool_mcp(key, arguments)
+        except (ToolError, ValidationError) as error:
+            response = protocol_error_response(error)
+            if response is not None:
+                return response
+            raise
 
     async def run_stdio_async(self, show_banner=True, log_level=None):
         if show_banner:
@@ -237,7 +248,7 @@ class ChannelDelivery:
             "tickets": [],
         }
 
-    def decorate(self, result):
+    def decorate(self, result, *, include_instructions=True):
         task_id, status = result.get("task_id"), result.get("status")
         # A caller that asked to wait inside the call is told to wait that way
         # again, rather than handed back to delivery it deliberately declined.
@@ -248,7 +259,14 @@ class ChannelDelivery:
         if task_id and status in ("starting", "running", "cancelling"):
             ids.append(task_id)
         result["delivery"] = self.delivery
-        result["delivery_instructions"] = self.delivery_instructions
+        if include_instructions:
+            result["delivery_instructions"] = self.delivery_instructions
+        else:
+            result.pop("delivery_instructions", None)
+            result["delivery_status"] = {
+                "tool": "tandem_channel",
+                "arguments": {"action": "status"},
+            }
         result["watchdog"] = self._watchdog_metadata(ids)
         automatic = self.can_await(ids) and not bounded
         if "ready" in result and "pending" in result:

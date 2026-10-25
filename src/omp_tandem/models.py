@@ -223,6 +223,12 @@ class AcceptanceSet(_ContractModel):
             )
         return self
 
+    def require_matches(self, acceptance: list[str]) -> None:
+        if [item.text for item in self.items] != acceptance:
+            raise ValueError(
+                "acceptance_set items must repeat the acceptance list exactly, in order"
+            )
+
 
 class AcceptanceRef(_ContractModel):
     """Points at one criterion or one of its obligations, at an exact revision."""
@@ -354,12 +360,8 @@ class TaskContract(_ContractModel):
 
     @model_validator(mode="after")
     def acceptance_set_matches(self) -> Self:
-        if self.acceptance_set is not None and [
-            item.text for item in self.acceptance_set.items
-        ] != list(self.acceptance):
-            raise ValueError(
-                "acceptance_set items must repeat the acceptance list exactly, in order"
-            )
+        if self.acceptance_set is not None:
+            self.acceptance_set.require_matches(self.acceptance)
         return self
 
 
@@ -388,12 +390,8 @@ class TurnContract(_ContractModel):
 
     @model_validator(mode="after")
     def acceptance_set_matches(self) -> Self:
-        if self.acceptance_set is not None and [
-            item.text for item in self.acceptance_set.items
-        ] != list(self.acceptance):
-            raise ValueError(
-                "acceptance_set items must repeat the acceptance list exactly, in order"
-            )
+        if self.acceptance_set is not None:
+            self.acceptance_set.require_matches(self.acceptance)
         return self
 
 
