@@ -93,7 +93,9 @@ The agent uses `tandem_review_run`: a saved staged/index snapshot, one independe
 
 See [compact views, runtime identity and recovery](docs/guide.md#compact-contracts) and [operator blocker resolution](docs/guide.md#operator-unblock). Hints and notifications grant no authority; resolving a blocker never resumes or authorizes work. Independent acceptance is separate from operator application and publication.
 
-Latest published release: **[3.13.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.13.0)**. Waiting now defaults to the wait a coordinator actually needs: `tandem_result` and `tandem_wait` take a long bounded wait instead of a 25-second nap repeated once per model turn. A success report over a clarification that expired unanswered is refused at the server rather than merely discouraged in the instructions. Operator `work_daemon.py cleanup` removes abandoned managed worktrees, dry-run by default, keeping retained commits and any working copy holding uncaptured edits. An opt-in [whole-brief protocol](docs/guide.md#carry-a-whole-brief) lets the pair carry a pinned brief to the end without interrupting the owner for every decision, and publishes the basis of each decision it closes. See the [changelog](CHANGELOG.md). Updating the repository does not restart existing work or authorize new execution.
+Latest published release: **[3.13.1](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.13.1)**. This patch makes MCP shutdown finish project cleanup before returning, fixing the macOS shutdown/temporary-directory race.
+
+Version 3.13.0 introduced long bounded waits, server-enforced handling of unanswered clarifications, operator cleanup of abandoned managed worktrees, and the opt-in [whole-brief protocol](docs/guide.md#carry-a-whole-brief). See the [changelog](CHANGELOG.md). Updating the repository does not restart existing work or authorize new execution.
 
 <a id="team-mode"></a>
 ## Team mode (unreleased)

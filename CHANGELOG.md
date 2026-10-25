@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.13.1 — 2026-10-25
+
+- MCP shutdown now shields runtime cleanup from transport cancellation, waiting for project database and worker cleanup before returning. This fixes the macOS binding-test race where temporary-directory removal could overlap unfinished shutdown. A regression holds shutdown in progress and verifies that client disconnect waits for it.
+
 ## 3.13.0 — 2026-10-25
 
 - Waiting for a task now defaults to the wait a coordinator actually needs. `tandem_result` and `tandem_wait` default to `wait_seconds=1200` with `wait_mode="bounded"`; `tandem_review_run(action="status")` and `tandem_team(action="status")` default to the same long wait, while start, reply, assign and cancel still return their identifier at once. Explicit `wait_seconds=0` still peeks and explicit `wait_mode="auto"` still follows delivery coverage, so a caller with complementary work keeps the old behaviour by asking for it.

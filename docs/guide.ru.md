@@ -8,7 +8,7 @@
 
 OMP Tandem предоставляет локальный MCP-мост в виде плагина Claude Code и переносимого пакета Agent Plugins для Codex и совместимых клиентов. Другие локальные MCP-клиенты могут использовать тот же сервер без поддержки плагинов.
 
-**Пакет 3.13.0** · [Лицензия MIT](../LICENSE) · [Релизы](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels и вебхуки (на английском)](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Пакет 3.13.1** · [Лицензия MIT](../LICENSE) · [Релизы](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels и вебхуки (на английском)](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 Встроенных правил для конкретной компании, репозитория или продукта нет. При необходимости вы сами передаёте знания о продукте. Изоляция проектов — это универсальная граница данных, а не жёстко заданная привязка к определённому проекту.
 

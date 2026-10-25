@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
+import threading
 import unittest
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -204,6 +206,43 @@ class ClientBindingTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ToolError):
             await self.call(client, "tandem_scope")
         self.assertFalse(self.state.exists())
+
+    async def test_client_disconnect_waits_for_project_shutdown(self):
+        server = build_server(
+            RuntimeOptions(
+                self.state, "unused", project_root=self.a, channel_enabled=False
+            )
+        )
+        client = await self.stack.enter_async_context(Client(server))
+        await self.call(client, "tandem_scope")
+        bridge = server.binding.bridge
+        shutdown = bridge.shutdown
+        entered = asyncio.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        def blocked_shutdown():
+            loop.call_soon_threadsafe(entered.set)
+            try:
+                if not release.wait(5):
+                    raise TimeoutError("Test did not release project shutdown")
+                shutdown()
+            finally:
+                finished.set()
+
+        with patch.object(bridge, "shutdown", blocked_shutdown):
+            closing = asyncio.create_task(self.stack.aclose())
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                done, _ = await asyncio.wait({closing}, timeout=0.1)
+                self.assertNotIn(
+                    closing, done, "Client disconnected before project shutdown"
+                )
+            finally:
+                release.set()
+                await asyncio.wait_for(closing, 5)
+                self.assertTrue(await asyncio.to_thread(finished.wait, 5))
 
 
 if __name__ == "__main__":

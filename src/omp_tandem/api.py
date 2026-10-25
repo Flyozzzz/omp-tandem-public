@@ -5,6 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
+from anyio import CancelScope
 from fastmcp import Context
 from pydantic import Field
 
@@ -70,7 +71,10 @@ def build_server(configuration: Bridge | RuntimeOptions):
         try:
             yield {}
         finally:
-            await runtime.close()
+            # FastMCP cancels its transport scope before exiting this lifespan.
+            # Finish cleanup before returning ownership of the project directory.
+            with CancelScope(shield=True):
+                await runtime.close()
 
     mcp = ChannelFastMCP(
         "omp-tandem",
