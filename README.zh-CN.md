@@ -95,7 +95,9 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 
 参见[精简视图、运行身份与恢复](docs/guide.zh-CN.md#compact-contracts)、[操作者解除阻塞](docs/guide.zh-CN.md#operator-unblock)。提示与通知不授予权限；解除阻塞不会恢复或授权工作。验收、应用和发布是各自独立的决定。
 
-最新已发布版本为 **[3.16.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.16.0)**。验证现在也有了上界：协调者被告知声明的阶梯同时是上限，运行也会报告当前处于第几轮修正。
+最新已发布版本为 **[3.17.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.17.0)**。共享计划现在可以固定一份已发布的产品快照，使需求随工作一起传递，而不必作为自由文本重抄。
+
+**3.17.0 新增：**`WorkPlan.project_context_id`。`TeamPlan` 早已支持固定上下文，共享计划此前不支持，实现者只能拿到自由文本 `context`。该 ID 必须已存在于本项目——没有 `latest` 解析，未知 ID 在 `create`／`propose` 阶段即被拒绝，早于任何工作被准入。独立快照审查永远不会获得该绑定，因为 `require_review_context_capture` 拒绝在独立阶段绑定产品上下文。未固定任何内容的计划，其已存储的操作 receipts 保持不变。
 
 **3.16.0 新增：**讨论轮次早有上界（"after two rounds decide"），验证却没有，于是多做检查总显得免费、总显得更稳妥。协调者指令与 tandem 技能现在明确：声明的阶梯既是下限也是上限——发现本身不会扩展它，变异测试与模糊测试是针对具名风险的选择而非每个任务的例行公事，修正轮只重测发生变化的行为而非全部。审查运行及其摘要提供 `correction_round`，即已声明修正链的深度。只有已声明的链接才计入，因此未声明 `corrective` 的重新捕获会从 1 重新开始——轮次低不证明返工少，轮次高也不证明做了无用功。
 

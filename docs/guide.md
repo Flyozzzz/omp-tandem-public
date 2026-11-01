@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Package 3.16.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Package 3.17.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -882,6 +882,8 @@ A task that declares no set is reported as `assessment: "not_declared"`, with th
 **What this never claims.** The projection counts declarations and runs. It does not establish that a mapped check asserts the right behaviour, that the declared obligations exhaust the criterion, or that a passing run means the requirement is met — `semantic_sufficiency` and `acceptance` stay `not_assessed` in every response, including when every unit has a current pass. A participant can declare a mapping its test does not honour, and no schema detects that; the projection makes the assertion explicit and reviewable, which is a different thing from certifying it.
 
 **Shared-work coverage (since 3.14.0).** `WorkStep.acceptance_set` declares the step's exact `acceptance` strings; `WorkPlan.acceptance_set` declares the plan's exact `acceptance` strings, using the same `AcceptanceSet` identities, obligations and content revision. Step `verification`/`review_verification` and global `WorkPlan.verification` use the existing `VerificationPlan`: check `acceptance_refs`, `acceptance_coverage="report_only"|"require_current_evidence"` and `coverage_scope`. Do not create a second checklist or use a native task's denominator for the plan.
+
+**Pinned product context on a shared plan (since 3.17.0).** `WorkPlan.project_context_id` pins one published snapshot to the agreed plan revision, so a brief travels with the plan instead of being retyped into free-text `context`. The ID must already exist in this project: there is no `latest` resolution, and an unknown ID is refused at `create`/`propose`, before any work is admitted. Implementation attempts receive that exact snapshot through the existing capsule and `tandem_context_read`. **An independent snapshot review never receives it** — `require_review_context_capture` refuses that binding, so a reviewer's requirements belong in the capture, not a live snapshot. `context` stays local explanation and is not product policy. A plan that pins nothing behaves exactly as before, including its stored operation receipts.
 
 `WorkCommand.check_runs` supplies append-only `CheckRun` evidence for `submit`, `report`, `accept` or `reject`; other actions do not accept it, and participants cannot assert `machine_observed`. Runs retain exact criterion/check identities, plan revision, submitted commit and environment. Current local implementation/review and global obligations are assessed separately; the global target is the final integration submission, never the count of accepted steps. A required supervisor check must settle under its real grant; that acceptance path also requires comparison. `next_actions` reflects those gates, not wishful availability.
 

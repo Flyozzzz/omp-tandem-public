@@ -499,6 +499,12 @@ class OmpWorkAdapter(_Adapter):
                 else "analyze",
                 review_id=attempt.get("review_id") if independent else None,
                 review_stage="independent" if independent else None,
+                # An independent snapshot review must not bind product context:
+                # its requirements belong in the capture. See
+                # task_contracts.require_review_context_capture.
+                project_context_id=(
+                    None if independent else plan.get("project_context_id")
+                ),
                 timeout_seconds=max(1, min(7200, int(handle.deadline - time.time()))),
                 execution={"model": attempt["omp_model"]},
                 prompt=prompt,

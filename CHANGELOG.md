@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.17.0 — 2026-11-01
+
+- `WorkPlan.project_context_id` pins one published product snapshot to the agreed plan revision. `TeamPlan` has carried this since earlier releases; a shared plan could not, so a pinned brief did not travel with the work and an implementer received only free-text `context`. The ID must already exist in this project: there is no `latest` resolution, and an unknown ID is refused at `create`/`propose`, before any work is admitted.
+- An independent snapshot review never receives that binding. `require_review_context_capture` refuses product context for an independent stage, so the reviewer's requirements stay in the capture; `OmpWorkAdapter.start` passes the pin only for non-independent attempts, and a regression covers both directions.
+- Stored receipts replay unchanged: `_operation_fingerprint` drops `project_context_id` when it is absent, as it already does for `acceptance_set` and `verification`, so a plan that pins nothing keeps its historical fingerprint.
+- This carries an existing brief to the implementer; it does not make a brief correct, complete or understood, and it does not bound verification.
+
 ## 3.16.0 — 2026-11-01
 
 - Coordinator instructions and the tandem skill now bound verification from above, not only from below. `INSTRUCTIONS` already capped discussion ("after two rounds decide") while nothing capped checks, so an extra pass always looked free and always looked safer. The declared ladder is now stated as the ceiling as well as the floor: a finding does not widen it by itself, mutation and fuzzing are a choice justified by a named risk rather than every task's ritual, and a fix round rechecks the behaviour that changed instead of the whole ladder. `INSTRUCTIONS` grew from 3589 to 3881 characters, which every coordinator session pays for.

@@ -8,7 +8,7 @@
 
 OMP Tandem предоставляет локальный MCP-мост в виде плагина Claude Code и переносимого пакета Agent Plugins для Codex и совместимых клиентов. Другие локальные MCP-клиенты могут использовать тот же сервер без поддержки плагинов.
 
-**Пакет 3.16.0** · [Лицензия MIT](../LICENSE) · [Релизы](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels и вебхуки (на английском)](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Пакет 3.17.0** · [Лицензия MIT](../LICENSE) · [Релизы](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels и вебхуки (на английском)](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 Встроенных правил для конкретной компании, репозитория или продукта нет. При необходимости вы сами передаёте знания о продукте. Изоляция проектов — это универсальная граница данных, а не жёстко заданная привязка к определённому проекту.
 
@@ -870,6 +870,8 @@ python -m omp_tandem.work_daemon --project-root /absolute/project apply WORK_ID 
 
 <a id="work-acceptance-coverage"></a>
 **Покрытие общей работы (с 3.14.0).** `WorkStep.acceptance_set` дословно повторяет `acceptance` шага; `WorkPlan.acceptance_set` — `acceptance` плана, используя тот же `AcceptanceSet` с IDs, obligations и content revision. `verification`/`review_verification` шага и `WorkPlan.verification` используют существующий `VerificationPlan`: `acceptance_refs` у checks, `acceptance_coverage="report_only"|"require_current_evidence"` и `coverage_scope`. Это не второй checklist; знаменатель native-задачи не подменяет план.
+
+**Закреплённый product context у общего плана (с 3.17.0).** `WorkPlan.project_context_id` закрепляет один опубликованный снимок за согласованной ревизией плана, поэтому ТЗ едет вместе с планом, а не перепечатывается в свободный `context`. ID должен уже существовать в этом проекте: разрешения `latest` нет, неизвестный ID отклоняется на `create`/`propose` — до того, как допущена любая работа. Попытки реализации получают именно этот снимок через существующий capsule и `tandem_context_read`. **Независимое snapshot-ревью его не получает никогда** — `require_review_context_capture` эту привязку запрещает, поэтому требования ревьюера принадлежат захвату, а не живому снимку. `context` остаётся локальным пояснением и не является продуктовой политикой. План, который ничего не закрепляет, ведёт себя как прежде, включая сохранённые receipts его операций.
 
 `WorkCommand.check_runs` передаёт append-only `CheckRun` только для `submit|report|accept|reject`; участник не может установить `machine_observed`. Сохраняются точные критерии/check IDs, ревизия плана, submitted commit и environment. Локальные implementation/review и глобальные обязательства оцениваются отдельно; глобальная цель — коммит финальной интеграции, а не число принятых шагов. Обязательные supervisor checks должны завершиться под настоящим grant; для такого пути приёмка требует сравнения. `next_actions` отражает реальные gates.
 

@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**软件包 3.16.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**软件包 3.17.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -873,6 +873,8 @@ revision 是集合的内容，不是你挑选的版本号：修改标准文本�
 
 <a id="work-acceptance-coverage"></a>
 **共享工作覆盖（自 3.14.0）。** `WorkStep.acceptance_set` 精确重复步骤 `acceptance`，`WorkPlan.acceptance_set` 精确重复计划的 `acceptance`，使用相同 `AcceptanceSet` 标识、obligations 与内容 revision。步骤 `verification`/`review_verification` 以及全局 `WorkPlan.verification` 沿用 `VerificationPlan`：check 的 `acceptance_refs`、`acceptance_coverage="report_only"|"require_current_evidence"` 与 `coverage_scope`。不引入第二份清单，也不拿 native 任务分母替换计划。
+
+**共享计划上的固定产品上下文（自 3.17.0）。** `WorkPlan.project_context_id` 把一份已发布快照固定到已商定的计划修订上，使需求随计划一起传递，而不是重新抄进自由文本 `context`。该 ID 必须已存在于本项目：没有 `latest` 解析，未知 ID 在 `create`／`propose` 阶段即被拒绝——早于任何工作被准入。实现尝试通过既有 capsule 与 `tandem_context_read` 获得该确切快照。**独立快照审查永远不会获得它**——`require_review_context_capture` 拒绝这种绑定，因此审查者的需求属于捕获内容，而非实时快照。`context` 仍是本地说明，不是产品政策。未固定任何内容的计划行为与此前完全一致，包括其已存储的操作 receipts。
 
 `WorkCommand.check_runs` 仅供 `submit|report|accept|reject` 添加只追加的 `CheckRun`；参与者不能声明 `machine_observed`。保留精确标准/check 标识、计划修订、提交 commit 与 environment。局部 implementation/review 和全局义务分别评估；全局目标是最终集成提交，不是已接受步骤数。必需的 supervisor checks 必须在真实 grant 下完成；此路径的验收需要比较阶段。`next_actions` 反映实际 gates。
 

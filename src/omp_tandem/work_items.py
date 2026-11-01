@@ -494,6 +494,10 @@ class WorkPlan(_Model):
         description="Acyclic checklist with exactly one final integration step that depends transitively on all other steps. A one-step plan is valid.",
     )
     context: str = Field(default="", max_length=64000)
+    project_context_id: str | None = Field(
+        default=None,
+        description="An existing published project context pinned to this plan revision. Implementation attempts receive that exact snapshot; independent snapshot review never does. `context` stays local explanation, not product policy.",
+    )
 
     @model_validator(mode="after")
     def validate_graph(self) -> Self:
@@ -691,7 +695,7 @@ def _operation_fingerprint(command, bound, *, version=2):
         payload.pop("check_runs")
     declared_plan = payload.get("plan")
     if declared_plan:
-        for key in ("acceptance_set", "verification"):
+        for key in ("acceptance_set", "verification", "project_context_id"):
             if declared_plan.get(key) is None:
                 declared_plan.pop(key, None)
     empty_requirements = TaskRequirements().model_dump()
@@ -3117,6 +3121,7 @@ class WorkStore:
             self._authenticate(db, attempt_token, actor)
         if command.action == "create":
             plan = command.plan.model_dump()
+            self._require_pinned_context(db, plan)
             observation = self._observe_repository(plan, action="create")
             card = {
                 "work_id": str(uuid4()),
@@ -3209,6 +3214,7 @@ class WorkStore:
             if command.plan is None:
                 raise ValueError("Propose requires a complete plan")
             plan = command.plan.model_dump()
+            self._require_pinned_context(db, plan)
             transition = card.get("transition")
             if transition and transition["phase"] in TRANSITION_OPEN:
                 raise WorkConflict(
@@ -3680,6 +3686,27 @@ class WorkStore:
         from .work_workspace import WorkWorkspace
 
         return WorkWorkspace(self.scope).source_commit()
+
+    @staticmethod
+    def _require_pinned_context(db, plan):
+        """Refuse an unknown pinned context before any work is admitted.
+
+        Published contexts live in this same scoped database, so existence here
+        is already the project boundary. The plan pins one exact snapshot: there
+        is no `latest` resolution, and a missing context is a refusal rather
+        than a silent fall back to the plan's free-text `context`.
+        """
+        context_id = plan.get("project_context_id")
+        if context_id is None:
+            return
+        known = db.execute(
+            "SELECT 1 FROM project_contexts WHERE context_id=?", (context_id,)
+        ).fetchone()
+        if known is None:
+            raise ValueError(
+                "Plan pins an unknown project context; publish it with "
+                "tandem_project_context and pin that exact context_id"
+            )
 
     def _observe_repository(self, plan, *, action, required=False):
         from .work_workspace import WorkWorkspace

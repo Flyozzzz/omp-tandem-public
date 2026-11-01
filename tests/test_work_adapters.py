@@ -314,6 +314,34 @@ class WorkAdapterTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "success")
         self.assertFalse((Path(self.workspace["path"]) / "forbidden-edit").exists())
 
+    def _captured_start(self):
+        """Capture the kwargs the adapter hands to the bridge."""
+        captured = {}
+        self.bridge.runtime = SimpleNamespace(guard=threading.Lock(), threads={})
+        self.bridge.cancel = lambda *args, **kwargs: None
+
+        def start(**kwargs):
+            captured.update(kwargs)
+            self.store.started(
+                self.attempt["attempt_id"],
+                native_task_id="native-task",
+                workspace=self.workspace["path"],
+            )
+            self.attempt["heartbeat_at"] = time.time()
+            return {"task_id": "native-task", "conversation_id": "native-session"}
+
+        self.bridge.start = start
+        return captured
+
+    def test_an_implementation_attempt_receives_the_plans_pinned_context(self):
+        self.attempt["actor"] = "omp"
+        self.plan["project_context_id"] = "pinned-brief"
+        captured = self._captured_start()
+        adapter = OmpWorkAdapter(self.bridge)
+        self.addCleanup(adapter.close)
+        self.launch(adapter)
+        self.assertEqual(captured["project_context_id"], "pinned-brief")
+
     def test_native_unknown_inflight_cost_stops_instead_of_spending_more(self):
         self.attempt["actor"] = "omp"
         cancelled = []
@@ -474,6 +502,19 @@ class IndependentReviewAdapterTests(WorkAdapterTests):
             "git": {"base_commit": inputs["base"], "commit": inputs["commit"]},
         }
         self.bridge.reviews = SimpleNamespace(_manifest=lambda _: self.manifest)
+
+    def test_an_independent_review_attempt_never_binds_product_context(self):
+        # task_contracts.require_review_context_capture refuses this binding;
+        # the requirements belong in the saved capture, not a live snapshot.
+        self._review_attempt()
+        self.attempt["actor"] = "omp"
+        self.plan["project_context_id"] = "pinned-brief"
+        captured = self._captured_start()
+        adapter = OmpWorkAdapter(self.bridge)
+        self.addCleanup(adapter.close)
+        self.launch(adapter)
+        self.assertIsNone(captured["project_context_id"])
+        self.assertEqual(captured["review_stage"], "independent")
 
     def test_changed_prospective_inputs_refuse_launch(self):
         self._review_attempt()
