@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**软件包 3.14.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**软件包 3.15.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -839,7 +839,7 @@ python -m omp_tandem.work_daemon --project-root /absolute/project \
 
 验证阶梯累积：`candidate` 包含 targeted，`integration` 包含全部三阶段。准备时间加已知估计不得超过总 deadline；缺失估计仍为未知。Preflight 不执行命令。显式阶梯的 success 报告必须包含每个选中的 `check_id`、对应 `run_id` 和当前通过的 `check_runs`；原先失败的记录保留。reviewer 轮次成功不等于共享 submission 获得验收。
 
-已知当前候选输入时，检查可声明现有 CheckScope 的 `scope`：实际 `kind`（`tree`、`commit`、`archive` 或 `content`）与 `digest`。其他字节的执行保留在审计历史，但不属于当前证据。未声明 scope 时，不同输入的模糊失败仍未解决。所有当前 criterion/role 组都必须通过；一个 pass 不能隐藏另一角色的当前失败。`result.verification` 和 `facts.checks` 评估声明的当前输入，`check_runs` 保留完整历史。最多 50 项声明检查、200 条 run 记录；超限拒绝，不静默裁剪。
+已知当前候选输入时，检查可声明现有 CheckScope 的 `scope`：实际 `kind`（`tree`、`commit`、`archive` 或 `content`）与 `digest`。其他字节的执行保留在审计历史，但不属于当前证据。未声明 scope 时，不同输入的模糊失败仍未解决。所有当前 criterion/role 组都必须通过；一个 pass 不能隐藏另一角色的当前失败。`result.verification` 和 `facts.checks` 评估声明的当前输入，`check_runs` 保留完整历史。`result.verification.plan_deviation` 列出阶梯之外的已记录工作：`unmatched` 为 `check_id` 未声明的执行，`repeated` 为已声明检查首次之后的重复执行，各带 `recorded_seconds` 和 `runs_with_recorded_duration`。阶梯只是准入下限，从未观察其余部分，因此该汇总只报告、不拒绝。`unmatched` 意为未纳入计划，而非多余：探索性执行、旧计划的检查和正当重试都会出现在那里；缺失的时长是未知，不是零；已记录的执行也未必是参与者运行过的全部命令。最多 50 项声明检查、200 条 run 记录；超限拒绝，不静默裁剪。
 
 共享步骤的 `requirements`/`verification` 针对实现，`review_requirements`/`review_verification` 独立针对审查者。reviewer 写入需求无效。必需 shell-check 不会绕过 snapshot-only 模式或缺失授权；未完成检查应为 blocked/partial，不能静默豁免。
 
@@ -1052,7 +1052,7 @@ OMP 会核对实际模型及其支持的思考等级。模型不支持所请求�
 
 - **总预算：**公开参数名为 `budget_seconds`，默认 600 秒，MCP 接口允许 10–7200 秒；覆盖本次受理后的捕获／启动、两个阶段和等待澄清时间，不是每阶段各给一份预算。
 - **每阶段配置：**`execution` 仍有自己的 profile／显式超时上限，每次派发按该上限和总预算剩余时间中的较小值限制。增加总预算不会自动提高 `quick` 的每阶段时限；`deep` 也不能越过总预算。`wait_seconds` 为 0–1200，默认 25，只控制一次调用等待多久，不延长运行期限。
-- **轮数：**默认 `compare=true`，但只有保存了非空作者方案或论据，且独立阶段为 `completed`、结构化报告为 `success`，才进入**一次**比较。无作者材料或 `compare=false` 时只有独立一轮；最多两轮，不做第三轮共识整合。`partial`／`blocked` 不会触发比较。
+- **轮数：**默认 `compare=true`，但只有保存了非空作者方案或论据，且独立阶段为 `completed`、结构化报告为 `success`，才进入**一次**比较。无作者材料或 `compare=false` 时只有独立一轮。前者从运行开始就报告 `comparison_requested: true` 和 `comparison_skipped` 原因，因此不会把缺失的比较误当作未请求；`compare=false` 时两个字段都保持为空。最多两轮，不做第三轮共识整合。`partial`／`blocked` 不会触发比较。
 - **无变更：**捕获中没有已选变更时，返回 `status=no_changes`、`phase=capture`，不调用模型；仅补充上下文也不能启动空审查。
 - **权限：**两个阶段均为 `think`，只读保存的材料。场景不派发 `work`、不执行 shell／测试、不自动应用建议，也不将模型结论自动视为有效缺陷。`checks[].command` 只是已提供证据的标签，不会执行。
 

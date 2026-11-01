@@ -93,7 +93,9 @@ The agent uses `tandem_review_run`: a saved staged/index snapshot, one independe
 
 See [compact views, runtime identity and recovery](docs/guide.md#compact-contracts) and [operator blocker resolution](docs/guide.md#operator-unblock). Hints and notifications grant no authority; resolving a blocker never resumes or authorizes work. Independent acceptance is separate from operator application and publication.
 
-Latest published release: **[3.14.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.14.0)**. Bounded result recovery, reserved coordination capacity and explicit evidence-backed decision workflows make the agent-facing protocol more predictable.
+Latest published release: **[3.15.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.15.0)**. A review run now says when a requested comparison was skipped, and a result names the check runs made beside the declared ladder.
+
+**New in 3.15.0:** `comparison_requested`/`comparison_skipped` on review runs, so a comparison that was asked for and never ran is no longer reported as a plain one-stage success; and `result.verification.plan_deviation`, which reads the already-stored check runs the ladder assessment discards and names unmapped and repeated executions with the seconds actually recorded. Both are added fields over unchanged behaviour: they report, and refuse nothing.
 
 Version 3.13.0 introduced long bounded waits, server-enforced handling of unanswered clarifications, operator cleanup of abandoned managed worktrees, and the opt-in [whole-brief protocol](docs/guide.md#carry-a-whole-brief). See the [changelog](CHANGELOG.md). Updating the repository does not restart existing work or authorize new execution.
 

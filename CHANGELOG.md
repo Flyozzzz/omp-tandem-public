@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.15.0 — 2026-11-01
+
+- `result.verification.plan_deviation` names recorded check runs beside the declared ladder: `unmatched` for an undeclared `check_id`, `repeated` for executions of a declared check beyond its first, each with the seconds actually recorded. The ladder admits a success and never observed the rest, so these runs were already stored and already discarded by the assessment; this reads them, adds no field to `CheckRun` and refuses nothing. Unmatched means unmapped, not unnecessary; an absent duration is unknown, not zero; and recorded runs are not necessarily every command a participant ran.
+- Review runs report `comparison_requested` and `comparison_skipped`. A run started with the default `compare=true` and no author material ends after the independent stage; until now its result carried `comparison: null`, which is also what an explicit `compare=false` produces, so a requested-but-skipped comparison was indistinguishable from one that was never asked for. The reason is now present from the start response onward, before the independent stage is paid for. Measured on one user's archive of 81 runs: 50 completed successfully as one-stage reviews under `compare=true` with both author fields empty, and author material was supplied twice. Behaviour is unchanged — these are added fields, not a new refusal — so this reports the gap rather than closing it.
+
 ## 3.14.0 — 2026-10-25
 
 - Task and review responses, including detailed results, now use bounded projections and `tandem_read_result` for complete digest-bound UTF-8 recovery. Full work views and artifact pages are also bounded; source evidence is not silently truncated. Volatile applicability observation clocks do not invalidate otherwise unchanged review pages.

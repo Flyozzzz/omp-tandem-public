@@ -16,7 +16,7 @@ from .runtime_models import ACTIVE
 from .task_contracts import current_task, work_policy
 from .task_interaction import CHECK_RUN_ARTIFACT
 from .task_store import TaskStore
-from .verification import assess_verification
+from .verification import assess_verification, summarize_plan_deviation
 
 
 def read_artifact_text(artifacts, artifact_id):
@@ -200,6 +200,9 @@ class TaskResults:
         if verification is not None:
             current_checks = assess_verification(verification, runs)
             current_checks["unreadable_records"] = unreadable
+            current_checks["plan_deviation"] = summarize_plan_deviation(
+                verification, runs
+            )
             result["verification"] = current_checks
         if attempt is not None and has_review_runner(attempt):
             if self.work_items is None:

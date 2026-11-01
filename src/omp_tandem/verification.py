@@ -80,6 +80,61 @@ def assess_verification(plan, runs) -> dict:
     }
 
 
+def summarize_plan_deviation(plan, runs) -> dict:
+    """Describe recorded work beside the declared ladder, without judging it.
+
+    The ladder admits a success; it never observed what else was run. These
+    records already exist and are dropped by the assessment above, so naming
+    them costs no new field and no new collection.
+
+    `unmatched` means outside the mapped plan, never useless: an exploratory
+    run, a check from an earlier plan and an honest retry all land here.
+    `repeated` counts further executions of a declared check beyond the first,
+    which is not the same as waste. Durations come only from runs that recorded
+    both ends; a missing duration is unknown, never zero. Recorded runs are also
+    not necessarily every command a participant ran.
+    """
+    selected = {check["id"] for check in verification_requirements(plan)["checks"]}
+    records = [
+        run if isinstance(run, CheckRun) else CheckRun.model_validate(run)
+        for run in runs
+    ]
+    grouped: dict[str, list[CheckRun]] = {}
+    for run in records:
+        grouped.setdefault(run.check_id, []).append(run)
+    unmatched, repeated = [], []
+    for check_id, members in sorted(grouped.items()):
+        measured = [
+            run.ended_at - run.started_at
+            for run in members
+            if run.started_at is not None
+            and run.ended_at is not None
+            and run.ended_at >= run.started_at
+        ]
+        row = {
+            "check_id": check_id,
+            "run_count": len(members),
+            "recorded_seconds": round(sum(measured), 3) if measured else None,
+            "runs_with_recorded_duration": len(measured),
+        }
+        if check_id not in selected:
+            unmatched.append(row)
+        elif len(members) > 1:
+            repeated.append({**row, "repeat_count": len(members) - 1})
+    return {
+        "unmatched": unmatched,
+        "unmatched_run_count": sum(row["run_count"] for row in unmatched),
+        "repeated": repeated,
+        "repeat_run_count": sum(row["repeat_count"] for row in repeated),
+        "declared_check_count": len(selected),
+        "recorded_run_count": len(records),
+        "interpretation": (
+            "recorded runs beside the declared ladder; unmatched means unmapped,"
+            " not unnecessary, and absent durations are unknown, not zero"
+        ),
+    }
+
+
 def enforce_verification(plan, report, *, trusted=None) -> None:
     """A success must identify each selected check and its current passing run."""
     if plan is None or report.outcome != "success":

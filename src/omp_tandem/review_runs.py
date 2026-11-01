@@ -367,6 +367,26 @@ class ReviewRuns:
                 else []
             )
         review_info = self.reviews.info(run["review_id"]) if run["review_id"] else None
+        # A reserved run carries no request yet, so every field here is optional.
+        payload = json.loads(run["payload_json"]) if run["payload_json"] else {}
+        author = payload.get("request") or {}
+        comparison_requested = bool(payload.get("compare"))
+        # A requested comparison that never receives author material ends as a
+        # one-stage review reporting plain success. Name that here, so the caller
+        # sees it when the run starts and cannot mistake an absent stage for an
+        # unrequested one.
+        comparison_skipped = (
+            "Comparison was requested but no author material was supplied: "
+            "author_proposal and author_rationale are both empty, so this run "
+            "ends after the independent stage."
+            if comparison_requested
+            and comparison is None
+            and not (
+                (author.get("author_proposal") or "").strip()
+                or (author.get("author_rationale") or "").strip()
+            )
+            else None
+        )
         return {
             "run_id": run["run_id"],
             "review_id": run["review_id"],
@@ -398,6 +418,8 @@ class ReviewRuns:
             ),
             "independent": independent,
             "comparison": comparison,
+            "comparison_requested": comparison_requested,
+            "comparison_skipped": comparison_skipped,
             "question": question,
             "applicability": self.reviews.assess(run["review_id"])
             if run["review_id"]

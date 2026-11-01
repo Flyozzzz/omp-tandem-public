@@ -95,7 +95,9 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 
 参见[精简视图、运行身份与恢复](docs/guide.zh-CN.md#compact-contracts)、[操作者解除阻塞](docs/guide.zh-CN.md#operator-unblock)。提示与通知不授予权限；解除阻塞不会恢复或授权工作。验收、应用和发布是各自独立的决定。
 
-最新已发布版本为 **[3.14.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.14.0)**。有界结果恢复、协调专用槽位和可追溯的需求决策流程，让智能体工具协议更可预测。
+最新已发布版本为 **[3.15.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.15.0)**。审查运行现在会说明被请求的比较阶段为何未执行，结果也会列出在声明阶梯之外实际发生的检查执行。
+
+**3.15.0 新增：**审查运行的 `comparison_requested`／`comparison_skipped` 字段，使"已请求但未执行的比较"不再表现为普通的单阶段成功；以及 `result.verification.plan_deviation`，它读取阶梯评估原本丢弃的既有检查记录，列出未纳入计划的执行与重复执行，并附实际记录的秒数。两者都是在行为不变前提下新增的字段：只报告，不拒绝。
 
 3.13.0 引入了默认长时有界等待、服务器强制执行的无人作答澄清处理、操作员清理被遗弃的受管 worktree，以及可选的[整份需求协议](docs/guide.zh-CN.md#carry-a-whole-brief)。详见[变更日志](CHANGELOG.md)。更新仓库不会重启活跃工作或授予新权限。
 

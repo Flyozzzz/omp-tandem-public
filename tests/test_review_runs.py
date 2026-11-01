@@ -267,9 +267,35 @@ raise SystemExit(main())
         run = await asyncio.to_thread(
             self.runs.start, str(uuid4()), self.request(author_proposal="")
         )
+        # The run reports the skip when it starts, before the independent stage
+        # is paid for, and keeps reporting it on the terminal view.
+        self.assertTrue(run["comparison_requested"])
+        self.assertIn("no author material", run["comparison_skipped"])
         result = await self.wait_run(run["run_id"])
         self.assertEqual(result["outcome"], "success")
         self.assertIsNone(result["comparison"])
+        self.assertTrue(result["comparison_requested"])
+        self.assertIn("no author material", result["comparison_skipped"])
+
+    async def test_comparison_not_requested_is_distinct_from_a_skip(self):
+        run = await asyncio.to_thread(
+            self.runs.start,
+            str(uuid4()),
+            self.request(author_proposal=""),
+            compare=False,
+        )
+        result = await self.wait_run(run["run_id"])
+        self.assertEqual(result["outcome"], "success")
+        self.assertIsNone(result["comparison"])
+        self.assertFalse(result["comparison_requested"])
+        self.assertIsNone(result["comparison_skipped"])
+
+    async def test_supplied_author_material_leaves_no_skip_reported(self):
+        run = await self.begin()
+        result = await self.wait_run(run["run_id"])
+        self.assertTrue(result["comparison_requested"])
+        self.assertIsNone(result["comparison_skipped"])
+        self.assertIsNotNone(result["comparison"])
 
     async def test_independent_question_requires_new_snapshot_without_waiting(self):
         (self.root / "scenario").write_text("question")

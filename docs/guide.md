@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Package 3.14.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Package 3.15.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -353,7 +353,7 @@ Use `tandem_review_run` when the goal is reviewing changes, rather than manually
 
 `request_key` identifies this logical request within the owning MCP instance. Repeating the same normalized request returns the same `run_id`; changing its payload under that key conflicts. Use a new key for a genuinely new review, not as an automatic retry after a failure.
 
-Code captures the snapshot, launches only `think`, preserves the independent answer, and starts at most one comparison if author material exists and the independent task completed with a successful structured report. Empty selected changes produce `no_changes` without a model request. No author material means one stage. `partial`, `blocked`, failed or unstructured independent results stop the scenario rather than silently moving on.
+Code captures the snapshot, launches only `think`, preserves the independent answer, and starts at most one comparison if author material exists and the independent task completed with a successful structured report. Empty selected changes produce `no_changes` without a model request. No author material means one stage: the run then reports `comparison_requested: true` with a `comparison_skipped` reason from the moment it starts, so an absent comparison is never mistaken for an unrequested one. Pass `compare=false` when a one-stage review is what you want, and both fields stay quiet. `partial`, `blocked`, failed or unstructured independent results stop the scenario rather than silently moving on.
 
 While running, use only the returned `run_id`:
 
@@ -851,7 +851,7 @@ Paths must belong to the admitted Git root; nested repository/worktree/symlink b
 
 The check ladder is cumulative: `candidate` includes targeted checks, `integration` includes all three phases. Declared preparation plus known estimates cannot exceed the whole task deadline; missing estimates remain unknown. Commands are not executed by preflight. A successful final report for an explicit ladder needs every selected `check_id`, its `run_id`, and a current passing entry in `check_runs`; history keeps earlier failures. A passed review task still does not accept a shared submission.
 
-For a known current candidate, a check may declare `scope: {"kind":"tree|commit|archive|content","digest":"..."}` using the existing CheckScope type (choose one actual kind). Other-byte runs stay in the audit history but are not current evidence. Without an explicit scope, ambiguous different-input failures remain unresolved. All current criterion/role groups must pass; a claimed pass cannot hide another role's current failure. `result.verification` and `facts.checks` assess the declared current inputs, while `check_runs` retains the unscoped history. Reports permit at most 200 run records for up to 50 declared checks; overflow is refused, never silently trimmed.
+For a known current candidate, a check may declare `scope: {"kind":"tree|commit|archive|content","digest":"..."}` using the existing CheckScope type (choose one actual kind). Other-byte runs stay in the audit history but are not current evidence. Without an explicit scope, ambiguous different-input failures remain unresolved. All current criterion/role groups must pass; a claimed pass cannot hide another role's current failure. `result.verification` and `facts.checks` assess the declared current inputs, while `check_runs` retains the unscoped history. `result.verification.plan_deviation` names recorded work beside that ladder: `unmatched` for runs whose `check_id` is not declared, `repeated` for further executions of a declared check beyond its first, each with `recorded_seconds` and `runs_with_recorded_duration`. The ladder is an admission floor and never observed the rest, so this reports and refuses nothing. Unmatched means unmapped, not unnecessary — an exploratory run, a check from an earlier plan and an honest retry all land there; an absent duration is unknown, not zero; and recorded runs are not necessarily every command a participant ran. Reports permit at most 200 run records for up to 50 declared checks; overflow is refused, never silently trimmed.
 
 ### Declared acceptance evidence
 
