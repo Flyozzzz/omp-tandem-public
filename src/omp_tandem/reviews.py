@@ -1566,10 +1566,15 @@ class ReviewStore:
             raise ValueError(f"Unknown review: {review_id}")
         return json.loads(row["manifest"])
 
-    @staticmethod
-    def _summary(manifest: dict) -> dict:
+    def _summary(self, manifest: dict) -> dict:
+        previous = (manifest.get("corrective") or {}).get("previous_review_id")
         return {
             "review_id": manifest["review_id"],
+            # Counted from the declared predecessor, so a freshly created review
+            # reports the same round as a later read of the same manifest.
+            "correction_round": (
+                self.correction_round(previous) + 1 if previous else 1
+            ),
             "created": manifest["created"],
             "scope_id": manifest["scope_id"],
             "source": manifest.get("source", "worktree"),
@@ -1609,6 +1614,29 @@ class ReviewStore:
                 "checks",
             ],
         }
+
+    def correction_round(self, review_id: str) -> int:
+        """Depth of the declared correction chain; a first review is round 1.
+
+        Only declared `corrective` links count. A coordinator that recaptures
+        without declaring one starts again at 1, so a low number is not proof
+        that little rework happened, and a high number is not proof of waste:
+        a long chain can be honest progress against real defects. This counts
+        links, and leaves the judgement to the reader.
+        """
+        seen: set[str] = set()
+        current, round_number = _canonical_id(review_id, "review_id"), 1
+        while current not in seen:
+            seen.add(current)
+            try:
+                corrective = self._manifest(current).get("corrective")
+            except ValueError:
+                break
+            previous = (corrective or {}).get("previous_review_id")
+            if not previous:
+                break
+            current, round_number = previous, round_number + 1
+        return round_number
 
     def info(self, review_id: str) -> dict:
         return self._summary(self._manifest(review_id))

@@ -296,6 +296,8 @@ raise SystemExit(main())
         self.assertTrue(result["comparison_requested"])
         self.assertIsNone(result["comparison_skipped"])
         self.assertIsNotNone(result["comparison"])
+        # A first review is round 1; corrective chains raise it.
+        self.assertEqual(result["correction_round"], 1)
 
     async def test_independent_question_requires_new_snapshot_without_waiting(self):
         (self.root / "scenario").write_text("question")

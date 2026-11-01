@@ -93,7 +93,9 @@ The agent uses `tandem_review_run`: a saved staged/index snapshot, one independe
 
 See [compact views, runtime identity and recovery](docs/guide.md#compact-contracts) and [operator blocker resolution](docs/guide.md#operator-unblock). Hints and notifications grant no authority; resolving a blocker never resumes or authorizes work. Independent acceptance is separate from operator application and publication.
 
-Latest published release: **[3.15.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.15.0)**. A review run now says when a requested comparison was skipped, and a result names the check runs made beside the declared ladder.
+Latest published release: **[3.16.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.16.0)**. Verification is now bounded above as well as below: the coordinator is told the declared ladder is a ceiling too, and a run reports which correction round it is on.
+
+**New in 3.16.0:** rounds of discussion were already bounded ("after two rounds decide") while verification was bounded by nothing, so more checks always looked free and always looked safer. Coordinator instructions and the tandem skill now state that the declared ladder is the ceiling as well as the floor: a finding does not widen it by itself, mutation and fuzzing are a choice justified by a named risk rather than every task's ritual, and a fix round rechecks changed behaviour instead of everything. `correction_round` on a review run and its summary gives the depth of the declared correction chain. Only declared links count, so a recapture without `corrective` starts again at 1 — a low round is not proof of little rework, and a high one is not proof of waste.
 
 **New in 3.15.0:** `comparison_requested`/`comparison_skipped` on review runs, so a comparison that was asked for and never ran is no longer reported as a plain one-stage success; and `result.verification.plan_deviation`, which reads the already-stored check runs the ladder assessment discards and names unmapped and repeated executions with the seconds actually recorded. Both are added fields over unchanged behaviour: they report, and refuse nothing.
 

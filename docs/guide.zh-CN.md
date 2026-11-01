@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**软件包 3.15.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**软件包 3.16.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -913,7 +913,7 @@ revision 是集合的内容，不是你挑选的版本号：修改标准文本�
 
 ### 修正复审与有界材料
 
-新的 `ReviewRequest.corrective` 包含 `previous_review_id`、准确 `previous_code_fingerprint`、`open_findings: [{"finding_id": "...", "expected_revision": N}]`。ID 必须属于当前 scope 和先前快照；不会静默接受已变更的问题版本。新的不可变 manifest 列出新增/删除/改变的输入，并标记 `prior_exposed`。即使所选源码未变，也需要新评估；旧 verdict 不转移，作者材料仍遵守披露阶段。
+新的 `ReviewRequest.corrective` 包含 `previous_review_id`、准确 `previous_code_fingerprint`、`open_findings: [{"finding_id": "...", "expected_revision": N}]`。ID 必须属于当前 scope 和先前快照；不会静默接受已变更的问题版本。新的不可变 manifest 列出新增/删除/改变的输入，并标记 `prior_exposed`。即使所选源码未变，也需要新评估；旧 verdict 不转移，作者材料仍遵守披露阶段。审查摘要与运行视图提供 `correction_round`：已声明链条的深度，首次审查为 1。只有已声明的链接才计入，因此未声明 `corrective` 的重新捕获会从 1 重新开始——轮次低不证明返工少，轮次高也不证明做了无用功。在再投入一轮之前，请与 `result.verification.plan_deviation` 一并阅读；这两个字段都不拒绝任何操作。
 
 通过分页 manifest 读取 `corrective.finding_details`：固定所声明版本的原始标题、描述、位置、复现条件和证据，不复制作者修复理由或历史。只有绑定该 exact corrective snapshot 且显式引用 finding 的任务能跨会话更新/验证；review-run 还要匹配自己的 reserved stage slot。外来、未声明或过期修改仍被拒绝。
 

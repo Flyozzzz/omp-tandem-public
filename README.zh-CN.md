@@ -95,7 +95,9 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 
 参见[精简视图、运行身份与恢复](docs/guide.zh-CN.md#compact-contracts)、[操作者解除阻塞](docs/guide.zh-CN.md#operator-unblock)。提示与通知不授予权限；解除阻塞不会恢复或授权工作。验收、应用和发布是各自独立的决定。
 
-最新已发布版本为 **[3.15.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.15.0)**。审查运行现在会说明被请求的比较阶段为何未执行，结果也会列出在声明阶梯之外实际发生的检查执行。
+最新已发布版本为 **[3.16.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.16.0)**。验证现在也有了上界：协调者被告知声明的阶梯同时是上限，运行也会报告当前处于第几轮修正。
+
+**3.16.0 新增：**讨论轮次早有上界（"after two rounds decide"），验证却没有，于是多做检查总显得免费、总显得更稳妥。协调者指令与 tandem 技能现在明确：声明的阶梯既是下限也是上限——发现本身不会扩展它，变异测试与模糊测试是针对具名风险的选择而非每个任务的例行公事，修正轮只重测发生变化的行为而非全部。审查运行及其摘要提供 `correction_round`，即已声明修正链的深度。只有已声明的链接才计入，因此未声明 `corrective` 的重新捕获会从 1 重新开始——轮次低不证明返工少，轮次高也不证明做了无用功。
 
 **3.15.0 新增：**审查运行的 `comparison_requested`／`comparison_skipped` 字段，使"已请求但未执行的比较"不再表现为普通的单阶段成功；以及 `result.verification.plan_deviation`，它读取阶梯评估原本丢弃的既有检查记录，列出未纳入计划的执行与重复执行，并附实际记录的秒数。两者都是在行为不变前提下新增的字段：只报告，不拒绝。
 

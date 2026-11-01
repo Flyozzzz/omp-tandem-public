@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.16.0 — 2026-11-01
+
+- Coordinator instructions and the tandem skill now bound verification from above, not only from below. `INSTRUCTIONS` already capped discussion ("after two rounds decide") while nothing capped checks, so an extra pass always looked free and always looked safer. The declared ladder is now stated as the ceiling as well as the floor: a finding does not widen it by itself, mutation and fuzzing are a choice justified by a named risk rather than every task's ritual, and a fix round rechecks the behaviour that changed instead of the whole ladder. `INSTRUCTIONS` grew from 3589 to 3881 characters, which every coordinator session pays for.
+- `correction_round` on a review run, and on the review summary, gives the depth of the declared correction chain; a first review is 1. Only declared `corrective` links count, so a recapture without one starts again at 1. A low round is not proof that little rework happened and a high one is not proof of waste — on one user's archive of 75 reviews, 24 declared a chain, reaching depth 5. This is read alongside `verification.plan_deviation`; neither refuses anything.
+- These bound the coordinator, which is the actor that chooses the ladder and dispatches correction rounds. They do not reach an implementer running outside this plugin, and advice in a prompt is not enforcement, so neither is a proven fix for a long verification spiral.
+
 ## 3.15.0 — 2026-11-01
 
 - `result.verification.plan_deviation` names recorded check runs beside the declared ladder: `unmatched` for an undeclared `check_id`, `repeated` for executions of a declared check beyond its first, each with the seconds actually recorded. The ladder admits a success and never observed the rest, so these runs were already stored and already discarded by the assessment; this reads them, adds no field to `CheckRun` and refuses nothing. Unmatched means unmapped, not unnecessary; an absent duration is unknown, not zero; and recorded runs are not necessarily every command a participant ran.

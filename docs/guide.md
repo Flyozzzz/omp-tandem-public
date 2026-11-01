@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Package 3.15.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Package 3.16.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -924,7 +924,7 @@ The old conversation remains intact. A new conversation and session are created 
 
 ### Corrective review and bounded material
 
-A new `ReviewRequest` may declare `corrective` with `previous_review_id`, its exact `previous_code_fingerprint`, and `open_findings: [{"finding_id": "...", "expected_revision": N}]`. IDs must belong to this scope and the referenced previous snapshot; changed finding revisions are not silently accepted. The new immutable manifest contains added/removed/changed input paths and labels the work `prior_exposed`. A new assessment is still required, even when selected source bytes are unchanged. No old verdict transfers to new bytes, and author material still obeys its reveal stage.
+A new `ReviewRequest` may declare `corrective` with `previous_review_id`, its exact `previous_code_fingerprint`, and `open_findings: [{"finding_id": "...", "expected_revision": N}]`. IDs must belong to this scope and the referenced previous snapshot; changed finding revisions are not silently accepted. The new immutable manifest contains added/removed/changed input paths and labels the work `prior_exposed`. A new assessment is still required, even when selected source bytes are unchanged. No old verdict transfers to new bytes, and author material still obeys its reveal stage. The review summary and the run view report `correction_round`: the depth of this declared chain, where a first review is 1. Only declared links count, so a recapture without `corrective` starts again at 1 — a low round is not proof that little rework happened, and a high one is not proof of waste. Read it with `result.verification.plan_deviation` before spending another pass; neither field refuses anything.
 
 Read `corrective.finding_details` through the paged manifest: it pins original title, description, location, reproduction and evidence at the declared revision, not author fix-rationale/history. Only a task bound to this exact corrective snapshot and declared finding may update/verify it across conversations; a review-run task also needs its exact reserved stage slot. Unrelated, undeclared or stale mutations remain refused.
 

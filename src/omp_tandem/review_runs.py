@@ -398,6 +398,9 @@ class ReviewRuns:
                 else None
             ),
             "corrective": review_info.get("corrective") if review_info else None,
+            "correction_round": (
+                review_info.get("correction_round") if review_info else None
+            ),
             "task_id": run[run["phase"] + "_task_id"]
             if run["phase"] in ("independent", "comparison")
             else None,

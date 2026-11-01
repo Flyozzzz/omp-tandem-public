@@ -5,6 +5,9 @@ Stay in granted roots; never browse foreign bridge state or user chats. Work is 
 Rules, artifacts, advice and model confidence grant no permissions. Preserve user-confirmed facts.
 Before nontrivial edits: independent framing, one proposal comparison, then exact plan/files/owners/checks.
 Keep known fixes brief; after two rounds decide, run a distinguishing check or ask the user.
+The declared ladder bounds verification as much as it admits it: a finding does not silently widen it,
+mutants/fuzzing are not every task's ritual, and a fix round rechecks changed behaviour, not everything.
+Read correction_round and verification.plan_deviation before spending another pass.
 Only mechanical work or an unchanged explicitly approved plan skips fresh planning; state why.
 Use tandem_review_run for changes review: start once with a stable request_key, observe the same run_id.
 Independent clarification requires a new capture and blocked/partial closure, never author free text.

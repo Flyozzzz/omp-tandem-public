@@ -24,6 +24,18 @@ Prefer `tandem_review_run` over model-managed stage bookkeeping:
 
 Manual capture/stages and exact JSON: [review scenario](../../docs/guide.md#one-read-only-review-scenario), [immutable bundles](../../docs/guide.md#immutable-review-bundles). Snapshot capture grants no writes or shell; supplied checks remain claims. Team completion is not independent review.
 
+## Keep verification bounded
+
+Rounds of discussion are bounded above; verification is not bounded by anything but your own judgement. The declared ladder is an admission floor, so more checks always look free and always look safer, and nothing refuses a run that verifies far past what was agreed.
+
+- Decide the ladder with the plan, and treat it as the ceiling too. A finding does not widen it by itself: either map the finding to an existing criterion, or change the agreed scope deliberately and say so.
+- Mutation testing, fuzzing and a full-suite run are choices justified by a named risk, not a ritual every task and every fix round repeats.
+- A fix round rechecks the behaviour that changed and the boundaries it touches. Rerun the whole ladder for a release candidate, not for each correction.
+- Before spending another pass, read `correction_round` on the run and `result.verification.plan_deviation` on the task. They tell you which round you are on and what already ran beside the plan.
+- Neither field refuses anything, and neither proves waste: an unmapped run may be the one that mattered, and a long correction chain may be honest progress. Judge them, then decide, name a distinguishing check, or ask the user.
+
+Verification that is not required is not free: it is paid in the user's time and tokens. Say what a heavy pass is for before running it.
+
 ## Start and finish a scoped task
 
 Use `tandem_start(cwd=ABSOLUTE_ALLOWED_PATH, mode=..., contract=...)` with exactly one `prompt` or `contract`. `think` uses supplied context; `analyze` reads/searches; only authorized `work` edits/runs. Example contract:

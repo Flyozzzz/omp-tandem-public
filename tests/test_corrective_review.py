@@ -72,6 +72,43 @@ class CorrectiveReviewTests(unittest.TestCase):
             **values,
         }
 
+    def test_correction_round_counts_each_declared_link_in_the_chain(self):
+        self.assertEqual(self.store.correction_round(self.previous["review_id"]), 1)
+        (self.root / "source.py").write_text("fixed once\n")
+        second = self.capture(corrective=self.correction())
+        self.assertEqual(self.store.correction_round(second["review_id"]), 2)
+        self.assertEqual(self.store.info(second["review_id"])["correction_round"], 2)
+        later = self.findings.create(
+            self.conversation,
+            second["review_id"],
+            {
+                "title": "Boundary still escapes on the upper edge",
+                "description": "The correction preserved the lower bound only.",
+                "location": {"path": "source.py"},
+                "reproduction_conditions": ["Supply the maximum value."],
+                "evidence": ["The upper edge still escaped."],
+                "reason": "Preserve both bounds.",
+            },
+        )
+        (self.root / "source.py").write_text("fixed twice\n")
+        third = self.capture(
+            corrective={
+                "previous_review_id": second["review_id"],
+                "previous_code_fingerprint": second["code_fingerprint"],
+                "open_findings": [
+                    {"finding_id": later["finding_id"], "expected_revision": 1}
+                ],
+            }
+        )
+        self.assertEqual(self.store.correction_round(third["review_id"]), 3)
+
+    def test_a_recapture_without_a_declared_link_starts_again_at_one(self):
+        # A low round is not proof that little rework happened.
+        (self.root / "source.py").write_text("fixed elsewhere\n")
+        fresh = self.capture()
+        self.assertEqual(self.store.correction_round(fresh["review_id"]), 1)
+        self.assertEqual(self.store.info(fresh["review_id"])["correction_round"], 1)
+
     def test_delta_and_finding_references_remain_pinned_after_live_changes(self):
         (self.root / "source.py").write_text("fixed\n")
         (self.root / "extra.txt").write_text("new boundary\n")
