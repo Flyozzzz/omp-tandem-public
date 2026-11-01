@@ -95,7 +95,9 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 
 参见[精简视图、运行身份与恢复](docs/guide.zh-CN.md#compact-contracts)、[操作者解除阻塞](docs/guide.zh-CN.md#operator-unblock)。提示与通知不授予权限；解除阻塞不会恢复或授权工作。验收、应用和发布是各自独立的决定。
 
-最新已发布版本为 **[3.17.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.17.0)**。共享计划现在可以固定一份已发布的产品快照，使需求随工作一起传递，而不必作为自由文本重抄。
+最新已发布版本为 **[3.18.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.18.0)**。操作者现在可以为本项目新准入的执行设置上限——在其开启前保持关闭。
+
+**3.18.0 新增：**managed 授权一直用 `max_launches` 约束自身，但其他路径没有任何约束：新的任务 ID、未声明 `corrective` 链接的重新捕获、MCP 重启，都会从零开始。自动化账本为每个新准入的执行单元扣除一次准入——含捕获、独立阶段与可能比较的审查运行；native 任务；团队步骤；managed 尝试——授权用尽后拒绝下一次。开启必须显式给出有限的 `--max-admissions`，没有默认值：一个已测量项目一周用掉 81 次审查运行，写死任何数值都会在别处拒绝正当工作。用尽只阻止*新的*准入；已准入的工作会走完并保存结果。仅限操作者，通过 `work_daemon … budget`，worker 与 MCP 工具均无法触及。它约束的是插件入口，而非任意进程；由于默认关闭，它本身并不能阻止螺旋——它提供的是机制。
 
 **3.17.0 新增：**`WorkPlan.project_context_id`。`TeamPlan` 早已支持固定上下文，共享计划此前不支持，实现者只能拿到自由文本 `context`。该 ID 必须已存在于本项目——没有 `latest` 解析，未知 ID 在 `create`／`propose` 阶段即被拒绝，早于任何工作被准入。独立快照审查永远不会获得该绑定，因为 `require_review_context_capture` 拒绝在独立阶段绑定产品上下文。未固定任何内容的计划，其已存储的操作 receipts 保持不变。
 

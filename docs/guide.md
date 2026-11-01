@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Package 3.17.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Package 3.18.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -882,6 +882,23 @@ A task that declares no set is reported as `assessment: "not_declared"`, with th
 **What this never claims.** The projection counts declarations and runs. It does not establish that a mapped check asserts the right behaviour, that the declared obligations exhaust the criterion, or that a passing run means the requirement is met — `semantic_sufficiency` and `acceptance` stay `not_assessed` in every response, including when every unit has a current pass. A participant can declare a mapping its test does not honour, and no schema detects that; the projection makes the assertion explicit and reviewable, which is a different thing from certifying it.
 
 **Shared-work coverage (since 3.14.0).** `WorkStep.acceptance_set` declares the step's exact `acceptance` strings; `WorkPlan.acceptance_set` declares the plan's exact `acceptance` strings, using the same `AcceptanceSet` identities, obligations and content revision. Step `verification`/`review_verification` and global `WorkPlan.verification` use the existing `VerificationPlan`: check `acceptance_refs`, `acceptance_coverage="report_only"|"require_current_evidence"` and `coverage_scope`. Do not create a second checklist or use a native task's denominator for the plan.
+
+#### Operator ceiling on newly admitted execution
+
+**Available since 3.18.0, and off until an operator turns it on.** A managed work grant has always bounded itself with `max_launches`, but nothing bounded the other ways execution starts: a new task ID, a recapture without a declared `corrective` link, or an MCP restart each began again from zero. The automation ledger spends one admission per newly admitted unit — a review run (covering its capture, independent stage and any comparison), a native task, a team step, or a managed work attempt — and refuses the next one when the grant is used up.
+
+```bash
+python -m omp_tandem.work_daemon --project-root "$PWD" --state-dir … budget status
+python -m omp_tandem.work_daemon … budget authorize --max-admissions 40
+python -m omp_tandem.work_daemon … budget extend --expected-revision 1 --additional-admissions 20
+python -m omp_tandem.work_daemon … budget disable
+```
+
+Turning it on requires an explicit finite `--max-admissions`: there is no default ceiling, because the right number depends on the work. One measured project spent 81 review runs in a week, so any number shipped here would refuse honest work somewhere else. `extend` raises the ceiling of the current grant and keeps the recorded spend; a replacement `authorize` refuses while the previous grant still has unfinished admissions, and never returns spend. Nothing refills a grant automatically — not a new ID, not a plan change, not a restart. Exhaustion refuses only **new** admissions: work already admitted finishes its stages and saves its result, and a nested native turn belongs to the review run or attempt that was already admitted rather than spending again. A preflight spends nothing.
+
+The refusal is the structured `automation_budget_exhausted`, naming the spend, the limit and the extension path. `budget status` reports `enforcement` as `off` or `on`; a disabled ledger is never presented as a ceiling that still protects, and disabling is an explicit operator action rather than a grant quietly lapsing.
+
+**What this is not.** It bounds this plugin's own entry points, not arbitrary processes. The grant is created through the operator CLI and is never reachable from a worker or MCP tool, so an agent cannot grant itself more autonomy by asking — but code running as the same OS user can run that CLI too. Treat it as a spend ceiling, not as proof that a human agreed.
 
 **Pinned product context on a shared plan (since 3.17.0).** `WorkPlan.project_context_id` pins one published snapshot to the agreed plan revision, so a brief travels with the plan instead of being retyped into free-text `context`. The ID must already exist in this project: there is no `latest` resolution, and an unknown ID is refused at `create`/`propose`, before any work is admitted. Implementation attempts receive that exact snapshot through the existing capsule and `tandem_context_read`. **An independent snapshot review never receives it** — `require_review_context_capture` refuses that binding, so a reviewer's requirements belong in the capture, not a live snapshot. `context` stays local explanation and is not product policy. A plan that pins nothing behaves exactly as before, including its stored operation receipts.
 

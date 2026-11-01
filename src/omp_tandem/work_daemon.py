@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+from .automation_budget import AutomationBudget
 from .bridge import Bridge
 from .review_containers import resolve_container
 from .work_items import CLAUDE_DEFAULT_MODEL, validate_model
@@ -135,6 +136,28 @@ def parser():
         )
     commands.add_parser(
         "status", help="Inspect actual kernel lease and controller state"
+    )
+    # The project-wide ceiling on newly admitted execution. Operator-only on
+    # purpose: it is never reachable through a worker or MCP tool, so an agent
+    # cannot grant itself more autonomy by asking.
+    budget = commands.add_parser(
+        "budget",
+        help="Operator ceiling on newly admitted execution for this project",
+    )
+    budget_actions = budget.add_subparsers(dest="budget_command", required=True)
+    budget_actions.add_parser("status", help="Show enforcement, limit and spend")
+    budget_authorize = budget_actions.add_parser(
+        "authorize",
+        help="Open a grant with an explicit finite ceiling; there is no default",
+    )
+    budget_authorize.add_argument("--max-admissions", type=int, required=True)
+    budget_extend = budget_actions.add_parser(
+        "extend", help="Raise the current ceiling, keeping the recorded spend"
+    )
+    budget_extend.add_argument("--expected-revision", type=int, required=True)
+    budget_extend.add_argument("--additional-admissions", type=int, required=True)
+    budget_actions.add_parser(
+        "disable", help="Turn enforcement off explicitly, not by letting it lapse"
     )
     commands.add_parser(
         "stop", help="Pause owned tasks and stop this project's controller"
@@ -388,6 +411,16 @@ def main(argv=None):
                 {"owner_id": result["owner_id"]},
             )
             result = {**result, "stop_requested": True, "terminal": False}
+    elif args.command == "budget":
+        ledger = AutomationBudget(scope.directory / "tasks.sqlite3")
+        if args.budget_command == "authorize":
+            result = ledger.authorize(args.max_admissions)
+        elif args.budget_command == "extend":
+            result = ledger.extend(args.expected_revision, args.additional_admissions)
+        elif args.budget_command == "disable":
+            result = ledger.disable()
+        else:
+            result = ledger.status()
     elif args.command == "start":
         # Validate authorization exists before detaching any process.
         bridge = make_bridge(args)

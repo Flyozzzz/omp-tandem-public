@@ -3,10 +3,11 @@
 import time
 from contextlib import closing
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from . import migration
 from .artifacts import ArtifactStore
+from .automation_budget import AutomationBudget
 from .channel import ChannelDelivery
 from .context_transfer import ContextTransfer
 from .decisions import DecisionService
@@ -65,6 +66,7 @@ class Bridge:
         # Identity validation must precede every store that can write to the DB.
         database = initialize_database(self.scope)
         self.artifacts = ArtifactStore(database)
+        self.automation = AutomationBudget(database)
         self.projects = ProjectContextStore(database)
         self.transfers = ContextTransfer(self.scope, self.projects, self.artifacts)
         self.channel = ChannelDelivery(
@@ -295,6 +297,11 @@ class Bridge:
                 raise ValueError("review_stage must be independent or comparison")
         elif effective_stage is not None:
             raise ValueError("review_stage requires a review_id")
+        # A nested turn belongs to the review run or work attempt that was
+        # already admitted, and never spends a second admission. A preflight
+        # spends nothing because it starts no worker.
+        if not dry_run and review_run_id is None and work_attempt_id is None:
+            self.automation.admit("team_step" if team_run_id else "task", str(uuid4()))
         dispatch = self.runtime.preflight if dry_run else self.runtime.start
         return dispatch(
             prompt,

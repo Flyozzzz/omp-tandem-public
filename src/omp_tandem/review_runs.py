@@ -17,6 +17,7 @@ import time
 from contextlib import ExitStack, closing, contextmanager, suppress
 from uuid import UUID, uuid4
 
+from .automation_budget import AutomationBudget
 from .execution import ExecutionOptions, conversation_usage, resolve_execution
 from .reviews import PublicationBusy, ReviewRequest, _json, publication_lock
 from .runtime_models import ACTIVE
@@ -57,6 +58,7 @@ class ReviewRuns:
         self, tasks, reviews, start_task, read_task, reply_task, cancel_task, owner
     ):
         self.tasks, self.reviews = tasks, reviews
+        self.automation = AutomationBudget(tasks.path)
         self.start_task, self.read_task = start_task, read_task
         self.reply_task, self.cancel_task = reply_task, cancel_task
         self.owner = str(UUID(owner))
@@ -200,6 +202,12 @@ class ReviewRuns:
                             "request_key conflicts with a different normalized review request"
                         )
                     return self.view(existing["run_id"])
+                # One admission covers this run's capture, independent stage and
+                # any comparison. Keyed by request_key, so the exact replay that
+                # returns the same run above never spends twice.
+                self.automation.admit(
+                    "review_run", f"{self.owner}:{request_key}", db=db
+                )
                 self.reviews.validate_corrective(request)
                 if self.driver is not None and not self.driver.is_alive():
                     raise ValueError(

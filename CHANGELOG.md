@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.18.0 — 2026-11-01
+
+- Added an operator ceiling on newly admitted execution, **off until an operator turns it on**. A managed work grant already bounded itself with `max_launches`, but nothing bounded the other paths: a new task ID, a recapture without a declared `corrective` link, or an MCP restart each started again from zero. `AutomationBudget` spends one admission per newly admitted unit — a review run including its capture, independent stage and any comparison; a native task; a team step; a managed work attempt — and refuses the next one when the grant is used up.
+- Turning it on requires an explicit finite `--max-admissions`; there is deliberately no default. One measured project spent 81 review runs in a week, so any shipped number would refuse honest work somewhere else. `budget extend` raises the current ceiling and keeps the recorded spend; a replacement `budget authorize` is refused while the previous grant still has unfinished admissions; spend is never returned; and nothing — new ID, plan change or restart — refills a grant automatically.
+- Exhaustion refuses only new admissions. Work already admitted finishes its stages and saves its result, a nested native turn belongs to the review run or attempt that was already admitted rather than spending again, and a preflight spends nothing. The refusal is the structured `automation_budget_exhausted` naming spend, limit and the extension path.
+- Operator-only by construction: the grant lives behind `python -m omp_tandem.work_daemon … budget` and is never reachable from a worker or MCP tool, so an agent cannot grant itself more autonomy by asking. This bounds the plugin's own entry points, not arbitrary processes — code running as the same OS user can call that CLI too, so it is a spend ceiling, not proof that a human agreed. Default-off also means this release does not by itself stop a verification spiral; it provides the mechanism.
+
 ## 3.17.0 — 2026-11-01
 
 - `WorkPlan.project_context_id` pins one published product snapshot to the agreed plan revision. `TeamPlan` has carried this since earlier releases; a shared plan could not, so a pinned brief did not travel with the work and an implementer received only free-text `context`. The ID must already exist in this project: there is no `latest` resolution, and an unknown ID is refused at `create`/`propose`, before any work is admitted.

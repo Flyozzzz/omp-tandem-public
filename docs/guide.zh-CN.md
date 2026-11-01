@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**软件包 3.17.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**软件包 3.18.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -873,6 +873,23 @@ revision 是集合的内容，不是你挑选的版本号：修改标准文本�
 
 <a id="work-acceptance-coverage"></a>
 **共享工作覆盖（自 3.14.0）。** `WorkStep.acceptance_set` 精确重复步骤 `acceptance`，`WorkPlan.acceptance_set` 精确重复计划的 `acceptance`，使用相同 `AcceptanceSet` 标识、obligations 与内容 revision。步骤 `verification`/`review_verification` 以及全局 `WorkPlan.verification` 沿用 `VerificationPlan`：check 的 `acceptance_refs`、`acceptance_coverage="report_only"|"require_current_evidence"` 与 `coverage_scope`。不引入第二份清单，也不拿 native 任务分母替换计划。
+
+#### 新准入执行的操作者上限
+
+**自 3.18.0 起提供，在操作者开启前保持关闭。** managed 授权一直用 `max_launches` 约束自身，但其他启动路径没有任何约束：新的任务 ID、未声明 `corrective` 链接的重新捕获、MCP 重启，都会从零重新开始。自动化账本为每个新准入的执行单元扣除一次准入——一次审查运行（含捕获、独立阶段与可能的比较）、一次 native 任务、一个团队步骤，或一次 managed 工作尝试——授权用尽后拒绝下一次。
+
+```bash
+python -m omp_tandem.work_daemon --project-root "$PWD" --state-dir … budget status
+python -m omp_tandem.work_daemon … budget authorize --max-admissions 40
+python -m omp_tandem.work_daemon … budget extend --expected-revision 1 --additional-admissions 20
+python -m omp_tandem.work_daemon … budget disable
+```
+
+开启必须显式给出有限的 `--max-admissions`：没有默认上限，因为合适的数值取决于具体工作。一个已测量的项目一周内用掉 81 次审查运行，因此这里写死任何数值都会在别处拒绝正当工作。`extend` 提升当前授权的上限并保留已记录的消耗；在上一份授权仍有未完成准入时，替换性的 `authorize` 会被拒绝，消耗永不退回。没有任何东西会自动补充授权——新 ID、计划变更、重启都不会。用尽只拒绝**新的**准入：已准入的工作可以走完各阶段并保存结果，嵌套的 native 轮次归属于已准入的审查运行或尝试，不会重复扣除。preflight 不扣除任何额度。
+
+拒绝为结构化的 `automation_budget_exhausted`，附带消耗、上限与延长路径。`budget status` 将 `enforcement` 报告为 `off` 或 `on`；已关闭的账本绝不会被呈现为仍在生效的保护，关闭是操作者的显式动作，而非授权悄然失效。
+
+**它不是什么。** 它约束的是本插件自身的入口，而非任意进程。授权通过操作者 CLI 创建，worker 与 MCP 工具均无法触及，因此智能体无法通过请求为自己扩大自主权——但以同一操作系统用户身份运行的代码同样可以调用该 CLI。请将其视为消耗上限，而非人类已同意的证明。
 
 **共享计划上的固定产品上下文（自 3.17.0）。** `WorkPlan.project_context_id` 把一份已发布快照固定到已商定的计划修订上，使需求随计划一起传递，而不是重新抄进自由文本 `context`。该 ID 必须已存在于本项目：没有 `latest` 解析，未知 ID 在 `create`／`propose` 阶段即被拒绝——早于任何工作被准入。实现尝试通过既有 capsule 与 `tandem_context_read` 获得该确切快照。**独立快照审查永远不会获得它**——`require_review_context_capture` 拒绝这种绑定，因此审查者的需求属于捕获内容，而非实时快照。`context` 仍是本地说明，不是产品政策。未固定任何内容的计划行为与此前完全一致，包括其已存储的操作 receipts。
 

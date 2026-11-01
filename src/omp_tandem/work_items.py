@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from .acceptance import enforce_coverage
 from .acceptance import project as project_acceptance
+from .automation_budget import AutomationBudget
 from .errors import ProtocolError, require_fields
 from .models import AcceptanceSet, CheckRun, TaskRequirements, VerificationPlan
 from .review_check_state import (
@@ -1157,6 +1158,7 @@ class WorkStore:
     def __init__(self, database: Path, scope: ProjectScope):
         self.database = Path(database)
         self.scope = scope
+        self._automation = AutomationBudget(self.database)
         self._review_checks = ReviewCheckState(self)
         # Per-thread delegation marker: set only while a successor host acts on a
         # recovered claim, so recorded events name who actually recorded them.
@@ -4373,13 +4375,18 @@ class WorkStore:
         if dry_run:
             return None
         card["repository_observation"] = observation
+        identifier = str(uuid4())
         if autonomous:
+            # The grant's own max_launches bounds this work; the project ledger
+            # additionally bounds every path that starts execution. Spend before
+            # the attempt exists, so an exhausted grant starts no worker.
+            self._automation.admit("work_attempt", identifier, db=db)
             grant["launches"] += 1
         step = self._step(card, step_id)
         token = secrets.token_urlsafe(32)
         now = time.time()
         attempt = {
-            "attempt_id": str(uuid4()),
+            "attempt_id": identifier,
             "token": token,
             "token_hash": hashlib.sha256(token.encode()).hexdigest(),
             "work_id": card["work_id"],

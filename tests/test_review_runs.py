@@ -263,6 +263,26 @@ raise SystemExit(main())
                     self.assertEqual(result["outcome"], scenario)
                     self.assertTrue(result["independent"]["answer"])
 
+    async def test_an_exhausted_automation_grant_refuses_a_new_run(self):
+        from omp_tandem.automation_budget import AutomationBudget
+        from omp_tandem.errors import ProtocolError
+
+        budget = AutomationBudget(self.bridge.tasks.path)
+        budget.authorize(1)
+        first = await self.begin()
+        self.assertIsNotNone(first["run_id"])
+        # A fresh request_key is the evasion a per-run budget must not allow.
+        with self.assertRaises(ProtocolError) as refusal:
+            await asyncio.to_thread(self.runs.start, str(uuid4()), self.request())
+        self.assertEqual(
+            refusal.exception.envelope["code"], "automation_budget_exhausted"
+        )
+        # The already-admitted run still finishes and keeps its answer.
+        result = await self.wait_run(first["run_id"])
+        self.assertEqual(result["outcome"], "success")
+        self.assertTrue(result["independent"]["answer"])
+        budget.disable()
+
     async def test_no_author_means_independent_only(self):
         run = await asyncio.to_thread(
             self.runs.start, str(uuid4()), self.request(author_proposal="")
