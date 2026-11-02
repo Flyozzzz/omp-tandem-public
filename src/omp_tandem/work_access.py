@@ -124,9 +124,9 @@ def perform_work(
             {"action": "get", "work_id": bound["work_id"]}, actor=actor
         )
         # Validate external source BEFORE recording immutable submission intent.
-        output = WorkWorkspace(store.scope).adopt_submission(
-            bound, view["plan"], command.commit
-        )
+        output = WorkWorkspace(
+            store.scope, repository=bound.get("repository")
+        ).adopt_submission(bound, view["plan"], command.commit)
     if inferred:
         try:
             store.authenticate(token)
@@ -205,9 +205,9 @@ def perform_work(
             if prepared["replayed"]:
                 replayed = prepared["response"]
             else:
-                WorkWorkspace(store.scope).validate_submission(
-                    prepared["attempt"], prepared["plan"]
-                )
+                WorkWorkspace(
+                    store.scope, repository=prepared["attempt"].get("repository")
+                ).validate_submission(prepared["attempt"], prepared["plan"])
         result = (
             replayed
             if replayed is not None

@@ -23,7 +23,14 @@ from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal, Self
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from .acceptance import enforce_coverage
 from .acceptance import project as project_acceptance
@@ -223,10 +230,19 @@ def acceptance_context(attempt: dict, plan: dict) -> dict:
 
 
 def review_inputs(attempt: dict, plan: dict) -> dict:
-    """Prospective immutable capture inputs, excluding author interpretation."""
+    """Prospective immutable capture inputs, excluding author interpretation.
+
+    A card's declared paths are relative to the repository it chose, while the
+    review API speaks launch-relative paths beside a `review_directory`. The
+    translation happens here, and only for a chosen child: a card at the launch
+    root keeps its historical inputs byte for byte, because `review_scope`
+    hashes them into applicability identity.
+    """
+    directory = plan.get("repository")
     step = next(step for step in plan["steps"] if step["id"] == attempt["step_id"])
     submission = attempt["submission"]
     return {
+        **({"review_directory": directory} if directory else {}),
         "requirements": "\n".join(
             [
                 f"Plan goal: {plan['goal']}",
@@ -249,7 +265,10 @@ def review_inputs(attempt: dict, plan: dict) -> dict:
         "base": submission["base_commit"],
         "source": "commit",
         "commit": submission["commit"],
-        "context_paths": sorted(step.get("review_context_paths", [])),
+        "context_paths": sorted(
+            f"{directory}/{path}" if directory else path
+            for path in step.get("review_context_paths", [])
+        ),
     }
 
 
@@ -436,6 +455,33 @@ def _validate_work_path(path, *, context=False):
         )
 
 
+def _repository_selector(value):
+    """The Git working tree a card is kept in, chosen in the plan.
+
+    One spelling only. `None` is the launch root itself; a child is a canonical
+    relative POSIX directory. `""`, `"."`, `".."`, an absolute path and a
+    backslash spelling are refused rather than admitted as aliases, because the
+    selector takes part in operation replay identity.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or len(value) > 4096 or "\\" in value:
+        raise ValueError(
+            "repository must be a relative POSIX directory inside the launch "
+            "project, or null for the launch root itself"
+        )
+    if (
+        PurePosixPath(value).is_absolute()
+        or any(
+            part in {"", ".", ".."} or part.casefold() == ".git"
+            for part in value.split("/")
+        )
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        raise ValueError(f"Unsafe repository selector: {value!r}")
+    return value
+
+
 class WorkStep(_Model):
     id: _Identifier
     title: _NonBlank
@@ -499,6 +545,15 @@ class WorkPlan(_Model):
         default=None,
         description="An existing published project context pinned to this plan revision. Implementation attempts receive that exact snapshot; independent snapshot review never does. `context` stays local explanation, not product policy.",
     )
+    repository: str | None = Field(
+        default=None,
+        description="The Git working tree this card belongs to, as a directory relative to the launch project root; null means the launch root itself. Both participants agree it in this plan, instead of inheriting wherever the client happened to start. `owned_files` and `review_context_paths` are relative to it. It is fixed permanently at the first claim or authorization, and only the launch root supports managed execution today.",
+    )
+
+    @field_validator("repository")
+    @classmethod
+    def contained_repository(cls, value):
+        return _repository_selector(value)
 
     @model_validator(mode="after")
     def validate_graph(self) -> Self:
@@ -696,7 +751,12 @@ def _operation_fingerprint(command, bound, *, version=2):
         payload.pop("check_runs")
     declared_plan = payload.get("plan")
     if declared_plan:
-        for key in ("acceptance_set", "verification", "project_context_id"):
+        for key in (
+            "acceptance_set",
+            "verification",
+            "project_context_id",
+            "repository",
+        ):
             if declared_plan.get(key) is None:
                 declared_plan.pop(key, None)
     empty_requirements = TaskRequirements().model_dump()
@@ -3134,9 +3194,15 @@ class WorkStore:
                 "repository": {
                     "project_root": str(self.scope.root),
                     "scope_id": self.scope.key,
-                    "provenance": "creation launch scope; immutable",
+                    "selected_directory": plan.get("repository"),
+                    "provenance": (
+                        "launch scope binds the data namespace permanently; the "
+                        "selected directory is this plan's agreed choice until "
+                        "execution fixes it"
+                    ),
                     "initial_observation": observation,
                 },
+                "repository_lock": None,
                 "repository_observation": observation,
                 "agreements": {},
                 "steps": self._new_steps(plan),
@@ -3217,6 +3283,7 @@ class WorkStore:
                 raise ValueError("Propose requires a complete plan")
             plan = command.plan.model_dump()
             self._require_pinned_context(db, plan)
+            self._require_repository_agreement(db, card, plan)
             transition = card.get("transition")
             if transition and transition["phase"] in TRANSITION_OPEN:
                 raise WorkConflict(
@@ -3684,10 +3751,86 @@ class WorkStore:
                 self._save_attempt(db, attempt)
                 step["state"] = "recovery_required"
 
-    def _head(self):
+    def _head(self, repository=None):
         from .work_workspace import WorkWorkspace
 
-        return WorkWorkspace(self.scope).source_commit()
+        return WorkWorkspace(self.scope, repository=repository).source_commit()
+
+    @staticmethod
+    def _selected_repository(card):
+        """The agreed plan's Git working tree; None is the launch root."""
+        return (card.get("plan") or {}).get("repository")
+
+    def _repository_lock(self, db, card):
+        """The repository this card is already committed to, or None while open.
+
+        A card locked under this protocol carries the record. An older card has
+        no such field, and absence must not read as "still open": any grant or
+        attempt in its durable history already pinned its launch root, so the
+        lock is derived rather than assumed away.
+        """
+        recorded = card.get("repository_lock")
+        if recorded is not None:
+            return recorded
+        if card.get("authorization") or self._attempts(db, card["work_id"]):
+            return {
+                "selected_directory": self._selected_repository(card),
+                "locked_at": None,
+                "basis": "derived from existing execution history",
+            }
+        return None
+
+    def _lock_repository(self, db, card, basis):
+        """Fix the agreed repository at the first real claim or authorization."""
+        lock = self._repository_lock(db, card)
+        if lock is None:
+            lock = {
+                "selected_directory": self._selected_repository(card),
+                "locked_at": time.time(),
+                "basis": basis,
+            }
+        card["repository_lock"] = lock
+        return lock
+
+    def _require_repository_agreement(self, db, card, plan):
+        """A locked card never changes repository, in proposal or activation."""
+        selected = plan.get("repository")
+        if selected == self._selected_repository(card):
+            return
+        lock = self._repository_lock(db, card)
+        if lock is None:
+            return
+        raise ProtocolError(
+            "work_repository_locked",
+            "This card's repository was fixed when execution was first claimed "
+            f"or authorized ({lock['selected_directory'] or 'the launch root'}); "
+            "a later plan cannot move it, because existing commits and evidence "
+            "would be reinterpreted against another checkout.",
+            fields=("plan",),
+            allowed_fix=(
+                "Keep the agreed repository in this plan, or create a new card "
+                "for the other repository and record the continuation."
+            ),
+        )
+
+    def _require_root_repository(self, card, operation):
+        """Refuse the managed paths that this release does not carry yet."""
+        selected = self._selected_repository(card)
+        if selected is None:
+            return
+        raise ProtocolError(
+            "work_repository_managed_unsupported",
+            f"{operation} is not supported for a card whose repository is not "
+            f"the launch root (selected {selected!r}). Managed worktrees, "
+            "automatic review capture and unattended launches still run only "
+            "at the launch root.",
+            fields=("work_id",),
+            allowed_fix=(
+                "Work this card manually: claim the step, commit in the selected "
+                "repository, submit that exact hash, have the declared reviewer "
+                "claim and accept it, then apply with the operator CLI."
+            ),
+        )
 
     @staticmethod
     def _require_pinned_context(db, plan):
@@ -3713,8 +3856,11 @@ class WorkStore:
     def _observe_repository(self, plan, *, action, required=False):
         from .work_workspace import WorkWorkspace
 
-        return WorkWorkspace(self.scope).observe_repository(
-            plan, action=action, required=required
+        # A chosen child repository is validated even when the plan declares no
+        # paths yet: the choice itself is the claim that must hold.
+        selected = plan.get("repository")
+        return WorkWorkspace(self.scope, repository=selected).observe_repository(
+            plan, action=action, required=required or selected is not None
         )
 
     @staticmethod
@@ -3824,13 +3970,17 @@ class WorkStore:
             if key not in {"preview", "stored"}
         }
         budget_seconds = fields.pop("budget_seconds")
-        source_commit = self._head()
         with self._transaction() as db:
             card = self._load(db, work_id)
             if not self._agreed(card) or card["status"] != "active":
                 raise ValueError(
                     "Only an active, exactly agreed plan may be authorized"
                 )
+            # The card selects the repository, so it is read before the source
+            # commit is pinned, and a selection this release cannot execute is
+            # refused before any grant, pin or budget is persisted.
+            self._require_root_repository(card, "Unattended authorization")
+            source_commit = self._head(self._selected_repository(card))
             if any(
                 item["state"] in _ACTIVE | {"recovery_required"}
                 for item in self._attempts(db, work_id)
@@ -3853,6 +4003,9 @@ class WorkStore:
                     ).get("requires_shell"):
                         selected_policy(prospective, spec)
             now = time.time()
+            # Authorization pins a source commit, so it fixes the repository too,
+            # even though no worker has started yet.
+            self._lock_repository(db, card, "execution authorization")
             card["authorization"] = {
                 "authorization_id": str(uuid4()),
                 "plan_revision": card["plan_revision"],
@@ -3866,6 +4019,19 @@ class WorkStore:
                 "revoked_at": None,
             }
             return self._record(db, card, "authorized", "operator")
+
+    def require_team_execution(self, work_id) -> None:
+        """A team worker never executes a card kept outside the launch root.
+
+        A team step carries its own working directory and no card identity, so
+        the caller that knows the team task checks here, before any adoption can
+        retain a Git object. Reading such a card stays allowed.
+        """
+        if not work_id:
+            return
+        with self._read_connection() as db:
+            card = self._load(db, work_id)
+        self._require_root_repository(card, "Team-run execution")
 
     def bind_review(self, attempt_id: str, review_id: str) -> dict:
         """Pin the immutable snapshot a review attempt reads; set once."""
@@ -4258,6 +4424,11 @@ class WorkStore:
             or kind not in {"implement", "review"}
         ):
             raise ValueError("Reservation requires valid owner, principal, and kind")
+        selected = self._selected_repository(card)
+        if autonomous:
+            # Before eligibility, budget or grant: a managed attempt in a chosen
+            # repository would prepare a worktree this release cannot bind.
+            self._require_root_repository(card, "Managed reservation")
         eligible = {
             "work_id": card["work_id"],
             "step_id": step_id,
@@ -4375,6 +4546,9 @@ class WorkStore:
         if dry_run:
             return None
         card["repository_observation"] = observation
+        # The first real reservation fixes the repository for good; evidence must
+        # never become readable against another checkout later.
+        self._lock_repository(db, card, "first claim reservation")
         identifier = str(uuid4())
         if autonomous:
             # The grant's own max_launches bounds this work; the project ledger
@@ -4400,6 +4574,7 @@ class WorkStore:
             "autonomous": autonomous,
             "authorization_id": grant["authorization_id"] if autonomous else None,
             "source_commit": grant["source_commit"] if autonomous else source_commit,
+            "repository": selected,
             "repository_observation": observation,
             "deadline": grant["deadline"] if autonomous else now + 3600,
             "created_at": now,
@@ -5059,6 +5234,9 @@ class WorkStore:
 
     def _activate_plan(self, db, card, plan):
         """Install a plan as the next draft revision; callers ensure quiescence."""
+        # Authoritative repository gate: a stale pending proposal and an operator
+        # activation both arrive here, and neither may move a locked card.
+        self._require_repository_agreement(db, card, plan)
         self._fence(db, card, "Plan changed; old attempt cannot publish")
         previous = {step["id"]: step for step in card["steps"]}
         old_revision = card["plan_revision"]
@@ -5087,6 +5265,10 @@ class WorkStore:
                 target.update(state="recovery_required", attempt=old["attempt"])
         if card["authorization"]:
             card["authorization"]["revoked_at"] = time.time()
+        card["repository"] = {
+            **(card.get("repository") or {}),
+            "selected_directory": plan.get("repository"),
+        }
 
     def _operator_command(self, work_id, *arguments):
         parts = [

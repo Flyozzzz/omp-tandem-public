@@ -546,7 +546,10 @@ def main(argv=None):
                         "Only the final accepted current task result can be applied"
                     )
                 output = view["result"].get("output", view["result"])
-                result = WorkWorkspace(scope).apply(output, args.expected_head)
+                # Application belongs to the repository the card was kept in.
+                result = WorkWorkspace(
+                    scope, repository=(view.get("plan") or {}).get("repository")
+                ).apply(output, args.expected_head)
                 receipt = {
                     "kind": "apply_receipt",
                     "commit": result["commit"],
@@ -617,6 +620,15 @@ def main(argv=None):
                 elif args.operation == "resolve":
                     if not args.attempt:
                         raise ValueError("resolve requires --attempt")
+                    # Preserving a manual commit reads the card's own repository;
+                    # a default workspace would refuse a child-bound attempt.
+                    selected = (
+                        store.perform(
+                            {"action": "get", "work_id": args.work_id},
+                            actor="operator",
+                        ).get("plan")
+                        or {}
+                    ).get("repository")
                     result = store.transition_resolve(
                         args.work_id,
                         args.attempt,
@@ -628,7 +640,7 @@ def main(argv=None):
                         transition_id=args.transition,
                         expected_revision=args.expected_revision,
                         operation_id=args.operation_id,
-                        workspaces=WorkWorkspace(scope),
+                        workspaces=WorkWorkspace(scope, repository=selected),
                     )
                 elif args.operation == "activate":
                     result = store.transition_activate(
@@ -726,7 +738,9 @@ def main(argv=None):
                 )
                 final = view.get("result") or {}
                 target = (final.get("output") or final).get("commit") if final else None
-                observation = WorkWorkspace(scope).assess(target, args.expected_head)
+                observation = WorkWorkspace(
+                    scope, repository=(view.get("plan") or {}).get("repository")
+                ).assess(target, args.expected_head)
                 result = {
                     **observation,
                     "recording": {

@@ -14,7 +14,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
-from .work_items import shell_permission
+from .work_items import _repository_selector, shell_permission
 from .workspace import ProjectScope, _directory, _private_lock
 
 _MAX_OUTPUT = 16 * 1024 * 1024
@@ -52,9 +52,16 @@ def _path(value: str) -> str:
 class WorkWorkspace:
     """Preserve attempt directories and never implicitly update the user's checkout."""
 
-    def __init__(self, scope: ProjectScope):
+    def __init__(self, scope: ProjectScope, *, repository: str | None = None):
         self.scope = scope
         self.directory = scope.directory / "worktrees"
+        # The launch project still binds the data namespace. Only the Git working
+        # tree a card keeps its commits in is selectable, and only inside that
+        # namespace; None is the launch root, as every card was before 3.19.0.
+        self.selected = _repository_selector(repository)
+        self.repository = (
+            scope.root if self.selected is None else scope.root / self.selected
+        )
 
     def _identity(self) -> None:
         scope = self.scope
@@ -78,6 +85,16 @@ class WorkWorkspace:
         if scope.directory.is_relative_to(scope.root):
             raise ValueError(
                 "Shared workspace state must be outside the user's active checkout"
+            )
+        if self.selected is not None and (
+            self.repository.resolve() != self.repository
+            or not self.repository.is_relative_to(scope.root)
+            or scope.directory.is_relative_to(self.repository)
+        ):
+            raise ValueError(
+                "The selected repository must be a real directory inside the "
+                "launch project reached without symbolic links, and private "
+                "state must stay outside it"
             )
 
     @contextmanager
@@ -187,16 +204,48 @@ class WorkWorkspace:
             return output.read()
 
     def _repository(self) -> None:
-        self._validate_repository(self.scope.root)
+        self._validate_repository(self.repository)
+
+    def _managed_unsupported(self, operation: str) -> None:
+        """Refuse, rather than half-execute, what this release does not carry.
+
+        A card kept in a chosen repository is supported manually: claim, commit
+        there, submit the exact hash, have the reviewer accept it, apply with the
+        operator CLI. Managed worktrees and automatic capture still run only at
+        the launch root, and a refusal an operator can read is recoverable where
+        a half cutover that commits into the wrong repository is not.
+        """
+        if self.selected is None:
+            return
+        raise ValueError(
+            f"{operation} is not supported for a card whose repository is not the "
+            f"launch root (selected {self.selected!r}). Work the card manually and "
+            "apply the accepted result with the operator CLI."
+        )
+
+    def _attempt_binding(self, attempt: dict) -> None:
+        """The attempt's saved binding decides, never the caller's default."""
+        saved = attempt.get("repository")
+        if saved != self.selected:
+            raise ValueError(
+                "Attempt repository binding differs from this workspace: the "
+                f"attempt belongs to {saved or 'the launch root'} and this "
+                f"workspace opened {self.selected or 'the launch root'}. Build "
+                f"the workspace with repository={saved!r}, the card's agreed "
+                "choice; a caller that omits the selection must not fall back "
+                "to the launch root. Work in that repository stays manual: "
+                "commit there, submit the exact hash, and apply the accepted "
+                "result with the operator CLI."
+            )
 
     @staticmethod
     def _validate_repository(root: Path) -> None:
         top = WorkWorkspace._git(root, "rev-parse", "--show-toplevel").decode().strip()
         if Path(top).resolve() != root:
             raise ValueError(
-                f"Pinned project root {root} differs from detected Git repository {top}. "
-                "Launch Tandem at the repository where work belongs and create a new card; "
-                "existing cards cannot be repinned."
+                f"Selected repository {root} differs from detected Git repository {top}. "
+                "A card's repository must be a checkout's own top level: name it in the "
+                "plan before execution fixes it, and create a new card afterwards."
             )
         # Checkout/status may execute configured clean/smudge filters. Refuse them,
         # rather than treating worktree isolation as a sandbox for repository code.
@@ -213,7 +262,7 @@ class WorkWorkspace:
         self._identity()
         self._repository()
         return (
-            self._git(self.scope.root, "rev-parse", "--verify", "HEAD^{commit}")
+            self._git(self.repository, "rev-parse", "--verify", "HEAD^{commit}")
             .decode()
             .strip()
         )
@@ -228,9 +277,10 @@ class WorkWorkspace:
             for path in step.get(field, [])
         }
         observation = observe_declared_paths(
-            self.scope.root, paths, action=action, required=required
+            self.repository, paths, action=action, required=required
         )
         observation["scope_id"] = self.scope.key
+        observation["selected_directory"] = self.selected
         return observation
 
     @staticmethod
@@ -286,9 +336,10 @@ class WorkWorkspace:
                 ):
                     raise ValueError(
                         f"Declared path {relative!r} belongs to detected repository boundary {current}, "
-                        f"not pinned root {root}. Launch Tandem at {current} and create "
-                        "a separate card in that scope; do not repin this card. "
-                        "The child repository was not opened or searched."
+                        f"not this card's repository {root}. Agree that checkout in the "
+                        "plan's `repository` before execution fixes it, or create a "
+                        "separate card for it; a card that has already run is never "
+                        "repinned. The child repository was not opened or searched."
                     )
                 if not current.exists():
                     break
@@ -305,7 +356,7 @@ class WorkWorkspace:
         try:
             actual = (
                 self._git(
-                    self.scope.root, "rev-parse", "--verify", f"{value}^{{commit}}"
+                    self.repository, "rev-parse", "--verify", f"{value}^{{commit}}"
                 )
                 .decode()
                 .strip()
@@ -313,7 +364,7 @@ class WorkWorkspace:
         except ValueError as error:
             raise ValueError(
                 f"{role} commit {value} could not be resolved in pinned repository "
-                f"{self.scope.root}: {str(error)[:2000]}. Verify the exact hash in this "
+                f"{self.repository}: {str(error)[:2000]}. Verify the exact hash in this "
                 "repository. If work belongs to a nested or different repository, launch "
                 "Tandem there, create a separate card, and ask the operator to stop/dispose "
                 "and cancel or supersede this card with continuation provenance; never "
@@ -327,7 +378,7 @@ class WorkWorkspace:
         self, commit: str, *, cwd: Path | None = None
     ) -> dict[str, tuple[str, str]]:
         result = {}
-        for entry in self._git(cwd or self.scope.root, "ls-tree", "-rz", commit).split(
+        for entry in self._git(cwd or self.repository, "ls-tree", "-rz", commit).split(
             b"\0"
         ):
             if not entry:
@@ -374,7 +425,7 @@ class WorkWorkspace:
 
     def _apply_delta(self, path: Path, parent: str, commit: str) -> None:
         patch = self._git(
-            self.scope.root,
+            self.repository,
             "diff",
             "--binary",
             "--full-index",
@@ -468,7 +519,7 @@ class WorkWorkspace:
         for ancestor, descendant in ((source, parent), (parent, commit)):
             if (
                 self._git(
-                    self.scope.root,
+                    self.repository,
                     "merge-base",
                     "--is-ancestor",
                     ancestor,
@@ -493,7 +544,7 @@ class WorkWorkspace:
                 "Checkpoint changed-file manifest does not match its commit"
             )
         tree = (
-            self._git(self.scope.root, "rev-parse", f"{commit}^{{tree}}")
+            self._git(self.repository, "rev-parse", f"{commit}^{{tree}}")
             .decode()
             .strip()
         )
@@ -503,6 +554,8 @@ class WorkWorkspace:
 
     def prepare(self, attempt: dict, plan: dict, dependencies: list[dict]) -> dict:
         """Compose accepted ancestor deltas in supplied canonical DAG order."""
+        self._managed_unsupported("Managed workspace preparation")
+        self._attempt_binding(attempt)
         with self._lock():
             self._repository()
             path = self._attempt_path(attempt)
@@ -540,7 +593,7 @@ class WorkWorkspace:
                     self._tree(commit)
                     if (
                         self._git(
-                            self.scope.root,
+                            self.repository,
                             "merge-base",
                             "--is-ancestor",
                             source,
@@ -554,7 +607,7 @@ class WorkWorkspace:
                         )
                     verified.append((parent, commit))
             self._git(
-                self.scope.root,
+                self.repository,
                 "worktree",
                 "add",
                 "--no-checkout",
@@ -580,6 +633,7 @@ class WorkWorkspace:
                 self._materialize(path, self._git(path, "write-tree").decode().strip())
                 metadata = {
                     "path": str(path),
+                    "repository": self.selected,
                     "base_commit": base,
                     "source_commit": source,
                     "step_id": attempt["step_id"],
@@ -605,6 +659,7 @@ class WorkWorkspace:
         metadata = json.loads(manifest.read_text(encoding="utf-8"))
         if (
             metadata["path"] != str(path)
+            or metadata.get("repository") != self.selected
             or workspace.get("path") != str(path)
             or workspace.get("base_commit") != metadata["base_commit"]
             or metadata["source_commit"] != attempt.get("source_commit")
@@ -625,7 +680,7 @@ class WorkWorkspace:
         )
         expected = (
             self._git(
-                self.scope.root,
+                self.repository,
                 "rev-parse",
                 "--path-format=absolute",
                 "--git-common-dir",
@@ -815,17 +870,20 @@ class WorkWorkspace:
     def _retain(self, attempt: dict, commit: str) -> None:
         reference = f"refs/omp-tandem/work/{attempt['attempt_id']}"
         existing = self._git(
-            self.scope.root, "rev-parse", "--verify", reference, allow_failure=True
+            self.repository, "rev-parse", "--verify", reference, allow_failure=True
         )
         if existing is not None and existing.decode().strip() != commit:
             raise ValueError("Attempt already published a different immutable snapshot")
         if existing is None:
             self._git(
-                self.scope.root, "update-ref", reference, commit, "0" * len(commit)
+                self.repository, "update-ref", reference, commit, "0" * len(commit)
             )
 
     def adopt_submission(self, attempt: dict, plan: dict, commit: str) -> dict:
         """Validate an already committed manual claim without checking out files."""
+        # Manual adoption is the supported path for a selected repository, so it
+        # is not refused here; only the attempt's own binding has to agree.
+        self._attempt_binding(attempt)
         with self._lock():
             self._repository()
             self._attempt_path(attempt)
@@ -840,7 +898,7 @@ class WorkWorkspace:
             commit = self._commit(commit, role="Submitted")
             if (
                 self._git(
-                    self.scope.root,
+                    self.repository,
                     "merge-base",
                     "--is-ancestor",
                     source,
@@ -864,7 +922,7 @@ class WorkWorkspace:
                     f"Manual submission changes paths outside ownership: {sorted(set(changed) - owned)[0]}"
                 )
             tree = (
-                self._git(self.scope.root, "rev-parse", f"{commit}^{{tree}}")
+                self._git(self.repository, "rev-parse", f"{commit}^{{tree}}")
                 .decode()
                 .strip()
             )
@@ -872,7 +930,7 @@ class WorkWorkspace:
             return {
                 "commit": commit,
                 "base_commit": source,
-                "workspace": str(self.scope.root),
+                "workspace": str(self.repository),
                 "tree_hash": tree,
                 "changed_files": changed,
             }
@@ -947,6 +1005,8 @@ class WorkWorkspace:
 
     def prepare_verification(self, attempt: dict, directory: Path) -> dict:
         """Create an exclusive standalone shallow copy; never run checkout filters."""
+        self._managed_unsupported("Managed verification workspaces")
+        self._attempt_binding(attempt)
 
         def check_deadline():
             deadline = attempt.get("deadline")
@@ -963,7 +1023,7 @@ class WorkWorkspace:
             commit = self._commit(attempt["submission"]["commit"])
             self._tree(commit)
             tree = (
-                self._git(self.scope.root, "rev-parse", f"{commit}^{{tree}}")
+                self._git(self.repository, "rev-parse", f"{commit}^{{tree}}")
                 .decode()
                 .strip()
             )
@@ -975,7 +1035,7 @@ class WorkWorkspace:
             # mkdir is exclusive: never overwrite or reuse an earlier command's input.
             path.mkdir(mode=0o700)
             algorithm = (
-                self._git(self.scope.root, "rev-parse", "--show-object-format")
+                self._git(self.repository, "rev-parse", "--show-object-format")
                 .decode()
                 .strip()
             )
@@ -983,14 +1043,14 @@ class WorkWorkspace:
                 path, "init", "--quiet", "--template=", f"--object-format={algorithm}"
             )
             objects = {commit, tree}
-            for row in self._git(self.scope.root, "ls-tree", "-rtz", commit).split(
+            for row in self._git(self.repository, "ls-tree", "-rtz", commit).split(
                 b"\0"
             ):
                 if row:
                     objects.add(row.split(b"\t", 1)[0].split()[2].decode("ascii"))
             check_deadline()
             pack = self._git(
-                self.scope.root,
+                self.repository,
                 "pack-objects",
                 "--stdout",
                 data=("\n".join(sorted(objects)) + "\n").encode("ascii"),
@@ -1069,6 +1129,8 @@ class WorkWorkspace:
 
     def verify_review(self, attempt: dict, plan: dict, workspace: dict) -> None:
         """Reject acceptance if the reviewer changed the submitted checkout."""
+        self._managed_unsupported("Managed review verification")
+        self._attempt_binding(attempt)
         with self._lock():
             self._repository()
             path, metadata = self._metadata(attempt, plan, workspace)
@@ -1129,7 +1191,7 @@ class WorkWorkspace:
                 Path(line.split(b" ", 1)[1].decode()).resolve()
                 for line in (
                     self._git(
-                        self.scope.root,
+                        self.repository,
                         "worktree",
                         "list",
                         "--porcelain",
@@ -1159,6 +1221,10 @@ class WorkWorkspace:
                 entry["bytes"] = _directory_size(path)
                 if path.parent.resolve() != self.directory.resolve():
                     entry["keep"] = "workspace is outside this project"
+                elif metadata.get("repository") != self.selected:
+                    # A manifest naming another repository is never authority to
+                    # remove or prune a worktree in this one.
+                    entry["keep"] = "workspace belongs to another repository"
                 elif entry["state"] is None:
                     entry["keep"] = "no record of that attempt"
                 elif entry["state"] not in removable_states:
@@ -1168,7 +1234,7 @@ class WorkWorkspace:
                 else:
                     entry["retained_commit"] = (
                         self._git(
-                            self.scope.root,
+                            self.repository,
                             "rev-parse",
                             "--verify",
                             f"refs/omp-tandem/work/{attempt_id}",
@@ -1188,7 +1254,7 @@ class WorkWorkspace:
                 if entry.get("remove") and apply:
                     if path.exists():
                         self._git(
-                            self.scope.root,
+                            self.repository,
                             "worktree",
                             "remove",
                             "--force",
@@ -1205,7 +1271,7 @@ class WorkWorkspace:
                         freed += entry["bytes"]
                 report.append(entry)
             if apply and removed:
-                self._git(self.scope.root, "worktree", "prune", allow_failure=True)
+                self._git(self.repository, "worktree", "prune", allow_failure=True)
             return {
                 "workspaces": report,
                 "removable": sum(1 for e in report if e.get("remove")),
@@ -1295,6 +1361,8 @@ class WorkWorkspace:
 
     def validate_submission(self, attempt: dict, plan: dict) -> dict:
         """Preflight only: positive validation is neither a freeze nor a submission."""
+        self._managed_unsupported("Managed submission validation")
+        self._attempt_binding(attempt)
         with self._lock():
             self._repository()
             manifest = self.directory / f"{attempt['attempt_id']}.json"
@@ -1322,6 +1390,9 @@ class WorkWorkspace:
         self, attempt: dict, plan: dict, workspace: dict, *, message: str | None = None
     ) -> dict:
         """Commit a verified raw-byte snapshot, including owned additions/deletions."""
+        # `preserve` reaches the same commit through here, so one gate covers both.
+        self._managed_unsupported("Managed workspace capture")
+        self._attempt_binding(attempt)
         with self._lock():
             self._repository()
             path, base, _, _, _, snapshot, contents, changed = (
@@ -1409,13 +1480,13 @@ class WorkWorkspace:
             commit = self._commit(output["commit"])
             incoming = self._tree(commit)
             tree = (
-                self._git(self.scope.root, "rev-parse", f"{commit}^{{tree}}")
+                self._git(self.repository, "rev-parse", f"{commit}^{{tree}}")
                 .decode()
                 .strip()
             )
             if output.get("tree_hash") != tree:
                 raise ValueError("Output tree hash does not match its immutable commit")
-            root = self.scope.root
+            root = self.repository
             if self._git(root, "rev-parse", "HEAD").decode().strip() != expected:
                 raise ValueError(
                     "Project HEAD changed; inspect and integrate the saved output explicitly"
@@ -1472,7 +1543,7 @@ class WorkWorkspace:
         """Explicit isolated Git observation; no checkout change, no inference."""
         self._identity()
         self._repository()
-        root = self.scope.root
+        root = self.repository
         expected = self._commit(expected_head)
         observed = self._git(root, "rev-parse", "HEAD").decode().strip()
         target = self._commit(target_commit) if target_commit else None

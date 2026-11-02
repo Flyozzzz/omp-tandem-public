@@ -288,6 +288,7 @@ class _Adapter:
 
     def _pin_snapshot(self, attempt, plan):
         """Capture the exact submitted commit as an immutable review bundle."""
+        _require_root_repository(plan)
         request = _pin_snapshot_request(attempt, plan)
         try:
             summary = self.bridge.reviews.create(request)
@@ -346,6 +347,9 @@ class _Adapter:
             raise ValueError("Attempt budget is exhausted or unknown")
         if attempt["kind"] == "implement" and attempt.get("allow_work") is not True:
             raise ValueError("Implementation needs an explicit work grant")
+        # A managed attempt cannot exist for a card kept outside the launch root,
+        # and must not become the path that quietly creates one.
+        _require_root_repository(plan)
         capture_error = None
         if (
             attempt["kind"] == "review"
@@ -442,6 +446,16 @@ class _Adapter:
                 errors.append(str(exc))
         if errors:
             raise RuntimeError("Worker cleanup failed: " + "; ".join(errors))
+
+
+def _require_root_repository(plan):
+    """Automatic capture and managed launches still run only at the launch root."""
+    selected = (plan or {}).get("repository")
+    if selected is not None:
+        raise ValueError(
+            "Managed execution and automatic review capture are not supported "
+            f"for a card whose repository is {selected!r}; work it manually."
+        )
 
 
 def _pin_snapshot_request(attempt, plan):

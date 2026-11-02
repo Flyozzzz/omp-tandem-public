@@ -452,6 +452,8 @@ class WorkAcceptanceTests(unittest.TestCase):
         historical["plan"].pop("verification")
         # Added in 3.17.0; a pre-3.17 receipt carried no pinned context.
         historical["plan"].pop("project_context_id")
+        # Added in 3.19.0; a pre-3.19 receipt chose no repository.
+        historical["plan"].pop("repository")
         for step in historical["plan"]["steps"]:
             for key in (
                 "acceptance_set",

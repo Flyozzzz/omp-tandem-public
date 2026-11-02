@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**软件包 3.18.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**软件包 3.19.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -545,14 +545,24 @@ begin 前 `withdraw --proposal` 只移除提案。begin 后 `withdraw --transiti
 <a id="repository-handover"></a>
 ### 固定仓库、诊断与如实关闭
 
-create 记录 `repository{project_root, scope_id, provenance, initial_observation}`；观察包含 `status="verified"|"unverified"`、`git_toplevel`、`head` 及动作／时间来源。`repository_observation` 在 create/propose/claim 刷新。这些观察**不会重新绑定**卡片或源提交。
+create 记录 `repository{project_root, scope_id, selected_directory, provenance, initial_observation}`；观察包含 `status="verified"|"unverified"`、`git_toplevel`、`head`、`selected_directory` 及动作／时间来源。`repository_observation` 在 create/propose/claim 刷新。这些观察**不会重新绑定**卡片或源提交。
+
+#### 选择卡片所属的仓库（自 3.19.0 起）
+
+`WorkPlan.repository` 指明卡片所属的 Git 工作树，写作相对启动项目根目录的目录；`null` 表示启动根目录本身，也就是本次发布之前所有卡片的含义。两位参与者在共同接受的计划里约定它，而不是沿用客户端碰巧启动的位置：在父目录中打开的会话可以把卡片放在 `_repos/main-pipeline`，数据命名空间仍然绑定在启动项目上，与此前完全一致。
+
+`owned_files` 与 `review_context_paths` 随之相对该 checkout，声明路径的观察在那里进行，手动 claim 固定**它的** HEAD，提交在其中解析，`apply --expected-head` 快进的也是它而非父仓库。选择符只有一种写法：规范的相对 POSIX 目录，不含 `..`、`.`、绝对形式与 `.git` 组件；所选目录必须是某个 checkout 自身的顶层——启动项目中的普通子目录会被拒绝，因为 Git 能向上找到仓库并不构成仓库边界。
+
+卡片开放时选择也开放：通过常规的 `propose`／激活路径修改，这会作废此前的同意并重新征求双方。它在首次成功的 claim 预留或执行授权时（以先发生者为准）被永久固定，此后不再解除——取消、撤销、对账或后续计划修订都不会解除。本次发布之前创建的卡片没有锁字段；其历史中的任何授权或尝试都已固定了启动根目录，因此视为已锁定而非开放。既有回执照常重放：缺失的选择会从操作指纹中剔除，而两个不同的选择绝不会得到相同指纹。
+
+**本次发布只支持手动路径。** 认领步骤、在所选仓库中提交、提交该精确哈希、由声明的评审者认领并接受，然后用操作者 CLI 应用。无人值守授权、managed 工作树、自动评审捕获、native managed 派发以及团队运行对此类卡片的执行都会被拒绝，错误为 `work_repository_managed_unsupported`，其中写明所选目录与受支持的替代路径：一个操作者能读懂的拒绝，好过在子仓库执行却在父仓库提交的半途切换。该拒绝同时位于存储层与 workspace 层，因此调用处漏填选择符也无法把尝试重新指向启动根目录。
 
 `owned_files` 和精确 `review_context_paths` 在 create/propose 及 claim 时验证，包括新文件路径已有的祖先目录。嵌套仓库、`.git` 文件/worktree、submodule 内容都是独立边界。此声明路径检查允许拥有父仓库的 submodule **gitlink 条目本身**，但不解除既有的受管快照 submodule 拒绝。Symlink 以路径/root/链接诊断拒绝，不解引用；无关嵌套仓库不会被扫描或拒绝。
 
 边界诊断格式示例：
 
 ```text
-Declared path 'child/new/file.py' belongs to detected repository boundary /outer/child, not pinned root /outer. Launch Tandem at /outer/child and create a separate card in that scope; do not repin this card. The child repository was not opened or searched.
+Declared path 'child/new/file.py' belongs to detected repository boundary /outer/child, not this card's repository /outer. Agree that checkout in the plan's `repository` before execution fixes it, or create a separate card for it; a card that has already run is never repinned. The child repository was not opened or searched.
 ```
 
 非 Git 根只允许**不声明路径**的规划，观察为 `unverified`；含路径计划和所有 claim 必须使用正确的、已有 HEAD 的 Git-root。任务 `cwd` 不能修复启动边界。若声明路径无法提前发现问题，不能解析的提交会在**记录 submission intent 之前**拒绝：

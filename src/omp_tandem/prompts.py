@@ -18,6 +18,8 @@ consult once, then assign the exact current set. Never switch providers or retry
 Use model_selection=coordinator to avoid Jev team-summary export. Explicit model/thinking choices win.
 For durable two-principal acceptance use tandem_work: agree revision, claim, submit, independent report,
 settled declared checks, comparison and distinct review of exact output. Submission intent is not a commit.
+The plan names the card's repository: null is the launch root, a child directory is agreed before the
+first claim fixes it for good; managed execution and automatic capture stay at the launch root.
 Use fresh revisions and exact operation_id identity. Grants, reconciliation and application are operator-only.
 Reports, verification, acceptance, application and publication are distinct; no checkbox proves requirements.
 Declare live boundaries and required checks; preflight checks admission, not permission or capacity reservation.

@@ -294,6 +294,8 @@ class ProjectionLimitsTests(unittest.TestCase):
         legacy["plan"].pop("verification")
         # Added in 3.17.0; a pre-3.17 receipt carried no pinned context.
         legacy["plan"].pop("project_context_id")
+        # Added in 3.19.0; a pre-3.19 receipt chose no repository.
+        legacy["plan"].pop("repository")
         for step in legacy["plan"]["steps"]:
             for key in (
                 "review_context_paths",

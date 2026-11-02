@@ -270,6 +270,13 @@ class TaskRuntime:
             self.worker.work_items.authenticate(attempt["token"])
             if attempt["actor"] != "omp":
                 raise ValueError("Native work attempt is not assigned to OMP")
+            if attempt.get("repository") is not None:
+                # A saved attempt is not permission: a card kept outside the
+                # launch root has no managed dispatch in this release.
+                raise ValueError(
+                    "Managed dispatch is not supported for a card whose "
+                    f"repository is {attempt['repository']!r}; work it manually"
+                )
         if (prompt is None) == (contract is None):
             raise ValueError("Supply exactly one of prompt or contract")
         if prompt is not None and (not isinstance(prompt, str) or not prompt.strip()):

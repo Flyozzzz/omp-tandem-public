@@ -212,6 +212,13 @@ class NativeWorker:
                             raise Cancelled()
                         if self.work_items.progress(request.request.work_id) != state:
                             break
+                if task.get("team_run_id") and request.request.action not in {
+                    "get",
+                    "history",
+                }:
+                    # Team identity is known here and nowhere downstream; check
+                    # it before adoption can retain a Git object.
+                    self.work_items.require_team_execution(request.request.work_id)
                 result = perform_work(
                     self.work_items,
                     request.request,

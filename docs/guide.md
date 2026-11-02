@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Package 3.18.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Package 3.19.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -542,14 +542,24 @@ Before begin, `withdraw --proposal` only drops the proposal. After begin, `withd
 <a id="repository-handover"></a>
 ### Pinned repositories, diagnostics and truthful closure
 
-Creation records `repository{project_root, scope_id, provenance, initial_observation}`; the observation contains `status="verified"|"unverified"`, `git_toplevel`, `head` and action/time provenance. `repository_observation` is refreshed at create/propose/claim. These are observations of the **pinned launch root**, not permission to repin a card or source commit.
+Creation records `repository{project_root, scope_id, selected_directory, provenance, initial_observation}`; the observation contains `status="verified"|"unverified"`, `git_toplevel`, `head`, `selected_directory` and action/time provenance. `repository_observation` is refreshed at create/propose/claim. These are observations of the repository the card chose, not permission to repin it or its source commit.
+
+#### Choose the card's repository (since 3.19.0)
+
+`WorkPlan.repository` names the Git working tree a card belongs to, as a directory relative to the launch project root; `null` is the launch root itself, which is what every card was before this release. Both participants agree it in the plan they accept, instead of inheriting wherever the client happened to start — a session opened at a parent directory can keep a card in `_repos/main-pipeline` without moving its data namespace, which stays bound to the launch project exactly as before.
+
+`owned_files` and `review_context_paths` are then relative to that checkout, declared-path observation runs there, a manual claim pins **its** HEAD, submissions resolve against it, and `apply --expected-head` fast-forwards it rather than the parent. The selector has one spelling: a canonical relative POSIX directory with no `..`, no `.`, no absolute form and no `.git` component, and the chosen directory must be a checkout's own top level — an ordinary subdirectory of the launch project is refused, because Git walking upward is not a repository boundary.
+
+The choice is open while the card is: it changes through the ordinary `propose`/activate path, which invalidates the previous agreements and asks both participants again. It is fixed permanently at the first successful claim reservation or execution authorization, whichever comes first, and the lock never clears — not on cancellation, revocation, reconciliation or a later plan revision. A card created before this release carries no lock field; an authorization or attempt anywhere in its history already pinned its launch root, so it counts as locked rather than open. Existing receipts replay unchanged: an absent selection is dropped from the operation fingerprint, and two different selections never share one.
+
+**This release supports the manual path only.** Claim the step, commit in the selected repository, submit that exact hash, have the declared reviewer claim and accept it, then apply with the operator CLI. Unattended authorization, managed worktrees, automatic review capture, native managed dispatch and team-run execution of such a card are refused with `work_repository_managed_unsupported` naming the selected directory and the supported alternative — a refusal an operator can read, rather than a half cutover that executes in the child and commits in the parent. The refusal is enforced at the store and at the workspace, so omitting the selection at a call site cannot redirect an attempt back to the launch root.
 
 Declared `owned_files` and exact `review_context_paths` are checked at create/propose and again at claim, including existing ancestors of new paths. Nested repositories, `.git` files/worktrees and submodule contents are separate boundaries. Owning the parent's submodule **gitlink entry itself** is allowed by this declared-path check; this does not remove the existing managed-snapshot submodule refusal. Symlinks are refused with the offending path/root/link, never dereferenced. Unrelated nested repositories are not scanned or rejected.
 
 For example, a child boundary produces:
 
 ```text
-Declared path 'child/new/file.py' belongs to detected repository boundary /outer/child, not pinned root /outer. Launch Tandem at /outer/child and create a separate card in that scope; do not repin this card. The child repository was not opened or searched.
+Declared path 'child/new/file.py' belongs to detected repository boundary /outer/child, not this card's repository /outer. Agree that checkout in the plan's `repository` before execution fixes it, or create a separate card for it; a card that has already run is never repinned. The child repository was not opened or searched.
 ```
 
 A non-Git root may retain a **pathless** planning card with an `unverified` observation; declared-path plans and all claims require a valid Git root with HEAD. A task `cwd` cannot repair the launch binding. If the mismatch was not knowable from declared paths, an unresolved submission fails **before submission intent**, with a bounded Git cause:
