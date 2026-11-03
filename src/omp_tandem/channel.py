@@ -288,7 +288,20 @@ class ChannelDelivery:
             "delivery": self.delivery,
             "delivery_instructions": self.delivery_instructions,
             "confirmed": self.confirmed and not self.closed,
-            "watchdog": self._watchdog_metadata(),
+            # Coverage is decided per task generation, and this surface asks
+            # for metadata without any task ids, so armed is false here however
+            # live the timer is. Reading that as "the watchdog never arms" is
+            # the mistake this field exists to prevent.
+            "watchdog": {
+                **self._watchdog_metadata(),
+                "task_coverage_observable_here": False,
+                "coverage_reader": (
+                    "Unscoped timer status is not task coverage. Coverage is "
+                    "attested on the decorated result of the task it covers, "
+                    "where next_action can become await_event; a probe "
+                    "acknowledgement and this status never attest it."
+                ),
+            },
             "probe_pending": bool(
                 self.probe_token
                 and not self.confirmed

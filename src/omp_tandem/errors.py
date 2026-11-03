@@ -36,12 +36,25 @@ class ProtocolError(ValueError):
         )
 
 
-def require_fields(action: str, values: dict, *, next_request: dict | None = None):
+def require_fields(
+    action: str,
+    values: dict,
+    *,
+    next_request: dict | None = None,
+    detail: str | None = None,
+):
+    """Refuse a request that cannot be answered, naming the corrected one.
+
+    detail carries what the caller needs in order to resend, such as the exact
+    identifiers it had to choose between; pointing only at another read left
+    the caller to make a second request before it could make the right one.
+    """
     missing = [name for name, value in values.items() if value is None]
     if missing:
         raise ProtocolError(
             "missing_fields",
-            f"{action} requires {', '.join(missing)}",
+            f"{action} requires {', '.join(missing)}"
+            + (f". {detail}" if detail else ""),
             fields=missing,
             allowed_fix="Supply the named fields from the current observation; do not invent identifiers or repeat execution.",
             next_request=next_request,

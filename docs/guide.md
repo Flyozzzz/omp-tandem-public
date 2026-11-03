@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Package 3.20.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Package 3.21.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -539,7 +539,7 @@ Both participants read and agree to the exact plan revision:
 {"request": {"action": "agree", "work_id": "<work-id>", "expected_revision": 1, "operation_id": "claude-agrees-feature-42", "note": "The recorded scope and criteria match our chosen approach."}}
 ```
 
-The other participant uses **its own seat** and a freshly read `revision`; a caller cannot supply `actor` in tool arguments. Every MCP mutation needs the current `expected_revision` and a stable `operation_id`. Repeating exactly the same operation recovers its receipt; reusing its ID with different content is a conflict. Progress changes `revision`; a differing `propose` records a pending proposal, **not** a new active `plan_revision`. Only operator activation changes the active plan, resets agreements/current acceptance and revokes the old grant. Historical reports remain available through `history`. No silent merging of conflicting plans or expansion of permissions.
+The other participant uses **its own seat** and a freshly read `revision`; a caller cannot supply `actor` in tool arguments. Agreement needs that seat, not a new conversation: any eligible participant session can agree, and launching a fresh consultation for every plan revision is a workaround, not a requirement. A managed attempt's credential cannot agree, and a reserved coordination consultation does not receive `tandem_work` at all, so the seat has to be a real participant one. Every MCP mutation needs the current `expected_revision` and a stable `operation_id`. Repeating exactly the same operation recovers its receipt; reusing its ID with different content is a conflict. Progress changes `revision`; a differing `propose` records a pending proposal, **not** a new active `plan_revision`. Only operator activation changes the active plan, resets agreements/current acceptance and revokes the old grant. Historical reports remain available through `history`. No silent merging of conflicting plans or expansion of permissions.
 
 <a id="plan-transitions"></a>
 ### Pending plans and operator transitions
@@ -809,6 +809,10 @@ Each worker must acknowledge its assignment through `heartbeat` before work. A l
 
 `block` records a note and a specific resolution condition; `unblock` requires the blocker ID, actual resolution and evidence. Dependencies open only after current prerequisite submissions are accepted—not merely when a native task exits. Cooperative blocked work can finish cleanly, retain its partial source checkpoint, release execution capacity and continue from that checkpoint after an evidenced unblock under the same still-valid grant. A checkpoint is not an accepted submission. Unknown termination, failed dispatch acknowledgement or possible unfinished external effects instead require reconciliation; they never become automatic retries.
 
+A resolved blocker is continuation material, not only history. An implementation attempt's briefing carries the questions already answered on its card at its own plan revision, with the answer, its evidence and who gave it, so a worker does not ask again what an operator has already decided. They are attributed as a record of what was decided: not a requirement, not ownership, and not permission. An independent review stage never receives them, because an answer can carry the author's interpretation of the work under review. Resolutions recorded under a different plan revision answered a different question and stay in history; read `section=blockers` for the complete set.
+
+An attempt that stopped on a question it had itself recorded settles as a cooperative block even if the operator answers before it finishes. Answering promptly used to turn that honest outcome into `recovery_required`. The attempt stays blocked and keeps its checkpoint; the answer belongs to the next attempt, and the step becomes ready for a new authorized continuation rather than the old one resuming.
+
 Unresolved blockers retain identity, original plan/step and resolution history through proposal and activation. Only activation of a plan that removes their step moves them to card scope, where they block all execution/publication. Both participants may agree to a corrective active plan while blockers remain; agreement, retries and review-stage changes do not resolve them. Only the blocker author or operator may record evidence-backed resolution or `resolution="not_applicable"` with a reason in `note`. For a card-level blocker omit `step_id` when unblocking. Blocked work cannot be submitted or accepted.
 
 <a id="operator-unblock"></a>
@@ -834,6 +838,8 @@ Attached clients receive best-effort shared-work change hints through an already
 {"request": {"action": "get", "work_id": "<work-id>"}, "wait_seconds": 25, "after_revision": 7}
 ```
 
+A worker's heartbeat does not move the card. It records liveness on the attempt and writes no history event, so it no longer collides with a slow `expected_revision`, no longer wakes a long bounded wait with nothing to read, and no longer stales a revision-bound section cursor mid-page. Read `heartbeat_at` on the step's attempt to see that a worker is alive.
+
 `after_revision` is the revision the caller last read. A card already past it returns at once instead of waiting for the next change after this call began; omitted, the baseline is taken when the call starts, as before. It is an observation baseline only: it is not `expected_revision`, it makes no claim, and it authorizes no replay. A baseline ahead of the current revision is refused rather than waited for.
 
 Events do not grant permission and are not the scheduling source of truth. The detached controller reads durable readiness, so a lost client notification does not strand eligible work. It does not keep a model running just to wait for a dependency. Closing an interactive client stops its own native turns but not a separately authorized controller. A local controller cannot execute while its machine is asleep/offline; on return it checks deadlines and ownership rather than replaying missed events.
@@ -847,6 +853,8 @@ python -m omp_tandem.work_daemon --project-root /absolute/project \
   --evidence "Reference the actual process/output/effect inspection." \
   --confirm-stopped
 ```
+
+This is also the route when the supervisor itself is gone: `reconcile` refuses while a running controller still owns the attempt, and otherwise records the stop attestation itself, so a managed attempt whose supervisor died is not stuck waiting for evidence that will never arrive. The operator transition path is stricter and waits for the supervisor's own confirmation. Which principal attested a stop is now recorded and reported, so an operator's attestation is never presented as observed teardown.
 
 `--confirm-stopped` is an explicit operator attestation, **not** proof inferred from a missing heartbeat. Reconciliation never rolls back remote effects or silently replays commands. Reauthorize if the old grant was revoked/changed/exhausted. Reported USD ceilings are cooperative/provider-estimate limits, not an invoice-level hard spending guarantee; an in-flight request can overshoot, and unknown usage pauses the work rather than counting it as zero.
 

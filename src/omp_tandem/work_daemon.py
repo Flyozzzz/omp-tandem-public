@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 from uuid import uuid4
 
@@ -18,6 +19,10 @@ from .work_items import CLAUDE_DEFAULT_MODEL, validate_model
 from .work_supervisor import WorkSupervisor, private_json, supervisor_status
 from .work_workspace import WorkWorkspace
 from .workspace import resolve_scope
+
+# One previous supervisor log is kept beside the current one; the pair bounds
+# the directory while leaving the run before this one readable.
+_LOG_ROTATE_BYTES = 4 * 1024 * 1024
 
 
 def parser():
@@ -333,8 +338,14 @@ def start_detached(args, scope):
     if observed["running"]:
         return observed
     log_path = scope.directory / "work-supervisor.log"
+    # Each start used to truncate this file, so an operator diagnosing a stopped
+    # run found only the run that replaced it. Append instead, and roll the file
+    # aside once it is large rather than discarding what it already holds.
+    with suppress(OSError):
+        if log_path.stat().st_size > _LOG_ROTATE_BYTES:
+            log_path.replace(log_path.with_suffix(".log.1"))
     descriptor = os.open(
-        log_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o600
+        log_path, os.O_CREAT | os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, 0o600
     )
     command = [
         sys.executable,
@@ -517,7 +528,8 @@ def main(argv=None):
                     raise ValueError(
                         "Controller still owns this execution; stop and wait before reconciliation"
                     )
-                store.confirm_stopped(identifier)
+                # The operator, not the supervisor, is attesting this stop.
+                store.confirm_stopped(identifier, attested_by="operator")
                 view = store.perform(
                     {"action": "get", "work_id": args.work_id}, actor="operator"
                 )

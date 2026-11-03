@@ -18,10 +18,10 @@ import sqlite3
 import sys
 import threading
 import time
-from contextlib import closing, contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext, suppress
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal, Self
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from pydantic import (
     BaseModel,
@@ -742,6 +742,45 @@ class WorkConflict(ValueError):
 
 def _json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _shell_grant_refusal(autonomous, kind):
+    """Name which condition refused, and the authority that answers it.
+
+    One sentence covered every case, so a caller could not tell a missing grant
+    from a role that never receives shell through this path, and retried the
+    claim. The text names the authority required; it never suggests moving or
+    dropping a declared check to make admission succeed, which would change the
+    assurance both participants agreed to.
+    """
+    if kind == "review":
+        return (
+            "Declared shell requirement is not granted for this attempt: an "
+            "independent review stage does not receive implementation shell, "
+            "whatever --allow-shell permits elsewhere. Its executable path is "
+            "the operator's separate review-check authorization, "
+            "--allow-review-checks with --review-check-image pinned to an "
+            "immutable id, bound to this plan revision and this step's review "
+            "declarations. Until that exists, the declared check has no "
+            "authorized executor; it is still owed."
+        )
+    if not autonomous:
+        return (
+            "Declared shell requirement is not granted for this attempt: a "
+            "manual claim is not admitted through this path to run declared "
+            "checks, and attaching a managed grant to it does not change that. "
+            "Managed execution is an operator decision recorded with "
+            "work_daemon authorize --allow-work --allow-shell and launched with "
+            "work_daemon start; the exact command for this card is in the "
+            "card's operator_commands."
+        )
+    return (
+        "Declared shell requirement is not granted for this attempt: the current "
+        "authorization carries no shell permission. Only the operator can record "
+        "one, with work_daemon authorize --allow-work --allow-shell; a new grant "
+        "replaces the current one, and no participant can grant itself execution "
+        "through this tool."
+    )
 
 
 def _operation_fingerprint(command, bound, *, version=2):
@@ -1478,6 +1517,30 @@ class WorkStore:
             card["agreements"].get(actor, {}).get("plan_revision")
             == card["plan_revision"]
             for actor in ("claude", "omp")
+        )
+
+    @staticmethod
+    def _block_intent_honoured(card, step, intent):
+        """Did this attempt stop on a blocker it actually recorded?
+
+        The named blocker used to have to be *still* unresolved at settlement.
+        An operator who answered promptly therefore turned an honest
+        cooperative block into recovery_required, which is the opposite of
+        what answering should do. A blocker resolved after the intent was
+        recorded still means the attempt stopped cooperatively; the resolution
+        belongs to the next attempt, not to this one's outcome.
+        """
+        named = set(intent.get("blocker_ids") or ())
+        if not named:
+            return False
+        recorded_at = intent.get("at") or 0
+        return any(
+            blocker["blocker_id"] in named
+            and (
+                blocker["resolved_at"] is None or blocker["resolved_at"] >= recorded_at
+            )
+            for blockers in (card["blockers"], step["blockers"] if step else [])
+            for blocker in blockers
         )
 
     @staticmethod
@@ -2575,6 +2638,14 @@ class WorkStore:
         require_fields(
             "step view",
             {"step_id": step_id},
+            # The plan section lists the step ids; name them here as well, so
+            # the next request is the corrected one rather than another read.
+            detail=(
+                "A step view names exactly one step. Known step ids: "
+                + ", ".join(item["id"] for item in current["steps"])
+            )
+            if current.get("steps")
+            else None,
             next_request=_section_arguments(current["work_id"], "plan"),
         )
         step = self._step(current, step_id)
@@ -3499,9 +3570,16 @@ class WorkStore:
                     "Resolve outstanding blockers before submitting or deciding acceptance"
                 )
             if action == "heartbeat":
+                # Liveness is not a change to the agreement. Recording it as a
+                # card revision made revision_conflict the normal outcome of any
+                # request slower than one heartbeat, and woke every long
+                # get(after_revision=...) without anything to read. The attempt
+                # row carries the timestamp; the card's history stays a log of
+                # what participants actually decided.
                 bound["heartbeat_at"] = time.time()
                 self._save_attempt(db, bound)
-            elif action == "block":
+                return self._view(db, card)
+            if action == "block":
                 if not command.note or not command.condition:
                     raise ValueError("Block requires note and a resolution condition")
                 if actor not in {step["owner"], step["reviewer"], "operator"}:
@@ -4475,9 +4553,7 @@ class WorkStore:
                 not autonomous or kind == "review" or not shell_permission(grant or {})
             )
         ):
-            raise ValueError(
-                "Declared shell requirement is not granted for this attempt"
-            )
+            raise ValueError(_shell_grant_refusal(autonomous, kind))
         if requirements.requires_write and (
             not autonomous or not (grant or {}).get("allow_work")
         ):
@@ -4662,6 +4738,15 @@ class WorkStore:
 
     @staticmethod
     def _shell_waiver(step, scope):
+        """An operator waiver covers the exact submission it was recorded for.
+
+        It is tempting to widen this to the capability - whether any authorized
+        executor exists is a property of the plan and the grant, not of the
+        bytes - but the operator's recorded reason is free text and may well be
+        about this particular output. Widening it silently would let a waiver
+        written for a documentation change carry to executable code under the
+        same step. The repetition is the price of that distinction.
+        """
         return any(
             blocker.get("policy") == "shell_review"
             and blocker["actor"] == "operator"
@@ -4925,6 +5010,70 @@ class WorkStore:
             {"attempt_id": attempt["attempt_id"], "request": request},
         )
 
+    _DECISION_TEXT = 1200
+    _DECISION_LIMIT = 8
+    _DECISION_BYTES = 4000
+
+    def resolved_decisions(self, work_id, step_id, plan_revision) -> list[dict]:
+        """Answers already recorded against this step at this plan revision.
+
+        A worker that blocked on a question saw nothing of the answer: the next
+        attempt reads the card, whose default summary lists only UNRESOLVED
+        blockers, so consecutive attempts asked the same question and blocked
+        again. These are historical records of what was decided, each carrying
+        its own author and revision. They are not requirements, they do not
+        widen ownership, and they grant no permission.
+        """
+
+        def clip(value):
+            text = value if isinstance(value, str) else ""
+            return text[: self._DECISION_TEXT]
+
+        with self._read_connection() as db:
+            card = self._load(db, work_id)
+        step = next((item for item in card["steps"] if item["id"] == step_id), None)
+        decisions = []
+        for blocker in (*card["blockers"], *(step["blockers"] if step else ())):
+            if blocker["resolved_at"] is None:
+                continue
+            for resolution in blocker.get("resolution_history") or ():
+                # A decision taken under a different plan revision answered a
+                # different question; it stays in history rather than briefing
+                # this attempt.
+                if resolution.get("plan_revision") != plan_revision:
+                    continue
+                decisions.append(
+                    {
+                        "blocker_id": blocker["blocker_id"],
+                        "asked_by": blocker["actor"],
+                        "question": clip(blocker["note"]),
+                        "condition": clip(blocker["condition"]),
+                        "kind": resolution.get("kind"),
+                        "answer": clip(resolution.get("note")),
+                        "evidence": [
+                            clip(item) for item in (resolution.get("evidence") or ())
+                        ][:4],
+                        "answered_by": resolution.get("actor"),
+                        "at": resolution.get("at"),
+                        "plan_revision": resolution.get("plan_revision"),
+                    }
+                )
+        decisions.sort(key=lambda item: item["at"] or 0)
+        # Keep the newest answers that fit a fixed budget. Unbounded, a few long
+        # answers would be larger than the briefing they belong to and would
+        # collapse it into its paged form, losing the plan excerpt in order to
+        # deliver the decisions - which is the trade this projection exists to
+        # avoid. What does not fit stays one section=blockers read away.
+        kept, used = [], 0
+        for decision in reversed(decisions[-self._DECISION_LIMIT :]):
+            size = len(_json(decision).encode())
+            if kept and used + size > self._DECISION_BYTES:
+                break
+            kept.append(decision)
+            used += size
+        kept.reverse()
+        return kept
+
     def active_attempts(self, owner_id: str | None = None) -> list[dict]:
         with self._read_connection() as db:
             return [
@@ -4934,18 +5083,29 @@ class WorkStore:
                 and (owner_id is None or attempt["owner_id"] == owner_id)
             ]
 
-    def confirm_stopped(self, attempt_id) -> None:
-        """Supervisor-only assertion after verified child exit, never based on text."""
+    def confirm_stopped(self, attempt_id, *, attested_by="supervisor") -> None:
+        """Record that this attempt's execution has stopped, and who says so.
+
+        The supervisor says it after observing a child exit. The operator says
+        it through the reconcile command, having checked that no controller
+        owns the attempt. Both were recorded as "supervisor", so a later read
+        could present an operator's attestation as observed teardown. The
+        attestation is still what admits reconciliation; only its origin is now
+        recorded truthfully.
+        """
+        if attested_by not in {"supervisor", "operator"}:
+            raise ValueError("Stop evidence is attested by the supervisor or operator")
         with self._transaction() as db:
             attempt = self._attempt(db, attempt_id)
             attempt["process_confirmed_gone"] = True
+            attempt["stop_attested_by"] = attested_by
             self._save_attempt(db, attempt)
             self._record(
                 db,
                 self._load(db, attempt["work_id"]),
                 "process_stopped",
-                "supervisor",
-                {"attempt_id": attempt_id},
+                attested_by,
+                {"attempt_id": attempt_id, "attested_by": attested_by},
             )
 
     @staticmethod
@@ -5073,10 +5233,7 @@ class WorkStore:
                 current
                 and outcome == "blocked"
                 and attempt.get("block_intent")
-                and any(
-                    blocker["blocker_id"] in attempt["block_intent"]["blocker_ids"]
-                    for blocker in unresolved
-                )
+                and self._block_intent_honoured(card, step, attempt["block_intent"])
                 and (
                     not attempt["autonomous"]
                     or (cost_usd is not None and attempt["process_confirmed_gone"])
@@ -5326,6 +5483,21 @@ class WorkStore:
                             blocker["blocker_id"],
                             *(("--step", step_id) if step_id else ()),
                             *revision,
+                            # The CLI requires an idempotency id; a template that
+                            # omits it is refused by argparse before any work.
+                            # It must be derived, not drawn fresh per render:
+                            # a paged read re-projects this section and compares
+                            # its content digest, so a random value would stale
+                            # the caller's own cursor without any mutation.
+                            "--operation-id",
+                            str(
+                                uuid5(
+                                    NAMESPACE_URL,
+                                    "urn:omp-tandem:operator:unblock:"
+                                    f"{work_id}:{blocker['blocker_id']}:"
+                                    f"{card['revision']}",
+                                )
+                            ),
                             "--resolution",
                             "resolved",
                             "--note",
@@ -5547,6 +5719,32 @@ class WorkStore:
             }
             return self._redact(db, self._inspect_view(card, attempts))
 
+    def _attempt_diagnostics(self, attempt_id, attempt):
+        """Where an operator can look for what this attempt recorded.
+
+        work-attempts/<id> holds only the launch token, which the supervisor
+        deletes in its finally block, so an operator who looked there found an
+        empty directory and concluded nothing was kept. The durable material is
+        the adapter directory, and the worker's own transcript is reachable
+        through the native task rather than by matching a working directory in
+        the first line of a session file.
+        """
+        directory = self.scope.directory / "work-adapters" / attempt_id
+        present = []
+        with suppress(OSError):
+            present = sorted(item.name for item in directory.iterdir())
+        return {
+            "adapter_directory": str(directory),
+            "files_present": present,
+            "native_task_id": attempt.get("native_task_id"),
+            "note": (
+                "Paths locate material; they do not attest that it exists, that "
+                "execution stopped, or that anything in it was accepted. "
+                "work-attempts/<attempt_id> holds only the launch token and is "
+                "expected to be empty once the attempt ends."
+            ),
+        }
+
     def _inspect_view(self, card, attempts):
         work_id = card["work_id"]
         transition = card.get("transition")
@@ -5559,16 +5757,24 @@ class WorkStore:
                     "attempt_id": attempt_id,
                     "current_state": attempt.get("state"),
                     "process_confirmed_gone": attempt.get("process_confirmed_gone"),
+                    "stop_attested_by": attempt.get("stop_attested_by"),
                     "required": None
                     if entry.get("disposition")
                     else (
-                        "supervisor teardown confirmation, then operator disposition"
+                        "supervisor teardown confirmation, or, when the supervisor "
+                        "is gone, operator attestation through work_daemon "
+                        "reconcile; then operator disposition"
                         if entry["autonomous"]
                         and not attempt.get("process_confirmed_gone")
                         else "operator disposition (--note/--evidence)"
                         if entry["autonomous"]
                         else "operator attestation of the manual stop (--confirm-stopped) and disposition"
                     ),
+                    # Operator-only navigation to what this attempt left behind.
+                    # A path is where the material would be, never evidence that
+                    # the attempt produced any, and never a capability: reading
+                    # it stays an explicit operator act outside this tool.
+                    "diagnostics": self._attempt_diagnostics(attempt_id, attempt),
                     "inspect": [
                         item
                         for item in (
@@ -5927,11 +6133,27 @@ class WorkStore:
                 raise ValueError("stop_unconfirmed")
             if attempt["autonomous"]:
                 if not attempt.get("process_confirmed_gone"):
+                    # This path waits for the supervisor's own evidence and has
+                    # no operator override, which read as a dead end whenever the
+                    # supervisor died with the attempt. It is not the only route:
+                    # the reconcile command checks that no running controller
+                    # owns the attempt and then attests the stop itself.
                     raise ValueError(
                         "stop_unconfirmed: the supervisor has not confirmed teardown of "
-                        f"managed attempt {attempt_id}; wait for its evidence"
+                        f"managed attempt {attempt_id}. Either wait for its evidence, "
+                        "or, when the supervisor is gone, attest the stop through "
+                        "'work_daemon reconcile <work_id> --step <step_id> --resolution "
+                        "retry|abandon --note ... --evidence ...', which refuses while a "
+                        "running controller still owns this attempt"
                     )
-                stop = {"source": "supervisor_confirmed", "at": time.time()}
+                stop = {
+                    "source": (
+                        "operator_attested"
+                        if attempt.get("stop_attested_by") == "operator"
+                        else "supervisor_confirmed"
+                    ),
+                    "at": time.time(),
+                }
             else:
                 if not confirm_stopped:
                     raise ValueError(

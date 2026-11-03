@@ -73,6 +73,17 @@ class ChannelDeliveryTests(unittest.IsolatedAsyncioTestCase):
             await self.delivery.confirm("invented-token")
         self.assertFalse(self.delivery.status()["confirmed"])
 
+    async def test_status_does_not_offer_task_coverage_it_cannot_observe(self):
+        await self.confirm()
+        status = self.delivery.status()
+        # The channel receipt is confirmed here, which is exactly when a reader
+        # used to conclude from armed=False that the watchdog never arms.
+        self.assertTrue(status["confirmed"])
+        self.assertEqual(status["next_action"], "use_polling")
+        self.assertFalse(status["watchdog"]["task_coverage_observable_here"])
+        self.assertIn("task coverage", status["watchdog"]["coverage_reader"])
+        self.assertIn("await_event", status["watchdog"]["coverage_reader"])
+
     async def test_valid_receipt_delivers_once_and_fetch_ack_consumes(self):
         await self.confirm()
         task_id = str(uuid4())

@@ -1,5 +1,103 @@
 # Changelog
 
+## 3.21.0 — 2026-11-03
+
+Two field reports from autonomous work on other projects, covering 19-30 October on
+`omp-tandem` 3.14.0 and 3.19.0, were read against the source. Several of their
+diagnoses were wrong and are corrected below; the failures they describe were real.
+
+- A heartbeat is liveness, not a change to the agreement. It incremented the card's
+  CAS revision and wrote a history event like any mutation, so `revision_conflict`
+  was the normal outcome of any request slower than one heartbeat, a long
+  `get(after_revision=...)` woke with nothing to read, and a revision-bound section
+  cursor went stale mid-page. The heartbeat now records `heartbeat_at` on the attempt
+  and returns the current view, writing no event and leaving the revision alone. Past
+  heartbeat revisions and events keep their recorded meaning; an exact heartbeat retry
+  still resolves its stored receipt rather than becoming a new observation.
+- Answers recorded on a blocker now reach the next implementation attempt. The
+  attempt's briefing contained no blockers at all, and the card read it is told to
+  make lists only **unresolved** ones, so an operator's answer was stored, visible
+  through `section=blockers`, and invisible on every route the worker actually took:
+  in one measured card three consecutive attempts asked the same question and
+  blocked, spending over $4 for no output until the facts were copied into the plan
+  context by hand. `resolved_decisions` projects the question, its condition, the
+  answer, its evidence and who gave it, for resolutions recorded at the attempt's own
+  plan revision, and the briefing carries them with their attribution. They are a
+  historical record, not a requirement and not permission. An independent review
+  stage never receives them, because an answer can carry the author's interpretation.
+  A decision taken under another plan revision answered another question and stays in
+  history; this does not repair continuation across an activation.
+- An attempt that stopped on a question it had recorded now settles as a cooperative
+  block even when the operator answered in the meantime. Settlement required the
+  named blocker to be *still* unresolved, so answering promptly turned an honest
+  blocked outcome into `recovery_required` and stranded its checkpoint. The qualifying
+  record must still be a blocker that this attempt's own block intent named. Every
+  other settlement gate is unchanged, and a resolved question does not turn a blocked
+  result into success: the attempt stays blocked while the step becomes ready for a
+  new authorized continuation.
+- The printed `unblock` operator command now carries the `--operation-id` the CLI
+  requires, derived from the work, blocker and revision rather than drawn fresh. A
+  random value would have been correct on its own and wrong in a paged read, which
+  re-projects the section and compares its content digest: the second page would have
+  returned `cursor_stale` with nothing having changed.
+- "Declared shell requirement is not granted for this attempt" was one sentence for
+  three different conditions. It now names the authority that answers the actual one:
+  the operator's separate `--allow-review-checks` with a pinned image for a review
+  stage, which never receives implementation shell; the card's `operator_commands` for
+  a manual claim, which this path does not admit; and `authorize --allow-shell` for a
+  grant without shell permission. It never suggests moving or dropping a declared
+  check to make admission succeed — a check with no authorized executor is still owed.
+- Who attested that an attempt stopped is now recorded. The operator `reconcile`
+  command calls the same confirmation the supervisor uses, and both were stored as
+  the supervisor's, so a later transition could present an operator's attestation as
+  observed teardown. The transition refusal for a managed attempt also names the
+  `reconcile` route, which exists: **contrary to the report, a dead managed attempt
+  was never an inescapable deadlock**, but the only refusal an operator met said to
+  wait for evidence that would never arrive.
+- The operator transition inspection now points at `work-adapters/<attempt_id>` and
+  the attempt's native task. `work-attempts/<attempt_id>` holds only the launch token,
+  which the supervisor deletes, so an operator who looked there found an empty
+  directory and concluded nothing had been kept. This is operator-scoped navigation:
+  a path says where material would be, never that it exists, that execution stopped,
+  or that anything in it was accepted. The supervisor log is also appended to and
+  rotated once past 4 MiB instead of being truncated by every `start`, which kept only
+  the run that replaced the one being diagnosed. Rotation keeps one previous
+  generation at start time; it is not full archival retention.
+- An attempt stopped by its cost or wall-clock budget now says that its worktree is
+  retained and points at the operator preservation path, instead of leaving a patch to
+  be rescued by hand. Retained bytes are not a captured commit and not approved
+  continuation. The per-attempt ceiling default is unchanged: half the grant, as
+  `authorize` already previews.
+- Channel status no longer reads as though it could attest wake coverage. It asks for
+  watchdog metadata without any task ids, and `armed` is decided per task generation,
+  so it was structurally false there however live the timer was — and a reader who
+  acknowledged a real probe, saw `confirmed: true` beside `armed: false`, concluded
+  the watchdog never arms. Unscoped timer status is not task coverage; coverage is
+  attested on the decorated result of the task it covers.
+- `section` with a mutating action, and a step view without a `step_id`, keep their
+  refusals and now name the corrected request, including the known step ids.
+
+Deliberately not changed, with the invariant each protects:
+
+- The shell-review policy blocker still binds its waiver to the exact submission.
+  Widening it to the capability — whether any authorized executor exists is a property
+  of the plan and the grant, not of the bytes — would have removed the repetition the
+  report complains about, and would also have let a waiver written for a documentation
+  change carry silently to executable code under the same step. The operator's reason
+  is free text; the distinction is theirs to make, not this release's to assume.
+- Completed cards stay terminal, a reviewer's explicit verdict on the exact submission
+  stays required, managed submit intent stays distinct from captured output, ambient
+  skills and rules stay off inside a managed attempt, and independent review still
+  reads only its pinned snapshot.
+
+Reported and still open, named rather than closed: the full-plan cost of `propose`;
+acceptance that ran no check where the obligation was declared only in prose; review
+attempts that stop without a verdict; the remaining paths from retained work to an
+approved continuation; the mismatch between what a task demands and what its declared
+execution environment supplies; interpreter identity in operator hints; and supervisor
+state after an activation. The `RpcError` about `auto_compaction_start` is not from
+this plugin — no such string exists in it — and belongs to `omp` itself.
+
 ## 3.20.0 — 2026-11-03
 
 - A review request can be sent as a file. `tandem_review_run(action="start")` takes `request_file`, a path inside the launch project holding the same `ReviewRequest` as JSON, with a required `request_sha256` of its raw bytes, mutually exclusive with inline `request`. The contract is then assembled by ordinary code and only its locator passes through the model. Measured on one 21-hour pipeline run: the whole request serialized to 102,598 characters of tool input, and the coordinator spent 4m20s and 5m45s emitting it, twice, before either review began — and shortened its own requirements to a literal `[cut: 20986 more characters]` although the field accepts 200,000.

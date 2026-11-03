@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**软件包 3.20.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**软件包 3.21.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -693,6 +693,13 @@ Rootfs 只读，PID/IPC 与 `/tmp` 私有，移除 capabilities 并设置 no-new
 受管 submit 先检查文件归属再保存意图；`intent_recorded` 与 `output_committed=false` 不代表已有提交。最终捕获仍重新检查输入，`capture_failed` 需保留工作并恢复，不能为了过门槛删除必要测试。旧授权与活跃尝试不会升级。[完整契约](guide.md#controlled-review-checks)。
 
 ### 阻塞、暂停与在线唤醒
+
+已解除的阻塞是继续工作的材料，而不只是历史。实现尝试的简报会带上这张卡片在同一计划修订下已经回答过的问题，连同答案、证据和回答者，使 worker 不再重复询问操作者已经决定的事。它被标注为"已作出的决定"的记录：不是要求，不是归属，也不是许可。独立审查阶段绝不接收它们，因为答案可能带有作者对被审查工作的解释。在其他计划修订下记录的解除回答的是另一个问题，仍留在历史中；完整集合通过 `section=blockers` 读取。
+
+尝试若停在自己记录的问题上，即使操作者在它结算之前就已回答，它仍按协作式阻塞结算。此前及时回答反而会把这个诚实的结果变成 `recovery_required`。该尝试保持 blocked 并保留其 checkpoint；答案属于下一次尝试，步骤随之可以进入新的已授权续作，而不是恢复旧尝试。
+
+worker 的心跳不再推进卡片。它只在尝试上记录存活状态，不写入历史事件，因此不再与较慢的 `expected_revision` 冲突，不再让长时间有界等待空醒，也不再在分页中途使绑定修订的 section 游标失效。worker 是否存活，读取该步骤尝试上的 `heartbeat_at`。
+
 
 | 操作 | 当前版本与新操作 ID 之外的必要输入／作用 |
 |---|---|

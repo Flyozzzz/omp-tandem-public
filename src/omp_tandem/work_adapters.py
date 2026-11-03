@@ -75,6 +75,14 @@ def _signal_group(handle, sig):
             handle.group_killed = True
 
 
+_STRANDED = (
+    " The attempt's worktree is retained, not rolled back: inspect it, and use "
+    "the operator transition path, which preserves an interrupted managed "
+    "workspace, rather than copying a patch out by hand. Retained bytes are "
+    "neither a captured commit nor approved continuation."
+)
+
+
 @dataclass(eq=False, repr=False)
 class WorkHandle:
     attempt_id: str
@@ -121,7 +129,7 @@ def _declaration(attempt, step, name, default=None):
     return attempt.get(name, step.get(key, default))
 
 
-def _prompt(attempt, plan, workspace):
+def _prompt(attempt, plan, workspace, decisions=()):
     # No bearer credentials, provider settings, or user conversation identity.
     step = next(step for step in plan["steps"] if step["id"] == attempt["step_id"])
     verification = _declaration(attempt, step, "verification")
@@ -176,6 +184,16 @@ def _prompt(attempt, plan, workspace):
         if verification is not None
         else None,
     }
+    if decisions:
+        saved["recorded_decisions"] = {
+            "attribution": (
+                "Questions already answered on this card at this plan revision. "
+                "Historical record of what was decided and by whom; not a "
+                "requirement, not ownership and not permission. Do not ask these "
+                "again; read section=blockers for the complete history."
+            ),
+            "items": list(decisions),
+        }
     independent = (
         attempt["kind"] == "review" and attempt.get("protocol") == "independent_first"
     )
@@ -197,6 +215,29 @@ def _prompt(attempt, plan, workspace):
             )
         }
         saved["context_paged"] = True
+        if decisions:
+            saved["recorded_decisions"] = {
+                "attribution": (
+                    "Questions already answered on this card at this plan "
+                    "revision; historical record, not a requirement or "
+                    "permission. Do not ask these again."
+                ),
+                "items": [
+                    {
+                        "question": item["question"],
+                        "answer": item["answer"],
+                        "answered_by": item["answered_by"],
+                    }
+                    for item in decisions
+                ],
+            }
+            saved["blocker_history"] = {
+                "tool": "tandem_work",
+                "arguments": {
+                    "request": {"action": "get", "work_id": attempt["work_id"]},
+                    "section": "blockers",
+                },
+            }
         saved["required_read"] = {
             "tool": "tandem_work",
             "arguments": {
@@ -236,7 +277,14 @@ def _prompt(attempt, plan, workspace):
         "tandem_work check_runs on submit/report/accept/reject (OMP may also use tandem_finish). "
         "Managed pre-capture checks may identify the exact output Git tree; final coverage binds "
         "that tree to the supervisor-captured commit. Passing evidence is not semantic proof.\n"
-        "If blocked, record the blocker with tandem_work. Never re-run an uncertain prior attempt. "
+        + (
+            "Read recorded_decisions below before asking anything: a question already "
+            "answered on this card is answered, and asking it again blocks the attempt "
+            "for nothing. "
+            if decisions
+            else ""
+        )
+        + "If blocked, record the blocker with tandem_work. Never re-run an uncertain prior attempt. "
         "Heartbeat periodically through tandem_work. Finish with the requested structured outcome "
         "(OMP: tandem_finish); include concrete evidence, not confident prose.\n"
         + (
@@ -380,7 +428,16 @@ class _Adapter:
         # This durable exclusive marker precedes launch. Even a lost start result
         # cannot cause another launch under the same attempt identity.
         directory.mkdir(mode=0o700)
-        prompt = _prompt(attempt, plan, workspace)
+        # An independent review stage never receives this: a recorded answer can
+        # carry the author's interpretation, which that stage must not see.
+        decisions = (
+            self.bridge.work_items.resolved_decisions(
+                attempt["work_id"], attempt["step_id"], attempt["plan_revision"]
+            )
+            if attempt["kind"] == "implement"
+            else ()
+        )
+        prompt = _prompt(attempt, plan, workspace, decisions=decisions)
         _private_file(directory / "context.txt", prompt)
         handle = WorkHandle(identifier, directory, deadline, float(budget), secret)
         self.handles.add(handle)
@@ -409,7 +466,7 @@ class _Adapter:
         ):
             handle.failure = "No shared-work heartbeat acknowledged startup; launch outcome uncertain"
         if time.time() >= handle.deadline:
-            handle.failure = "Attempt wall-clock budget exhausted"
+            handle.failure = "Attempt wall-clock budget exhausted." + _STRANDED
         if current["state"] not in ("reserved", "running") and handle.result is None:
             handle.failure = (
                 "Attempt is no longer active; already-applied effects are preserved"
@@ -574,7 +631,9 @@ class OmpWorkAdapter(_Adapter):
                 "Native cost accounting is unknown; autonomous execution stopped"
             )
         if _number(known) and known >= handle.budget:
-            handle.failure = "Native reported cost reached the attempt budget"
+            handle.failure = (
+                "Native reported cost reached the attempt budget." + _STRANDED
+            )
         if handle.failure or handle.cancelled:
             self.cancel(handle)
             final = self.bridge.view(handle.native_task_id, details=True, refresh=False)

@@ -18,8 +18,9 @@ from omp_tandem.work_items import review_inputs, review_scope
 
 
 class AttemptStore:
-    def __init__(self, attempt):
+    def __init__(self, attempt, decisions=()):
         self.value = attempt
+        self.decisions = list(decisions)
 
     def authenticate(self, token):
         if token != "private-attempt-secret":
@@ -34,6 +35,9 @@ class AttemptStore:
     def started(self, identifier, **fields):
         self.attempt(identifier)
         self.value.update(fields, state="running", started_at=time.time())
+
+    def resolved_decisions(self, work_id, step_id, plan_revision):
+        return list(self.decisions)
 
 
 class WorkAdapterTests(unittest.TestCase):
@@ -332,6 +336,74 @@ class WorkAdapterTests(unittest.TestCase):
 
         self.bridge.start = start
         return captured
+
+    def test_recorded_answers_reach_an_implementation_attempt(self):
+        self.attempt["actor"] = "omp"
+        self.store.decisions = [
+            {
+                "blocker_id": "b1",
+                "asked_by": "omp",
+                "question": "Which address form does the contract use?",
+                "condition": "Operator supplies the exact form",
+                "kind": "resolved",
+                "answer": "Always a string",
+                "evidence": ["Contract section 4"],
+                "answered_by": "operator",
+                "at": 1.0,
+                "plan_revision": self.attempt["plan_revision"],
+            }
+        ]
+        self.bridge.cancel = lambda *args, **kwargs: None
+        self.bridge.runtime = SimpleNamespace(guard=threading.Lock(), threads={})
+        self.bridge.start = lambda **kwargs: (
+            self.store.started(
+                self.attempt["attempt_id"],
+                native_task_id="native-task",
+                workspace=self.workspace["path"],
+            )
+            or {"task_id": "native-task", "conversation_id": "native-session"}
+        )
+        adapter = OmpWorkAdapter(self.bridge)
+        self.addCleanup(adapter.close)
+        handle = self.launch(adapter)
+        prompt = (handle.directory / "context.txt").read_text()
+        self.assertIn("Always a string", prompt)
+        self.assertIn("recorded_decisions", prompt)
+        self.assertIn("not a requirement", prompt)
+
+    def test_a_review_attempt_never_receives_recorded_answers(self):
+        self.attempt["actor"] = "omp"
+        self.attempt["kind"] = "review"
+        self.store.decisions = [
+            {
+                "blocker_id": "b1",
+                "asked_by": "omp",
+                "question": "Which address form does the contract use?",
+                "condition": "Operator supplies the exact form",
+                "kind": "resolved",
+                "answer": "Always a string",
+                "evidence": [],
+                "answered_by": "operator",
+                "at": 1.0,
+                "plan_revision": self.attempt["plan_revision"],
+            }
+        ]
+        self.bridge.cancel = lambda *args, **kwargs: None
+        self.bridge.runtime = SimpleNamespace(guard=threading.Lock(), threads={})
+        self.bridge.start = lambda **kwargs: (
+            self.store.started(
+                self.attempt["attempt_id"],
+                native_task_id="native-task",
+                workspace=self.workspace["path"],
+            )
+            or {"task_id": "native-task", "conversation_id": "native-session"}
+        )
+        adapter = OmpWorkAdapter(self.bridge)
+        self.addCleanup(adapter.close)
+        handle = self.launch(adapter)
+        prompt = (handle.directory / "context.txt").read_text()
+        self.assertNotIn("Always a string", prompt)
+        self.assertNotIn("recorded_decisions", prompt)
 
     def test_an_implementation_attempt_receives_the_plans_pinned_context(self):
         self.attempt["actor"] = "omp"

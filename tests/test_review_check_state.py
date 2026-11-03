@@ -520,7 +520,15 @@ class ReviewCheckStateTests(unittest.TestCase):
             self.store.review_check_section(
                 {"action": "get", "step_id": "integration"}, **options
             )
-        self.case.change("heartbeat", token=attempt["token"])
+        # A heartbeat no longer moves the card, so it no longer invalidates a
+        # cursor either. Move the card with a real change instead.
+        self.case.change(
+            "block",
+            token=attempt["token"],
+            step_id=attempt["step_id"],
+            note="Cursor binding must follow a real card change",
+            condition="Operator resolves it",
+        )
         stale = self.store.review_check_section(
             request, section=section, cursor=first["next_cursor"], **options
         )

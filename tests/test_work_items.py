@@ -2247,15 +2247,19 @@ class WorkItemsTests(unittest.TestCase):
         self.agreed()
         attempt = self.reserve(autonomous=False)
         cursor = self.store.event_head()
+        # A heartbeat is liveness, not a card change, and writes no event; use a
+        # real mutation that both records history and echoes the credential.
         self.change(
-            "heartbeat",
+            "block",
             actor="omp",
             token=attempt["token"],
+            step_id=attempt["step_id"],
             note="Accidental echo " + attempt["token"],
+            condition="Operator resolves it",
         )
         observer = WorkStore(self.store.database, self.scope)
         events = observer.events(after=cursor)
-        self.assertEqual([event["kind"] for event in events], ["heartbeat"])
+        self.assertEqual([event["kind"] for event in events], ["block"])
         self.assertGreater(events[0]["event_id"], cursor)
         history = observer.perform(
             {"action": "history", "work_id": self.work_id}, actor="claude"
@@ -3305,9 +3309,19 @@ class WorkItemsTests(unittest.TestCase):
         self.assertEqual(hints[0]["step_id"], "backend")
         self.assertIn(
             f"unblock {self.work_id} --blocker {blocker['blocker_id']} --step backend "
-            f"--expected-revision {blocked['revision']} --resolution resolved",
+            f"--expected-revision {blocked['revision']} --operation-id ",
             hints[0]["command"],
         )
+        self.assertIn("--resolution resolved", hints[0]["command"])
+        # The CLI requires the id, and a paged read re-projects this section and
+        # compares its digest, so the same card at the same revision must render
+        # the identical command rather than a fresh identifier each time.
+        again = [
+            item
+            for item in self.view()["operator_commands"]
+            if item["action"] == "unblock"
+        ]
+        self.assertEqual(again[0]["command"], hints[0]["command"])
         # Markdown shows the same command without any transition on the card.
         rendered = self.store.report_markdown(blocked, actor="claude")
         self.assertIn("## Operator commands", rendered)
@@ -3434,6 +3448,185 @@ class WorkItemsTests(unittest.TestCase):
         activated = self.activate(note="activate")
         self.assertEqual(activated["status"], "paused")
         self.assertEqual(activated["plan_revision"], 2)
+
+    def test_heartbeat_is_liveness_and_does_not_move_the_card(self):
+        self.agreed()
+        attempt = self.reserve(autonomous=False)
+        before = self.view()
+        cursor = self.store.event_head()
+        acknowledged = self.change(
+            "heartbeat",
+            actor="omp",
+            token=attempt["token"],
+            step_id=attempt["step_id"],
+        )
+        after = self.view()
+        self.assertEqual(after["revision"], before["revision"])
+        self.assertEqual(acknowledged["revision"], before["revision"])
+        self.assertEqual(self.store.events(after=cursor), [])
+        self.assertIsNotNone(self.store.attempt(attempt["attempt_id"])["heartbeat_at"])
+
+    def test_blocked_attempt_still_settles_after_a_prompt_answer(self):
+        self.agreed()
+        attempt = self.reserve(autonomous=False)
+        output = self.output(attempt)
+        blocked = self.change(
+            "block",
+            actor="omp",
+            token=attempt["token"],
+            step_id=attempt["step_id"],
+            note="Which address form does the contract use?",
+            condition="Operator supplies the exact form",
+        )
+        blocker = next(
+            item
+            for step in blocked["steps"]
+            if step["id"] == attempt["step_id"]
+            for item in step["blockers"]
+        )
+        # The operator answers before the worker has finished settling, which
+        # used to turn this honest cooperative block into recovery_required.
+        self.change(
+            "unblock",
+            actor="operator",
+            step_id=attempt["step_id"],
+            blocker_id=blocker["blocker_id"],
+            resolution="resolved",
+            note="Always a string",
+            evidence=["Contract section 4"],
+        )
+        self.store.finish_attempt(
+            attempt["attempt_id"],
+            outcome="blocked",
+            answer="Stopped on the recorded question",
+            evidence=["Question recorded before stopping"],
+            output=output,
+            cost_usd=0.1,
+        )
+        settled = self.store.attempt(attempt["attempt_id"])
+        self.assertEqual(settled["state"], "blocked")
+        step = next(
+            item for item in self.view()["steps"] if item["id"] == attempt["step_id"]
+        )
+        self.assertEqual(step["checkpoint"]["attempt_id"], attempt["attempt_id"])
+
+    def test_recorded_decisions_are_projected_for_the_current_plan_revision(self):
+        self.agreed()
+        attempt = self.reserve(autonomous=False)
+        blocked = self.change(
+            "block",
+            actor="omp",
+            token=attempt["token"],
+            step_id=attempt["step_id"],
+            note="Which address form does the contract use?",
+            condition="Operator supplies the exact form",
+        )
+        blocker = next(
+            item
+            for step in blocked["steps"]
+            if step["id"] == attempt["step_id"]
+            for item in step["blockers"]
+        )
+        self.assertEqual(
+            self.store.resolved_decisions(
+                self.work_id, attempt["step_id"], attempt["plan_revision"]
+            ),
+            [],
+        )
+        self.change(
+            "unblock",
+            actor="operator",
+            step_id=attempt["step_id"],
+            blocker_id=blocker["blocker_id"],
+            resolution="resolved",
+            note="Always a string",
+            evidence=["Contract section 4"],
+        )
+        decisions = self.store.resolved_decisions(
+            self.work_id, attempt["step_id"], attempt["plan_revision"]
+        )
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]["answer"], "Always a string")
+        self.assertEqual(decisions[0]["answered_by"], "operator")
+        self.assertIn("address form", decisions[0]["question"])
+        # A decision taken under another plan revision answered another
+        # question and stays out of this attempt's briefing.
+        self.assertEqual(
+            self.store.resolved_decisions(
+                self.work_id, attempt["step_id"], attempt["plan_revision"] + 1
+            ),
+            [],
+        )
+
+    def test_recorded_decisions_stay_within_a_fixed_briefing_budget(self):
+        self.agreed()
+        attempt = self.reserve(autonomous=False)
+        for index in range(6):
+            blocked = self.change(
+                "block",
+                actor="omp",
+                token=attempt["token"],
+                step_id=attempt["step_id"],
+                note=f"Question {index} " + "q" * 2000,
+                condition="Operator supplies the exact form",
+            )
+            blocker = next(
+                item
+                for step in blocked["steps"]
+                if step["id"] == attempt["step_id"]
+                for item in step["blockers"]
+                if item["resolved_at"] is None
+            )
+            self.change(
+                "unblock",
+                actor="operator",
+                step_id=attempt["step_id"],
+                blocker_id=blocker["blocker_id"],
+                resolution="resolved",
+                note=f"Answer {index} " + "a" * 2000,
+                evidence=["e" * 2000],
+            )
+        decisions = self.store.resolved_decisions(
+            self.work_id, attempt["step_id"], attempt["plan_revision"]
+        )
+        self.assertGreaterEqual(len(decisions), 1)
+        self.assertLess(len(decisions), 6)
+        # The newest answers are the ones a continuing attempt needs.
+        self.assertIn("Answer 5", decisions[-1]["answer"])
+        self.assertLessEqual(len(json.dumps(decisions).encode()), 8000)
+
+    def test_stop_attestation_records_which_principal_made_it(self):
+        self.agreed()
+        attempt = self.reserve(autonomous=False)
+        identifier = attempt["attempt_id"]
+        self.store.confirm_stopped(identifier)
+        self.assertEqual(
+            self.store.attempt(identifier)["stop_attested_by"], "supervisor"
+        )
+        # The operator CLI attests the stop itself when the supervisor is gone;
+        # that is admissible, but it is not observed teardown and must not be
+        # recorded as though the supervisor had seen the child exit.
+        self.store.confirm_stopped(identifier, attested_by="operator")
+        self.assertEqual(self.store.attempt(identifier)["stop_attested_by"], "operator")
+        with self.assertRaisesRegex(ValueError, "attested by"):
+            self.store.confirm_stopped(identifier, attested_by="claude")
+
+    def test_shell_refusal_names_the_authority_for_each_condition(self):
+        from omp_tandem.work_items import _shell_grant_refusal
+
+        review = _shell_grant_refusal(True, "review")
+        self.assertIn("--allow-review-checks", review)
+        self.assertIn("--review-check-image", review)
+        # It must never offer to move or drop the declared check to get in.
+        self.assertNotIn("implementation step instead", review)
+        self.assertIn("still owed", review)
+        manual = _shell_grant_refusal(False, "implement")
+        self.assertIn("operator_commands", manual)
+        self.assertNotIn("--allow-review-checks", manual)
+        managed = _shell_grant_refusal(True, "implement")
+        self.assertIn("--allow-shell", managed)
+        self.assertIn("no participant can grant itself execution", managed)
+        self.assertEqual(len({review, manual, managed}), 3)
 
 
 class AttemptBudgetAndShellTests(WorkItemsTests):

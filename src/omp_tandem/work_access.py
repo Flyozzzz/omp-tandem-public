@@ -77,7 +77,15 @@ def perform_work(
     command = WorkCommand.model_validate(request)
     options = presentation or WorkPresentation()
     if options.section and command.action != "get":
-        raise ValueError("section requires action=get")
+        # Reading a section is a paged read, never a selector for a mutation:
+        # a command that both changed the card and paged through it would act
+        # once per page. Drop the field and send the mutation, then page the
+        # result with a separate get.
+        raise ValueError(
+            f"section requires action=get; '{command.action}' is a mutation, so "
+            f"send it without section and then read section='{options.section}' "
+            "with a separate action=get"
+        )
     key = (command.work_id, command.step_id)
     token = attempt_token or (
         claims.get(key)
