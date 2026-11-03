@@ -265,6 +265,19 @@ def _no_descriptor():
     yield None
 
 
+def _unique_member(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON member in the review request: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_constant(value: str):
+    raise ValueError(f"Invalid JSON constant in the review request: {value}")
+
+
 class ReviewStore:
     def __init__(self, db_path: Path, scope: ProjectScope, artifacts: ArtifactStore):
         self.db_path = db_path
@@ -505,6 +518,70 @@ class ReviewStore:
         finally:
             for fd in reversed(descriptors):
                 os.close(fd)
+
+    def import_request(self, path: str, expected_sha256: str) -> tuple[dict, dict]:
+        """Materialize a review request the caller wrote to a file in this project.
+
+        A coordinator that has to retype its whole contract into a tool argument
+        pays for it twice: once in the time and tokens of emitting it, and again
+        when it shortens the contract to keep the call manageable. The assembled
+        request can be written by ordinary code instead, and only its locator has
+        to pass through the model.
+
+        This is transport and nothing more. The materialized request is exactly
+        the request the inline form would have produced, the review that follows
+        owns its own frozen bytes, and neither capture nor replay reopens this
+        file afterwards: editing or deleting it later cannot change an accepted
+        run. The digest is the caller's assertion of which export was ingested,
+        not evidence that its contents are complete or authoritative.
+        """
+        if (
+            not isinstance(expected_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+        ):
+            raise ValueError(
+                "request_sha256 must be 64 lowercase hexadecimal characters, "
+                "the SHA-256 of the request file's raw bytes"
+            )
+        relative = _path(path)
+        # The request may be as large as a whole capture; the 4 MiB ceiling on one
+        # selected source file is not the right bound for the contract itself.
+        content, _, _ = self._working(relative, maximum=_MAX_TOTAL)
+        if content is None:
+            raise ValueError(
+                f"Review request file does not exist in the launch project: {path}"
+            )
+        digest = _sha(content)
+        if digest != expected_sha256:
+            raise ValueError(
+                f"Review request file digest does not match request_sha256: {path} "
+                f"holds {digest}. Re-read the file the caller intended, or correct "
+                "the digest; the plugin never ingests unverified request bytes."
+            )
+        try:
+            decoded = content.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(
+                f"Review request file is not valid UTF-8: {path}"
+            ) from None
+        try:
+            raw = json.loads(
+                decoded,
+                object_pairs_hook=_unique_member,
+                parse_constant=_reject_constant,
+            )
+        except ValueError as exc:
+            raise ValueError(f"Review request file is not valid JSON: {exc}") from None
+        if type(raw) is not dict:
+            raise ValueError(
+                "Review request file must hold one JSON object describing the request"
+            )
+        return raw, {
+            "kind": "file",
+            "path": relative,
+            "sha256": digest,
+            "bytes": len(content),
+        }
 
     def _identity(self, base: str, directory: str = "") -> dict:
         root = self._git(
@@ -793,9 +870,18 @@ class ReviewStore:
                 if request.source == "commit":
                     selected, mode = self._blob(commit_tree.get(path), directory)
                 if path in context_paths and selected is None:
+                    # Falling back to working-tree bytes here would certify a file
+                    # the reviewed source does not contain, so the caller chooses
+                    # which of the two different repairs it actually means.
                     raise ValueError(
-                        f"Required context is missing from the {request.source} source: {path}; "
-                        "provide an explicit expanded capture before review"
+                        f"Required context is missing from the {request.source} source: {path}. "
+                        "For supplemental material such as a policy, an authorization "
+                        "or a requirement, drop that path from context_paths and put its "
+                        "exact text in requirements, attributed to its path or record id "
+                        "and its revision, stating that it is not part of the reviewed "
+                        "source. For material that must belong to the reviewed code, "
+                        "capture the snapshot that contains it instead; that changes the "
+                        "review target and has to be explicit."
                     )
                 if selected is None and base is None and staged is None:
                     raise ValueError(

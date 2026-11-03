@@ -11,6 +11,8 @@ Read correction_round and verification.plan_deviation before spending another pa
 Only mechanical work or an unchanged explicitly approved plan skips fresh planning; state why.
 Use tandem_review_run for changes review: start once with a stable request_key, observe the same run_id.
 Independent clarification requires a new capture and blocked/partial closure, never author free text.
+Read blocked_on for what it asked for; an unchanged recapture of that gap is refused, not repeated.
+Send a large assembled request as request_file plus request_sha256 instead of retyping it inline.
 Use run reply for comparison questions, tandem_reply for ordinary exact task/question IDs; never continue to reply.
 For independent slices use tandem_team with a bounded DAG, disjoint owners and one integration sink.
 Teams use only available openai-codex subscription models. Follow pending_models/readers.selection;

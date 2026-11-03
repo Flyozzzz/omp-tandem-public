@@ -18,8 +18,9 @@ from contextlib import ExitStack, closing, contextmanager, suppress
 from uuid import UUID, uuid4
 
 from .automation_budget import AutomationBudget
+from .blockers import task_blockers
 from .execution import ExecutionOptions, conversation_usage, resolve_execution
-from .reviews import PublicationBusy, ReviewRequest, _json, publication_lock
+from .reviews import PublicationBusy, ReviewRequest, _json, _sha, publication_lock
 from .runtime_models import ACTIVE
 
 RUN_ACTIVE = frozenset({"starting", "running", "waiting_input"})
@@ -94,6 +95,12 @@ class ReviewRuns:
                 ("capture_id", "TEXT"),
                 ("capture_started", "INTEGER NOT NULL DEFAULT 0"),
                 ("capture_diagnostics_json", "TEXT"),
+                # Added in 3.20.0. Absent on every earlier row, which is why the
+                # equivalence guard below treats a missing key as "not comparable"
+                # rather than as a match.
+                ("request_transport_json", "TEXT"),
+                ("equivalence_key", "TEXT"),
+                ("prior_run_id", "TEXT"),
             ):
                 if name not in columns:
                     db.execute(
@@ -159,8 +166,23 @@ class ReviewRuns:
                 [*values.values(), run_id],
             )
 
+    def _receipt(self, request_key):
+        with closing(self.tasks.connect()) as db:
+            return db.execute(
+                "SELECT run_id, payload_json, request_transport_json FROM review_runs "
+                "WHERE owner=? AND request_key=?",
+                (self.owner, request_key),
+            ).fetchone()
+
     def start(
-        self, request_key, request, execution=None, budget_seconds=600, compare=True
+        self,
+        request_key,
+        request=None,
+        execution=None,
+        budget_seconds=600,
+        compare=True,
+        request_file=None,
+        request_sha256=None,
     ):
         if (
             not isinstance(request_key, str)
@@ -172,22 +194,50 @@ class ReviewRuns:
             raise ValueError("budget_seconds must be 1..7200")
         if type(compare) is not bool:
             raise ValueError("compare must be boolean")
-        request = ReviewRequest.model_validate(request)
+        if (request is None) == (request_file is None):
+            raise ValueError(
+                "Supply exactly one of request and request_file; an empty value is "
+                "not the same as omitting the argument"
+            )
+        if (request_file is None) != (request_sha256 is None):
+            raise ValueError(
+                "request_sha256 is required with request_file and forbidden without it"
+            )
         execution = ExecutionOptions.model_validate(execution or {}).model_dump(
             exclude_none=True
         )
+        settings = {
+            "execution": execution,
+            "budget_seconds": budget_seconds,
+            "compare": compare,
+        }
+        # Resolve the receipt before touching the filesystem. An exact repeat of an
+        # accepted reference is an acknowledgement this run already earned, so it
+        # must not depend on the transport file still existing or still matching.
+        if request_file is not None:
+            accepted = self._receipt(request_key)
+            if accepted and accepted["request_transport_json"]:
+                transport = json.loads(accepted["request_transport_json"])
+                stored = json.loads(accepted["payload_json"])
+                if transport.get("sha256") == request_sha256 and all(
+                    stored.get(key) == value for key, value in settings.items()
+                ):
+                    return self.view(accepted["run_id"])
+        transport = None
+        if request_file is not None:
+            # Deliberately outside the controller lock: ingestion reads the project
+            # filesystem and must not hold back other runs while it does.
+            request, transport = self.reviews.import_request(
+                request_file, request_sha256
+            )
+        request = ReviewRequest.model_validate(request)
         normalized = request.model_dump()
         for key in ("paths", "context_paths"):
             if normalized[key] is not None:
                 normalized[key] = sorted(set(normalized[key]))
-        payload = _json(
-            {
-                "request": normalized,
-                "execution": execution,
-                "budget_seconds": budget_seconds,
-                "compare": compare,
-            }
-        )
+        # Transport never enters the payload: an inline request and the same request
+        # read from a file are one logical request and must compare equal.
+        payload = _json({"request": normalized, **settings})
         with self.guard:
             if self.closing:
                 raise ValueError("MCP server is shutting down")
@@ -225,7 +275,8 @@ class ReviewRuns:
                 with self._writing():
                     db.execute(
                         "INSERT INTO review_runs (run_id, owner, request_key, payload_json, created, updated, "
-                        "deadline, status, phase, capture_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        "deadline, status, phase, capture_id, request_transport_json) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             run_id,
                             self.owner,
@@ -237,6 +288,7 @@ class ReviewRuns:
                             "starting",
                             "capture",
                             str(uuid4()),
+                            _json(transport) if transport else None,
                         ),
                     )
             # Both identity and attempt admission survive a lost response. Only this
@@ -374,6 +426,18 @@ class ReviewRuns:
                 if identifiers
                 else []
             )
+            # A clarification this stage could not use is recorded and the stage
+            # goes on, so by now it has left the live question field. Read it back
+            # here or the terminal result says only that something was incomplete.
+            blocked_on = task_blockers(db, identifiers)
+            prior = (
+                db.execute(
+                    "SELECT run_id, review_id, status, outcome FROM review_runs WHERE run_id=?",
+                    (run["prior_run_id"],),
+                ).fetchone()
+                if run.get("prior_run_id")
+                else None
+            )
         review_info = self.reviews.info(run["review_id"]) if run["review_id"] else None
         # A reserved run carries no request yet, so every field here is optional.
         payload = json.loads(run["payload_json"]) if run["payload_json"] else {}
@@ -443,6 +507,25 @@ class ReviewRuns:
                     ("comparison", comparison),
                 )
             },
+            # Counts of recorded entries, not of independently verified defects.
+            # They survive compaction so an incomplete assessment never looks as
+            # though it produced nothing.
+            "findings_counts": {
+                phase: len(result.get("findings", []) or []) if result else 0
+                for phase, result in (
+                    ("independent", independent),
+                    ("comparison", comparison),
+                )
+            },
+            **({"blocked_on": blocked_on} if blocked_on else {}),
+            **(
+                {"request_transport": json.loads(run["request_transport_json"])}
+                if run.get("request_transport_json")
+                else {}
+            ),
+            # A reference to work already done, never a reused verdict and never
+            # permission to skip this review.
+            **({"prior_equivalent_run": dict(prior)} if prior else {}),
             "usage": {
                 "scope": "OMP worker turns only; excludes coordinator usage",
                 "peer": conversation_usage(turns),
@@ -459,6 +542,8 @@ class ReviewRuns:
             if status == "completed"
             else "no_action"
             if status == "no_changes"
+            else "supply_context"
+            if status == "context_required"
             else "inspect_error",
         }
 
@@ -730,9 +815,74 @@ class ReviewRuns:
                 )
             elif not snapshot["change_count"] and not snapshot.get("corrective"):
                 self._update(run_id, status="no_changes")
+            elif refusal := self._settle_equivalence(current, snapshot):
+                self._stop(current, "context_required", refusal)
             else:
                 self._update(run_id, phase="independent")
             self.capture_results.pop(run_id, None)
+
+    def _settle_equivalence(self, run, snapshot):
+        """Record what this capture already equals, and refuse only a repeated gap.
+
+        Identical inputs do not entitle the caller to a cached verdict: another
+        assessment of the same bytes can find a defect the first one missed, so a
+        repeat of a successful review stays the caller's decision and is merely
+        reported. What is refused is narrower and not a judgement about value — a
+        previous run asked for material it did not have, and this capture does not
+        contain it either, so paying for the same answer cannot supply it.
+        """
+        payload = json.loads(run["payload_json"])
+        key = _sha(
+            _json(
+                {
+                    "schema": 1,
+                    "request": payload["request"],
+                    "code_fingerprint": snapshot["code_fingerprint"],
+                    "execution": payload.get("execution"),
+                    "compare": payload.get("compare"),
+                }
+            ).encode()
+        )
+        with closing(self.tasks.connect()) as db:
+            prior = db.execute(
+                "SELECT run_id, review_id, status, outcome, independent_task_id, "
+                "comparison_task_id FROM review_runs WHERE owner=? AND equivalence_key=? "
+                "AND run_id<>? AND status NOT IN ('starting','running','waiting_input') "
+                "ORDER BY updated DESC LIMIT 1",
+                (self.owner, key, run["run_id"]),
+            ).fetchone()
+            outstanding = None
+            if prior:
+                identifiers = [
+                    prior[column]
+                    for column in ("independent_task_id", "comparison_task_id")
+                    if prior[column]
+                ]
+                outstanding = (
+                    db.execute(
+                        "SELECT 1 FROM questions WHERE state='context_required' "
+                        f"AND task_id IN ({','.join('?' for _ in identifiers)}) LIMIT 1",
+                        identifiers,
+                    ).fetchone()
+                    if identifiers
+                    else None
+                )
+        self._update(
+            run["run_id"],
+            equivalence_key=key,
+            prior_run_id=prior["run_id"] if prior else None,
+        )
+        if outstanding is None:
+            return None
+        return (
+            "This capture is equivalent to review run "
+            f"{prior['run_id']} (review {prior['review_id']}, outcome "
+            f"{prior['outcome']}), which ended still requiring context it was not "
+            "given. The same inputs cannot supply that material, so no reviewer was "
+            "started and nothing was spent on a second assessment. Read blocked_on "
+            "of that run for the exact requests, add the material to a new request, "
+            "and start again; a fresh request_key alone does not repair a capture."
+        )
 
     def _reap_captures(self):
         with self.guard:

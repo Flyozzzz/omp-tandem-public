@@ -8,7 +8,7 @@
 
 OMP Tandem packages a local MCP bridge as a Claude Code plugin and a portable Agent Plugins package for Codex and compatible hosts. Other local MCP clients can use the same server without plugin support.
 
-**Package 3.19.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**Package 3.20.0** · [MIT License](../LICENSE) · [Releases](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels and webhooks](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 There are no built-in rules for a particular company, repository, or product. You supply product knowledge when needed. Project isolation is a generic data boundary, not a hardcoded project association.
 
@@ -352,6 +352,43 @@ Use `tandem_review_run` when the goal is reviewing changes, rather than manually
 ```
 
 `request_key` identifies this logical request within the owning MCP instance. Repeating the same normalized request returns the same `run_id`; changing its payload under that key conflicts. Use a new key for a genuinely new review, not as an automatic retry after a failure.
+
+#### Send the request as a file (since 3.20.0)
+
+A contract assembled from specifications, plans and decisions does not have to be retyped into the tool call. Write the same `ReviewRequest` as JSON with ordinary code, anywhere inside the launch project, and name it instead of `request`:
+
+```json
+{
+  "action": "start",
+  "request_key": "prepared-commit-review-1",
+  "request_file": "build/review-request.json",
+  "request_sha256": "<sha256 of that file's raw bytes>"
+}
+```
+
+Supply exactly one of `request` and `request_file`; `request_sha256` is required with the file and refused without it. The file is read once with the same no-follow bounded read as a selected source file, verified against the digest, decoded as strict UTF-8 and parsed as one JSON object with no duplicate members, then frozen. What follows is the inline request: the materialized contract, the capture and every stored identity are transport-independent, so the same request sent inline and by file produces the same normalized payload. Editing or deleting the file afterwards cannot change an accepted run, and an exact repeat of the same key and digest returns that run without reopening the file at all. `request_transport` in the run view records `path`, `sha256` and `bytes` for a file-sent request and is absent for an inline one.
+
+This removes the coordinator's copying, not the reviewer's reading: the same material still has to be read and still costs what it costs. The digest says which export was ingested, not that its contents are complete or authoritative.
+
+#### What an incomplete review still needs
+
+An independent stage cannot take a free-text answer, so a clarification it raises is recorded and the stage continues to a `partial` or `blocked` report. `blocked_on` on the terminal run, and on the detailed task result, says what that record asked for:
+
+```json
+{"blocked_on": {
+  "count": 1, "kinds": ["context_required"], "requires_new_capture": true, "reply_allowed": false,
+  "items": [{"question_id": "...", "task_id": "...", "stage": "independent", "kind": "context_required",
+             "question": "...", "context": "...", "requested_paths": ["specs/context.md"],
+             "requested_material": ["The complete plan text"], "reason": "...", "parse_status": "parsed",
+             "requires_new_capture": true, "reply_allowed": false, "recovery_action": "new_capture",
+             "next_step": "..."}]}}
+```
+
+`count`, `kinds`, `requires_new_capture`, `reply_allowed`, `truncated` and `reader` survive response compaction, and so do `findings_counts`: an incomplete assessment that still produced findings never looks as though it produced nothing. Large bodies move to the reader with `items: []` and `truncated: true`. `parse_status` separates a context that requested nothing (`absent`) from one this version did not recognise (`unrecognized`) and one that is not JSON (`invalid_json`), so an empty list never stands in for a parsing failure.
+
+Requested paths are the reviewer's request, not authorized scope: adding them is the caller's decision, and the recorded list is not proof that nothing else is missing. `recovery_action` is `new_capture` for an independent stage or a missing capture, and `resolve_then_new_task_or_attempt` for an expired or unresolved question elsewhere, which is answered outside this run and brought to a new authorized attempt.
+
+A capture equivalent to an earlier run that ended still needing context is refused before any reviewer starts, with status `context_required` and `next_action: "supply_context"`, naming that run: the same inputs cannot supply what it asked for, and a fresh `request_key` does not repair a capture. Any other equivalent capture is allowed and only reports `prior_equivalent_run`, because identical bytes are not a cached verdict — a second reading can find what the first missed, and whether that is worth its cost is the caller's decision, not the plugin's.
 
 Code captures the snapshot, launches only `think`, preserves the independent answer, and starts at most one comparison if author material exists and the independent task completed with a successful structured report. Empty selected changes produce `no_changes` without a model request. No author material means one stage: the run then reports `comparison_requested: true` with a `comparison_skipped` reason from the moment it starts, so an absent comparison is never mistaken for an unrequested one. Pass `compare=false` when a one-stage review is what you want, and both fields stay quiet. `partial`, `blocked`, failed or unstructured independent results stop the scenario rather than silently moving on.
 
@@ -1886,6 +1923,8 @@ uv run --no-project --python '>=3.12' python -I \
 ```
 
 For a standalone local MCP registration, omit `--approved-plugin`; the launcher requests the local development channel. Use `--delivery poll` to disable probes, `--no-webhook` for task events without HTTP, and `--check` to print the launch plan. Forward Claude arguments after `--`.
+
+A non-interactive client that polls with its own bounded waits wants `--delivery poll`, `--disable-channel` or `OMP_TANDEM_CHANNEL=0`. With the channel off the server builds no watchdog at all, so the `PostToolUse` hook finds nothing armed and stays silent instead of raising a probe the agent has to recognise as a control wake rather than an error. Polling is unaffected; this removes a wake nobody was waiting for.
 
 The launcher does not add a tool-permission bypass or change managed settings. Keep the client open to receive events. Organizational `channelsEnabled`/plugin allowlists still apply; a tested Team account previously blocked Channels, and the bridge did not bypass that restriction.
 

@@ -209,6 +209,17 @@ class ResultPresentation:
             )
             if result["answer_truncated"]:
                 result["truncated_fields"].append("answer")
+        blocked = result.get("blocked_on")
+        if isinstance(blocked, dict):
+            blocked = result["blocked_on"] = dict(blocked)
+            blocked["reader"] = readers["result"]
+            # The count, the kinds and the reader are what a caller needs to act;
+            # the bodies are recoverable. Losing the whole envelope would put the
+            # caller back where this release started, so it is never dropped.
+            if wire_size(blocked.get("items")) > 4000:
+                blocked["items"] = []
+                blocked["truncated"] = True
+                result["truncated_fields"].append("blocked_on.items")
         question = result.get("question")
         if isinstance(question, dict):
             question = result["question"] = dict(question)
@@ -242,6 +253,14 @@ class ResultPresentation:
             "watchdog",
             "answer_length",
             "answer_truncated",
+            # What an incomplete result requires next, and the fact that it still
+            # produced findings, are the two things a caller acts on. Its bodies
+            # are already bounded above, so keeping the envelope costs little and
+            # dropping it would hide the repair the result exists to name.
+            "blocked_on",
+            "findings_counts",
+            "findings_count",
+            "prior_equivalent_run",
         }
         candidates = sorted(
             (key for key in result if key not in protected),

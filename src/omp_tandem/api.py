@@ -1123,6 +1123,10 @@ def build_server(configuration: Bridge | RuntimeOptions):
             str | None, Field(min_length=1, max_length=200, pattern=r"\S")
         ] = None,
         request: ReviewRequest | None = None,
+        request_file: Annotated[
+            str | None, Field(min_length=1, max_length=4096, pattern=r"\S")
+        ] = None,
+        request_sha256: Annotated[str | None, Field(pattern=r"^[0-9a-f]{64}$")] = None,
         run_id: str | None = None,
         execution: ExecutionOptions | None = None,
         budget_seconds: Annotated[int | None, Field(ge=10, le=7200)] = None,
@@ -1133,20 +1137,41 @@ def build_server(configuration: Bridge | RuntimeOptions):
     ) -> dict:
         """Run one read-only review scenario without manually coordinating its native turns.
 
-        start: supply ReviewRequest and a stable request_key for this logical request. Reusing
-        the key returns the same run; a different payload conflicts. Code captures the snapshot,
-        runs independent think review, then at most one comparison if author material was supplied
-        and the independent report succeeded. Total budget defaults to 600 seconds, including
-        startup, both stages and questions. It never edits files or runs supplied test commands.
+        start: supply a stable request_key and exactly one of request or request_file. A
+        request_file is a project-relative path to the same ReviewRequest written as JSON by
+        ordinary code, with request_sha256 of its raw bytes; it is read once, verified and
+        frozen, so the contract never has to be retyped into this call and the file may change
+        afterwards without affecting the accepted run. Reusing the key returns the same run; a
+        different payload conflicts. Code captures the snapshot, runs independent think review,
+        then at most one comparison if author material was supplied and the independent report
+        succeeded. Total budget defaults to 600 seconds, including startup, both stages and
+        questions. It never edits files or runs supplied test commands.
         status/reply/cancel: use the returned run_id, never start again to wait. Replies require
         the current question_id. Full stage answers, findings, applicability and peer-only usage
         are assembled by code. Claims are not automatically accepted or applied. Missing context
-        needs an explicit new capture (context_paths), not hidden live reads.
+        needs an explicit new capture (context_paths), not hidden live reads: read blocked_on of
+        the terminal result for what was requested. A capture equivalent to an earlier run that
+        ended still needing context is refused before any reviewer starts, because the same
+        inputs cannot supply it; other equivalents only report prior_equivalent_run.
         """
         bridge = await runtime.get(ctx)
         await bridge.channel.bind(ctx)
         if action == "start":
-            require_fields(action, {"request_key": request_key, "request": request})
+            require_fields(action, {"request_key": request_key})
+            if (request is None) == (request_file is None):
+                raise ProtocolError(
+                    "invalid_fields",
+                    "start requires exactly one of request and request_file",
+                    fields=("request", "request_file"),
+                    allowed_fix="Send the request inline, or write it as JSON inside the launch project and name that path with its request_sha256.",
+                )
+            if (request_file is None) != (request_sha256 is None):
+                raise ProtocolError(
+                    "invalid_fields",
+                    "request_sha256 is required with request_file and forbidden without it",
+                    fields=("request_file", "request_sha256"),
+                    allowed_fix="Supply the SHA-256 of the request file's raw bytes, or drop both fields and send the request inline.",
+                )
             if run_id is not None:
                 raise ProtocolError(
                     "unexpected_fields",
@@ -1163,6 +1188,8 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 execution=execution,
                 budget_seconds=600 if budget_seconds is None else budget_seconds,
                 compare=True if compare is None else compare,
+                request_file=request_file,
+                request_sha256=request_sha256,
             )
             run_id = result["run_id"]
         else:
@@ -1176,6 +1203,8 @@ def build_server(configuration: Bridge | RuntimeOptions):
                 for value in (
                     request_key,
                     request,
+                    request_file,
+                    request_sha256,
                     execution,
                     budget_seconds,
                     compare,

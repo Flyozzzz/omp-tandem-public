@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from .acceptance import enforce_coverage
 from .artifacts import ArtifactStore
+from .blockers import extract_request
 from .findings import FindingStore
 from .models import AcceptanceSet, VerificationPlan, decode_outcome
 from .project_context import ProjectContextStore
@@ -50,23 +51,17 @@ class TaskInteraction:
         return bool(task["review_id"] and task["review_stage"] == "independent")
 
     def _require_snapshot(self, db, task_id, question):
-        try:
-            context = json.loads(question["context"])
-        except (ValueError, TypeError):
-            context = None
-        paths = context.get("requested_paths", []) if isinstance(context, dict) else []
-        if (
-            not isinstance(paths, list)
-            or len(paths) > 256
-            or any(not isinstance(path, str) for path in paths)
-        ):
-            paths = []
+        # One reader for both surfaces: what the worker is told here is what the
+        # coordinator later reads back out of this same row.
+        request = extract_request(question["context"])
         result = {
             "question_id": question["question_id"],
             "clarification_requires_new_snapshot": True,
             "reason": question["question"],
             "context": question["context"],
-            "requested_paths": list(dict.fromkeys(paths)),
+            "requested_paths": request["requested_paths"],
+            "requested_material": request["requested_material"],
+            "parse_status": request["parse_status"],
             "next_step": (
                 "End this stage blocked or partial. Declare the required context and "
                 "create a new immutable snapshot/attempt; do not reply with free text."

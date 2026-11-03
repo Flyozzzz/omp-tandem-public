@@ -8,7 +8,7 @@
 
 OMP Tandem 将本地 MCP 桥接服务打包为 Claude Code 插件，以及供 Codex 和兼容宿主使用的可移植 Agent Plugins 软件包。其他本地 MCP 客户端无需支持插件，也可以使用同一个服务器。
 
-**软件包 3.19.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
+**软件包 3.20.0** · [MIT 许可证](../LICENSE) · [发布版本](https://github.com/Flyozzzz/omp-tandem-public/releases) · [Channels 与 Webhook（英文）](channels.md) · [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 本项目不内置针对特定公司、代码仓库或产品的规则。需要产品知识时，由你提供。项目隔离是一种通用的数据边界，而不是硬编码的项目绑定。
 
@@ -1101,6 +1101,43 @@ OMP 会核对实际模型及其支持的思考等级。模型不支持所请求�
 
 `request_key` 是同一所属 MCP 实例（owner）内一个逻辑请求的稳定键，非空且最长 200 字符。同一键和同一规范化请求／配置／预算／比较开关返回同一 `run_id`；不同载荷冲突，不能当作悄悄更新快照。它不是跨重启的全局去重键。旧 owner 失效后，未完成运行变为 `interrupted`，不会重放捕获或已保留的阶段；先读取旧 `run_id`，有意重开工作时使用新的逻辑请求。MCP 宿主关闭后不会成为脱离宿主继续运行的后台作业。
 
+#### 以文件发送请求（自 3.20.0 起）
+
+由规格、计划与决策拼装出的契约不必再逐字写进工具调用。用普通代码把同一个 `ReviewRequest` 写成 JSON，放在启动项目内的任意位置，用它代替 `request`：
+
+```json
+{
+  "action": "start",
+  "request_key": "prepared-commit-review-1",
+  "request_file": "build/review-request.json",
+  "request_sha256": "<该文件原始字节的 sha256>"
+}
+```
+
+`request` 与 `request_file` 必须且只能提供一个；带 `request_file` 时 `request_sha256` 必填，不带时则被拒绝。该文件以与所选源文件相同的不跟随链接的有界读取方式读取一次，核对摘要，按严格 UTF-8 解码，解析为一个不含重复成员的 JSON 对象，然后冻结。之后它就是普通请求：物化后的契约、捕获以及全部已存身份都与传输方式无关，因此同一请求以内联方式和以文件方式发送会产生相同的规范化载荷。此后编辑或删除该文件都不会改变已接受的运行；同一键与同一摘要的精确重复会直接返回该运行，根本不再打开文件。运行视图中的 `request_transport` 为文件请求记录 `path`、`sha256` 与 `bytes`，内联请求则没有该字段。
+
+这省去的是协调者的誊抄，而不是审查者的阅读：同样的材料仍要读，仍要花同样的代价。摘要说明的是载入了哪一份导出，而不是其内容完整或具有权威性。
+
+#### 不完整的审查还缺什么
+
+独立阶段无法接受自由文本，因此它提出的澄清会被记录，阶段继续直到给出 `partial` 或 `blocked` 报告。终态运行以及任务详细结果上的 `blocked_on` 会说明当时请求了什么：
+
+```json
+{"blocked_on": {
+  "count": 1, "kinds": ["context_required"], "requires_new_capture": true, "reply_allowed": false,
+  "items": [{"question_id": "...", "task_id": "...", "stage": "independent", "kind": "context_required",
+             "question": "...", "context": "...", "requested_paths": ["specs/context.md"],
+             "requested_material": ["完整的计划正文"], "reason": "...", "parse_status": "parsed",
+             "requires_new_capture": true, "reply_allowed": false, "recovery_action": "new_capture",
+             "next_step": "..."}]}}
+```
+
+`count`、`kinds`、`requires_new_capture`、`reply_allowed`、`truncated` 与 `reader` 在响应压缩后仍然保留，`findings_counts` 同样如此：一次不完整但确实产出了发现的评估，绝不会看起来一无所获。过大的正文会移入 reader，并置 `items: []` 与 `truncated: true`。`parse_status` 区分三种情况：上下文没有提出任何请求（`absent`）、本版本无法识别（`unrecognized`）、根本不是 JSON（`invalid_json`）——空列表绝不冒充解析失败。
+
+被请求的路径是审查者的请求，而非已授权的范围：是否加入由调用方决定，而且这份记录并不证明再无其他缺失。对独立阶段或缺失的捕获，`recovery_action` 为 `new_capture`；对别处已过期或未解决的问题则为 `resolve_then_new_task_or_attempt`——那类问题在本次运行之外作答，再带入一次新的、获授权的尝试。
+
+若某次捕获与先前那个"结束时仍缺少上下文"的运行等价，则在任何审查者启动之前即被拒绝：状态为 `context_required`，`next_action` 为 `"supply_context"`，并指明那次运行。相同的输入无法提供它所缺的材料，换一个 `request_key` 也修不好捕获。其他任何等价的捕获都会被允许，只报告 `prior_equivalent_run`：相同的字节并不是被缓存的结论，第二次阅读可能发现第一次漏掉的东西，而这是否值得其开销由调用方决定，不由插件决定。
+
 若返回 `status=waiting_input` 和 `question`，使用该运行**当前问题**的实际 ID 回答：
 
 ```json
@@ -1773,6 +1810,8 @@ uv run --no-project --python '>=3.12' python -I \
 ```
 
 对于独立的本地 MCP 注册，省略 `--approved-plugin`；启动器会请求本地开发通道。使用 `--delivery poll` 禁用探测，使用 `--no-webhook` 仅接收任务事件而不启用 HTTP，使用 `--check` 打印启动方案。Claude 参数放在 `--` 之后转发。
+
+若客户端非交互、且本来就用自己的有界等待轮询，应使用 `--delivery poll`、`--disable-channel` 或 `OMP_TANDEM_CHANNEL=0`。关闭通道后服务端根本不会构建 watchdog，于是 `PostToolUse` 钩子找不到已装填的票据而保持沉默，不会抛出那种需要代理辨认为控制唤醒、而非错误的探测。这不影响轮询；去掉的只是无人等待的唤醒。
 
 启动器不会添加工具权限绕过机制，也不会修改受管设置。请保持客户端开启，以便接收事件。组织的 `channelsEnabled`／插件允许列表仍然生效；此前测试的一个 Team 账号曾被禁止使用 Channels，桥接服务没有绕过该限制。
 

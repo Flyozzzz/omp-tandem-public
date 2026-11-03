@@ -139,6 +139,10 @@ class TaskMessages:
                     else "Author proposal and rationale are withheld. Read requirements, criteria and saved code; formulate the problem independently first. Clarification cannot add free text to this stage: tandem_ask returns clarification_requires_new_snapshot, and the stage must end blocked/partial. Put exact missing paths in context as JSON requested_paths; a new capture/attempt is required."
                 ),
                 "exposure_limit": "Code, earlier conversation or supplied context may already expose a solution; do not claim a blind review after prior exposure.",
+                # A capture is what one caller chose to send, not the whole record
+                # of the project. Reporting its gaps is right; concluding from a
+                # gap that the thing is missing everywhere is a different claim.
+                "absence_limit": "Absent material means absent from this capture, not absent from the project. Report a missing authorization, decision or requirement as an evidence gap that blocks a complete verdict, with the exact material named for a new capture; do not report it as a finding that the work lacks authorization.",
             }
         return json.dumps(
             {

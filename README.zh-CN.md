@@ -95,7 +95,9 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 
 参见[精简视图、运行身份与恢复](docs/guide.zh-CN.md#compact-contracts)、[操作者解除阻塞](docs/guide.zh-CN.md#operator-unblock)。提示与通知不授予权限；解除阻塞不会恢复或授权工作。验收、应用和发布是各自独立的决定。
 
-最新已发布版本为 **[3.19.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.19.0)**。两位参与者现在自行约定共享卡片所在的 Git 仓库，而不再沿用客户端的启动目录。
+最新已发布版本为 **[3.20.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.20.0)**。评审请求可以用文件发送，而不完整的评审现在会说明自己还缺什么。
+
+**3.20.0 新增：**`tandem_review_run(action="start")` 接受 `request_file`——启动项目内存放同一个 `ReviewRequest`（JSON）的路径——以及必填的 `request_sha256`；契约由普通代码拼装，经过模型的只有这个定位符。在一次为期 21 小时的实测流水线中，该请求序列化为 102,598 个字符的工具入参，协调者为打印它两次分别花去 4 分 20 秒与 5 分 45 秒，而且把自己的需求裁到了字面的 `[cut: 20986 more characters]`，尽管该字段可接受 200,000 字符。传输不等于身份：物化后的请求、捕获与所有指纹都与内联形式一致，此后编辑该文件也不会改变已接受的运行。`blocked_on` 现在会投影独立阶段无法接受的澄清——存储的原文、`requested_paths`、`requested_material` 以及 `parse_status`——其核心与 `findings_counts` 不受响应压缩影响，于是 `partial` 不再读起来像一无所获，而会自己指明修复方式。与"结束时仍缺少上下文"的先前运行等价的捕获，会在任何评审者启动之前被拒绝；其他等价捕获则被允许，只报告 `prior_equivalent_run`——相同的字节并不是被缓存的结论。
 
 **3.19.0 新增：**`WorkPlan.repository` 以相对启动项目根目录的目录指明卡片的 Git 工作树；`null` 表示启动根目录，也就是此前所有卡片的含义。在父目录中打开的会话可以把卡片放在其下的 checkout 中——例如 WBS 根目录下的 `_repos/main-pipeline`——而数据命名空间不变，仍由客户端启动项目绑定。文件归属、声明路径观察、手动 claim 固定的 HEAD、提交解析、评审捕获与 `apply --expected-head` 都随该选择而定。卡片开放时它通过常规的 propose／激活路径修改，并在首次 claim 或授权时被永久固定；锁不会解除，历史中有执行记录的旧卡片同样视为已锁定。本次发布只支持手动路径——认领、在那里提交、提交该哈希、由评审者接受、用操作者 CLI 应用；无人值守授权、managed 工作树、自动捕获、native 派发与团队执行都会被指名拒绝，而不是做一半。
 

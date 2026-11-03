@@ -336,6 +336,10 @@ class Bridge:
             result["findings_next_offset"] = (
                 50 if len(result["findings"]) == 50 else None
             )
+            # Recorded entries on this page, not verified defects. It survives
+            # compaction so findings are never mistaken for absent when a result
+            # is incomplete and the bodies had to move to a reader.
+            result["findings_count"] = len(result["findings"])
         return result
 
     def recent(self, limit=20):

@@ -7,6 +7,7 @@ from contextlib import closing
 
 from .acceptance import project
 from .artifacts import ArtifactStore
+from .blockers import task_blockers
 from .execution import conversation_usage, failure_fact, task_usage
 from .models import AcceptanceSet, CheckRun, VerificationPlan, assess_checks
 from .project_context import ProjectContextStore
@@ -168,6 +169,12 @@ class TaskResults:
                 result["question"]["options"] = json.loads(question["options_json"])
             else:
                 result["next_action"] = "wait"
+        # A question this task could not answer stays recorded after the task ends.
+        # Without this projection a terminal partial result names no repair at all.
+        with closing(self.tasks.connect()) as db:
+            blocked_on = task_blockers(db, [task_id])
+        if blocked_on:
+            result["blocked_on"] = blocked_on
         artifact_ids = json.loads(task["result_artifacts"])
         all_artifacts = self.artifacts.for_task(task_id)
         if artifact_ids:
