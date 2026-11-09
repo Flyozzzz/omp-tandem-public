@@ -149,7 +149,9 @@ directory = Path(args[args.index('--session-dir') + 1])
 directory.mkdir(parents=True, exist_ok=True)
 path = Path(args[args.index('--resume') + 1]) if '--resume' in args else directory / (str(uuid4()) + '.jsonl')
 path.touch()
-model = {'id': 'peer', 'name': 'Peer', 'api': 'local', 'provider': 'local', 'baseUrl': 'http://invalid', 'reasoning': True}
+model = {'id': 'peer', 'name': 'Peer', 'api': 'local', 'provider': 'local', 'baseUrl': 'http://invalid', 'reasoning': True,
+         'input': ['text'], 'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0},
+         'contextWindow': None, 'maxTokens': None}
 messages = []
 emit({'type': 'ready', 'protocolVersion': 1})
 for line in sys.stdin:

@@ -14,7 +14,7 @@ from tests.helpers import PEER, RpcHarness
 TEAM_PEER = (
     PEER.replace(
         "'model': None",
-        "'model': {'provider':'openai-codex','id':'baseline','name':'Local','api':'local','baseUrl':'http://127.0.0.1','reasoning':True,'thinking':{'mode':'effort','efforts':['high']},'input':['text'],'contextWindow':200000,'maxTokens':20000,'cost':{'input':0,'output':0}}",
+        "'model': {'provider':'openai-codex','id':'baseline','name':'Local','api':'local','baseUrl':'http://127.0.0.1','reasoning':True,'thinking':{'mode':'effort','efforts':['high']},'input':['text'],'contextWindow':200000,'maxTokens':20000,'cost':{'input':0,'output':0,'cacheRead':0,'cacheWrite':0}}",
     )
     .replace(
         "        if scenario == 'missing-report':",

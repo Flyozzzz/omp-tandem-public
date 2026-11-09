@@ -830,12 +830,12 @@ wheels = [
 [[package]]
 name = "omp-rpc"
 version = "0.1.0"
-source = { url = "https://github.com/can1357/oh-my-pi/archive/daf07999c2fee9b22edc7bf8fea1fb6272e0df5e.tar.gz", subdirectory = "python/omp-rpc" }
-sdist = { hash = "sha256:aba914d6178d7d8e7d23f421983a233e69287ff1b26069ff6b35906941087843" }
+source = { url = "https://github.com/can1357/oh-my-pi/archive/21f1188cf88b2f534c092181968cd5a4d1a9c296.tar.gz", subdirectory = "sdk/python/omp-rpc" }
+sdist = { hash = "sha256:cc17a8d96329a5ab23b65211276c1573e2fe6f4d85e983a14d2ceb2b9192bad7" }
 
 [[package]]
 name = "omp-tandem"
-version = "3.21.0"
+version = "3.21.1"
 source = { editable = "." }
 dependencies = [
     { name = "docker" },
@@ -859,7 +859,7 @@ requires-dist = [
     { name = "fastmcp", specifier = "==2.14.7" },
     { name = "httpx", specifier = ">=0.28.1,<1" },
     { name = "mcp", specifier = ">=1.30,<2" },
-    { name = "omp-rpc", url = "https://github.com/can1357/oh-my-pi/archive/daf07999c2fee9b22edc7bf8fea1fb6272e0df5e.tar.gz", subdirectory = "python/omp-rpc" },
+    { name = "omp-rpc", url = "https://github.com/can1357/oh-my-pi/archive/21f1188cf88b2f534c092181968cd5a4d1a9c296.tar.gz", subdirectory = "sdk/python/omp-rpc" },
     { name = "pydantic", specifier = ">=2.11,<3" },
 ]
 

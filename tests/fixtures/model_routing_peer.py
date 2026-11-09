@@ -65,7 +65,7 @@ BASELINE = {
     "input": ["text", "image"],
     "contextWindow": 200000,
     "maxTokens": 20000,
-    "cost": {"input": 1, "output": 2},
+    "cost": {"input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0},
 }
 CATALOG = [BASELINE, {**BASELINE, "id": "alternative", "name": "Local alternative"}]
 if OPTIONS.get("single_candidate"):

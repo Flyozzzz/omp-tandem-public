@@ -1,21 +1,21 @@
 {
   "schema_version": 1,
-  "omp_version": "18.1.13",
-  "release_url": "https://github.com/can1357/oh-my-pi/releases/tag/v18.1.13",
-  "download_base": "https://github.com/can1357/oh-my-pi/releases/download/v18.1.13",
-  "sdk_revision": "daf07999c2fee9b22edc7bf8fea1fb6272e0df5e",
+  "omp_version": "18.18.3",
+  "release_url": "https://github.com/can1357/oh-my-pi/releases/tag/v18.18.3",
+  "download_base": "https://github.com/can1357/oh-my-pi/releases/download/v18.18.3",
+  "sdk_revision": "21f1188cf88b2f534c092181968cd5a4d1a9c296",
   "assets": {
     "darwin-arm64": {
       "name": "omp-darwin-arm64",
-      "sha256": "a4c5c9cc5b8222184d0d7429b0bb6ac2a92bbe45dd11bf68e4b1360050791909"
+      "sha256": "87e8e593046dfb1047e359ad845648ffc8bda91aa59a9785690d5107f562c32d"
     },
     "darwin-x64": {
       "name": "omp-darwin-x64",
-      "sha256": "224ee40faaff907359504749942d0df47860b96ba8098ca5127384554707f48a"
+      "sha256": "8c09dd1afafca855e817f5eb4f865a16fd31bb47a4bd205363cdf472ededb311"
     },
     "linux-x64": {
       "name": "omp-linux-x64",
-      "sha256": "3be5a308cc91e6f6bba148175fbe651d3583ff6d32ae221cb931dc08a64e1f39"
+      "sha256": "8c9a178fed74ec1da21aafb7d28cd9839b3b0c9e7d607c86cc3b6177355729f4"
     }
   }
 }

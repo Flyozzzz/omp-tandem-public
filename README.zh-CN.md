@@ -95,7 +95,10 @@ Python 依赖会自动在私有缓存中准备。OMP 安装和提供商认证仍
 
 参见[精简视图、运行身份与恢复](docs/guide.zh-CN.md#compact-contracts)、[操作者解除阻塞](docs/guide.zh-CN.md#operator-unblock)。提示与通知不授予权限；解除阻塞不会恢复或授权工作。验收、应用和发布是各自独立的决定。
 
-最新已发布版本为 **[3.21.0](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.21.0)**。共享工作不再重复询问操作者已经回答过的问题，心跳也不再推进卡片。
+最新已发布版本为 **[3.21.1](https://github.com/Flyozzzz/omp-tandem-public/releases/tag/v3.21.1)**。当 OMP 由提供方压缩上下文时，长任务不再失败。
+
+**3.21.1 新增：**OMP 可以在提供方一侧压缩长对话，并以动作为 `remote` 的 `auto_compaction_start` 事件报告。固定版本的 OMP RPC SDK 只接受 `context-full`、`handoff`、`shake` 和 `snapcompact`，遇到新值会抛出 `RpcError`，工作进程在压缩写入后立即退出，工作丢失，持有的 `tandem_work` 步骤进入 `recovery_required`。SDK 固定版本升级到 OMP 18.18.3，其协议接受 `remote`；回归测试现在会拒绝任何不支持它的固定版本。已因此失败的任务按常规操作者流程恢复（`pause`、`reconcile --resolution retry --confirm-stopped`、`resume`）。
+
 
 **3.21.0 新增：**记录在阻塞上的回答现在会送达下一次实现尝试。此前简报中根本没有阻塞，而 worker 读到的卡片只列出未解除的阻塞，于是操作者的答案被存下却在 worker 实际走过的每条路径上都不可见：在一张实测卡片中，连续三次尝试提出同一个问题并阻塞，花掉超过 4 美元却没有产出。`resolved_decisions` 在该尝试自身的计划修订范围内交付问题、答案、证据与回答者，并标注为记录而非许可；独立审查阶段仍然完全不会收到。心跳不再递增卡片的 CAS 修订，也不再写入历史事件，`revision_conflict` 因此不再是慢请求的常态，长时间有界等待也不再空醒。停在自己记录的问题上的尝试，即使操作者先行回答，也按协作式阻塞结算，而不是落入 `recovery_required`。`unblock` 的操作者模板带上了 CLI 必需的 `--operation-id`，且为推导而非随机，使分页读取不会让自己的游标失效。shell 授权拒绝会指明真正触发条件所对应的权限来源；通道状态不再读起来像是在证明唤醒覆盖；尝试停止由谁证实也被如实记录，而不是一律记为 supervisor。
 

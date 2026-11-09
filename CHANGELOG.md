@@ -1,5 +1,26 @@
 # Changelog
 
+## 3.21.1 — 2026-11-09
+
+A field report covering 14 failed tasks between 26 October and 7 November (OMP
+18.1.14, `openai-codex/gpt-6-astra`) found long tasks dying with
+`RpcError: Invalid RPC auto_compaction_start: auto_compaction_start.action must be one of: context-full, handoff, shake, snapcompact`.
+The report suspected OMP; the source shows the check lives in the pinned Python SDK,
+not in Tandem and not in the OMP binary.
+
+- Provider-native (remote) compaction makes OMP emit `auto_compaction_start` and
+  `auto_compaction_end` with `action: "remote"`. The pinned `omp-rpc` SDK
+  (`daf07999`) decoded `action` against a closed four-value set, raised `RpcError` on
+  the unknown value, and the worker exited right after the compaction was written to
+  the session log. The work was lost, and a held `tandem_work` step went to
+  `recovery_required`.
+- The SDK pin moves to OMP `v18.18.3` (`21f1188c`), whose wire schema accepts
+  `remote`. The SDK now lives under `sdk/python/omp-rpc` upstream, so the pin's
+  subdirectory changes with it. Tandem itself has no compaction handling to change.
+- Tasks already failed this way are not repaired by the upgrade; recover them with the
+  documented operator path (`pause`, `reconcile --resolution retry --confirm-stopped`,
+  `resume`).
+
 ## 3.21.0 — 2026-11-03
 
 Two field reports from autonomous work on other projects, covering 19-30 October on

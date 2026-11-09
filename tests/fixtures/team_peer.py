@@ -36,7 +36,7 @@ def model(selector):
         "contextWindow": 200000,
         "maxTokens": 20000,
         "toolCalling": True,
-        "cost": {"input": 1, "output": 2},
+        "cost": {"input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0},
     }
 
 
