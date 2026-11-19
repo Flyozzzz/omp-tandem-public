@@ -20,7 +20,7 @@ CORE_ESSENTIAL = frozenset(
 OPTIONAL_TOOLS = frozenset({"tandem_work", "tandem_publish_artifact"})
 # This is a compatibility gate, not a minimum-version guess. New runtimes require
 # the credential-free native transport check before joining this set.
-DISCOVERY_VERSIONS = frozenset({"18.1.13"})
+DISCOVERY_VERSIONS = frozenset({"18.1.13", "18.18.3"})
 
 
 def discovery_capability(executable, *, native_tools, timeout_seconds=3.0):
