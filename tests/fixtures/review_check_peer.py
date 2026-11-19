@@ -185,6 +185,8 @@ def omp():
                         "provider": "local",
                         "baseUrl": "http://invalid",
                         "reasoning": True,
+                        "input": ["text"],
+                        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
                     },
                     "thinkingLevel": "high",
                     "isStreaming": False,
