@@ -188,7 +188,12 @@ def omp():
                         "input": ["text"],
                         "contextWindow": None,
                         "maxTokens": None,
-                        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                        "cost": {
+                            "input": 0,
+                            "output": 0,
+                            "cacheRead": 0,
+                            "cacheWrite": 0,
+                        },
                     },
                     "thinkingLevel": "high",
                     "isStreaming": False,
