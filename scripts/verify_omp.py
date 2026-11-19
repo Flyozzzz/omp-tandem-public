@@ -1332,7 +1332,8 @@ def exercise_focus_transport(executable, root, agent, report):
                             denied = provider.results()["write"]
                             require(
                                 re.search(
-                                    r"not found|unknown tool|not available|not enabled|disabled|denied|not allowed|only.*xd",
+                                    r"not found|unknown tool|not available|not enabled|disabled|denied|not allowed|only.*xd"
+                                    r"|other filesystem paths are refused",
                                     str(denied),
                                     re.I,
                                 ),
